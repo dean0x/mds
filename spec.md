@@ -1,0 +1,542 @@
+# MDS Language Specification (v0.1)
+
+## 1. Overview
+
+MDS (Markdown Script) is a domain-specific language for composing, reusing, and compiling LLM prompts.
+
+- **Input**: `.mds` files (Markdown-native syntax with lightweight directives)
+- **Output**: Compiled Markdown/plain text strings
+- **Compiler**: Rust
+- **Audience**: Prompt engineers, AI developers
+
+---
+
+## 2. Design Principles
+
+1. Looks like Markdown — not code
+2. Minimal new syntax — leverage existing conventions (YAML frontmatter, `@` directives)
+3. Composable — imports, functions, modules
+4. Deterministic — same input always produces same output
+5. Fail fast — clear errors with file:line:col, no partial output
+
+---
+
+## 3. File Format
+
+- Extension: `.mds`
+- Encoding: UTF-8
+- Structure: optional frontmatter → directives/content (order-independent for directives)
+
+---
+
+## 4. Syntax
+
+### 4.1 Variables (YAML Frontmatter)
+
+```mds
+---
+name: Alice
+items: [apple, banana]
+premium: true
+count: 3
+---
+```
+
+**Rules:**
+
+- Standard YAML between `---` fences at file start
+- Types supported: string, number, boolean, array
+- Runtime vars (CLI `--vars vars.json`) override frontmatter values
+- No object/map type in v0.1
+
+---
+
+### 4.2 Interpolation
+
+```mds
+Hello {name}!
+```
+
+**Rules:**
+
+- Single braces: `{identifier}`
+- Valid interpolation: content must be a valid identifier (`[a-zA-Z_][a-zA-Z0-9_]*`) or function call
+- Escaping: `\{` produces a literal `{` in output
+- Inside fenced code blocks (triple backtick): no interpolation occurs (raw passthrough)
+- Undefined variable → compilation error (not silent empty string)
+
+---
+
+### 4.3 Conditionals
+
+```mds
+@if premium:
+Thanks for being premium!
+@end
+```
+
+With else:
+
+```mds
+@if premium:
+Premium content here.
+@else:
+Free tier content here.
+@end
+```
+
+**Rules:**
+
+- Condition is a variable name (truthy/falsy check)
+- Falsy values: `false`, `null`, empty string `""`, empty array `[]`, `0`
+- Everything else is truthy
+- Nesting: plain `@end`, resolved by innermost matching
+- No `@elseif` in v0.1 (use nested `@if` or restructure)
+
+---
+
+### 4.4 Loops
+
+```mds
+@for item in items:
+- {item}
+@end
+```
+
+**Rules:**
+
+- Iterates over arrays only
+- Loop variable (`item`) is block-scoped to the `@for...@end`
+- Loop variable shadows any outer variable with the same name
+- Iterating over a non-array → compilation error
+
+---
+
+### 4.5 Functions
+
+Definition:
+
+```mds
+@define greet(name):
+Hello {name}, welcome!
+@end
+```
+
+Invocation:
+
+```mds
+{greet("Alice")}
+```
+
+**Rules:**
+
+- Functions are pure text templates (no side effects)
+- Arguments are positional
+- Functions can call other functions (no recursion in v0.1)
+- Function body has its own scope; params shadow outer vars
+- No default arguments in v0.1
+
+---
+
+### 4.6 Imports
+
+MDS supports three import styles:
+
+**Alias import** — namespaces all exports under an alias:
+
+```mds
+@import "./utils.mds" as utils
+
+{utils.greet("Alice")}
+```
+
+**Merge import** — exports merge directly into current scope:
+
+```mds
+@import "./base.mds"
+
+{greet("Alice")}
+```
+
+**Selective import** — pick specific exports by name:
+
+```mds
+@import { greet, farewell } from "./utils.mds"
+
+{greet("Alice")}
+{farewell("Alice")}
+```
+
+**Rules:**
+
+- Relative paths only (no bare module names in v0.1)
+- `as alias` namespaces all exports: access via `{alias.name}`
+- Without alias (merge): exports enter current scope (name collision → compilation error)
+- Selective: only listed names are brought into scope
+- Circular imports → compilation error
+- Import resolution is recursive (imports can import)
+
+---
+
+### 4.7 Exports
+
+MDS supports three export styles:
+
+**Named export** — export a locally defined symbol:
+
+```mds
+@define greet(name):
+Hello {name}!
+@end
+
+@export greet
+```
+
+**Re-export from** — re-export a symbol from another module without importing it locally:
+
+```mds
+@export greet from "./greetings.mds"
+@export farewell from "./greetings.mds"
+```
+
+**Wildcard re-export** — re-export everything from another module:
+
+```mds
+@export * from "./formatting.mds"
+```
+
+**Rules:**
+
+- Only exported symbols are visible to importers
+- If no `@export` directives exist: everything is exported (default-public)
+- Once any `@export` is present: only explicitly exported symbols are visible
+- Exportable: functions, the prompt body (as `prompt`)
+- `@export from` does not bring the symbol into the current file's scope
+- `@export *` re-exports all exports from the target module
+- Name collisions across wildcard re-exports → compilation error
+
+---
+
+### 4.8 Includes
+
+```mds
+@import "./header.mds" as header
+
+@include header
+```
+
+**Rules:**
+
+- Renders an imported module's compiled prompt body inline
+- Every module with text content has an implicit `prompt` export
+- `@include alias` renders that module's prompt body at the include site
+- Module must be imported first via `@import`
+- A module with only function definitions and no body text → `@include` produces empty string (warning)
+
+---
+
+### 4.9 Module System Summary
+
+A complete barrel/index file example:
+
+```mds
+# prompts/greetings.mds
+@define hello(name):
+Hello {name}!
+@end
+
+@define welcome(name, role):
+Welcome {name}, you're joining as {role}.
+@end
+
+@export hello
+@export welcome
+```
+
+```mds
+# prompts/formatting.mds
+@define bullet_list(items):
+@for item in items:
+- {item}
+@end
+@end
+
+@define numbered_list(items):
+@for item in items:
+1. {item}
+@end
+@end
+
+@export bullet_list
+@export numbered_list
+```
+
+```mds
+# prompts/index.mds — barrel file
+@export * from "./greetings.mds"
+@export * from "./formatting.mds"
+```
+
+```mds
+# main.mds — consumer
+---
+user: Alice
+tools: [search, code, browse]
+---
+
+@import "./prompts/index.mds" as prompts
+
+{prompts.hello(user)}
+
+You have access to:
+{prompts.bullet_list(tools)}
+```
+
+Output:
+```markdown
+Hello Alice!
+
+You have access to:
+- search
+- code
+- browse
+```
+
+---
+
+## 5. Compilation Model
+
+| Phase | Description | Errors |
+|-------|-------------|--------|
+| 1. Parse | Tokenize → AST (frontmatter, directives, text nodes) | Syntax errors (unexpected token, unclosed block) |
+| 2. Resolve | Recursively load imports, build dependency graph | File not found, circular import |
+| 3. Validate | Check all references, types, arity | Undefined var/function, type mismatch, wrong arg count |
+| 4. Evaluate | Execute directives (expand loops, resolve conditions, call functions) | Iterate non-array, recursion detected |
+| 5. Render | Flatten evaluated tree → final Markdown string | (none expected) |
+
+### Error Format
+
+```
+error[E001]: undefined variable 'username'
+  --> src/welcome.mds:12:8
+   |
+12 | Hello {username}!
+   |        ^^^^^^^^ not defined in frontmatter or imports
+```
+
+Errors include file path, line number, column, and a contextual explanation. Compilation fails fast on first error — no partial output.
+
+---
+
+## 6. Scoping Rules
+
+1. **File scope** — frontmatter vars visible everywhere in that file
+2. **Runtime override** — `--vars` JSON values override frontmatter vars of the same name
+3. **Block scope** — `@for` loop vars scoped to their `@for...@end` block
+4. **Function scope** — params scoped to function body, shadow outer vars
+5. **Import scope** — namespaced (aliased) or merged (unaliased), never implicit leaking
+6. **Shadowing** — inner scope wins, no warning (intentional override)
+
+---
+
+## 7. CLI Interface
+
+```bash
+mds build input.mds -o output.md          # compile to file
+mds build input.mds                        # compile to stdout
+mds build input.mds --vars vars.json       # with runtime variables
+mds check input.mds                        # validate without rendering
+```
+
+---
+
+## 8. Complete Example
+
+### Input: `welcome.mds`
+
+```mds
+---
+name: Alice
+items: [apple, banana]
+premium: true
+---
+
+@import "./footer.mds" as footer
+
+@define list(items):
+@for item in items:
+- {item}
+@end
+@end
+
+Hello {name}!
+
+Your items:
+{list(items)}
+
+@if premium:
+Thanks for being premium!
+@else:
+Upgrade for premium features.
+@end
+
+@include footer
+```
+
+### Output: `welcome.md`
+
+```markdown
+Hello Alice!
+
+Your items:
+- apple
+- banana
+
+Thanks for being premium!
+
+[footer content here]
+```
+
+---
+
+## 9. Editor Integration
+
+### 9.1 File Association
+
+MDS files use the `.mds` extension. To get Markdown syntax highlighting immediately, configure your editor to treat `.mds` as Markdown:
+
+**VS Code** (`settings.json`):
+```json
+"files.associations": { "*.mds": "markdown" }
+```
+
+**Neovim** (`init.lua`):
+```lua
+vim.filetype.add({ extension = { mds = "markdown" } })
+```
+
+**Vim** (`~/.vimrc`):
+```vim
+autocmd BufNewFile,BufRead *.mds setfiletype markdown
+```
+
+**Emacs** (`init.el`):
+```elisp
+(add-to-list 'auto-mode-alist '("\\.mds\\'" . markdown-mode))
+```
+
+**Zed** (`settings.json`):
+```json
+"file_types": { "Markdown": ["mds"] }
+```
+
+**Helix** (`languages.toml`):
+```toml
+[[language]]
+name = "markdown"
+file-types = ["md", "markdown", "mds"]
+```
+
+**Sublime Text** — create `MDS.sublime-settings` in `Packages/User/`:
+```json
+{ "extensions": ["mds"] }
+```
+
+**JetBrains IDEs** (IntelliJ, WebStorm, PyCharm): Settings → Editor → File Types → Markdown → add `*.mds` pattern.
+
+### 9.2 Frontmatter Detection
+
+The MDS compiler also accepts `.md` files that contain MDS directives. To explicitly mark a `.md` file as MDS, add `type: mds` to the frontmatter:
+
+```mds
+---
+type: mds
+name: Alice
+---
+
+Hello {name}!
+```
+
+The compiler uses this detection order:
+1. `.mds` extension → always treated as MDS
+2. `.md` extension + `type: mds` frontmatter → treated as MDS
+3. `.md` extension without `type: mds` → rejected (not compiled)
+
+### 9.3 MDS-Specific Highlighting (Roadmap)
+
+File association gives standard Markdown highlighting, but `@` directives and `{var}` interpolation appear as plain text. Full MDS highlighting requires dedicated editor support:
+
+**Phase 1 — TextMate injection grammar (VS Code, Sublime Text)**
+
+A single JSON file (`mds.tmLanguage.json`) that injects into the Markdown grammar scope, adding keyword highlighting for `@import`, `@if`, `@for`, `@define`, `@end`, `@export`, `@include` and interpolation highlighting for `{var}`. Shipped as a VS Code extension.
+
+**Phase 2 — Tree-sitter grammar (Neovim, Helix, Zed)**
+
+A `tree-sitter-mds` grammar that extends Markdown parsing. Provides structural parsing — enabling code folding, text object selections, and indentation rules in addition to highlighting.
+
+**Phase 3 — LSP server**
+
+A language server (Rust) providing diagnostics, completions, go-to-definition for `@import` paths, hover info for variables, and validation errors. Works across all editors that support LSP.
+
+**Markdown Preview**: The recommended approach is to compile `.mds` → `.md` and preview the output. The CLI supports this: `mds build input.mds | less` or pipe to any Markdown viewer.
+
+---
+
+## 10. What's NOT in v0.1
+
+These are intentionally deferred to keep the language simple and the compiler focused:
+
+- Structured JSON output (chat message arrays)
+- Dot notation for object variables (`{user.name}`)
+- Object/map variable type
+- TypeScript/JS integration or runtime bindings
+- Built-in functions (upper, lower, join, etc.)
+- `@elseif` chains
+- Recursion
+- Macros, async functions, streaming
+- Default function arguments
+- URL-based imports (remote modules)
+- Source maps
+- Template inheritance
+- Conditional expressions (comparisons, logical operators in `@if`)
+
+---
+
+## 11. Grammar Summary
+
+```
+file            := frontmatter? (directive | text)*
+frontmatter     := "---\n" yaml_content "---\n"
+directive       := import | export | define | include | if_block | for_block
+
+import          := alias_import | merge_import | selective_import
+alias_import    := "@import" quoted_path "as" identifier
+merge_import    := "@import" quoted_path
+selective_import := "@import" "{" identifier_list "}" "from" quoted_path
+
+export          := named_export | reexport | wildcard_reexport
+named_export    := "@export" identifier
+reexport        := "@export" identifier "from" quoted_path
+wildcard_reexport := "@export" "*" "from" quoted_path
+
+define          := "@define" identifier "(" params? "):" body "@end"
+include         := "@include" identifier
+if_block        := "@if" expression ":" body ("@else:" body)? "@end"
+for_block       := "@for" identifier "in" identifier ":" body "@end"
+
+text            := (raw_text | interpolation | escaped_brace)*
+interpolation   := "{" (qualified_call | identifier | function_call) "}"
+qualified_call  := identifier "." identifier "(" arguments? ")"
+function_call   := identifier "(" arguments? ")"
+escaped_brace   := "\{"
+
+identifier      := [a-zA-Z_][a-zA-Z0-9_]*
+identifier_list := identifier ("," identifier)*
+quoted_path     := "\"" path_chars "\""
+```
+
+---
+
+## 12. Status
+
+v0.1 — Draft specification. Subject to change during implementation.
