@@ -227,6 +227,13 @@ fn evaluate_include(inc: &IncludeDirective, scope: &Scope) -> Result<String, Mds
         .get_namespace(&inc.alias)
         .ok_or_else(|| MdsError::undefined_var(&inc.alias))?;
 
+    if ns.prompt_body.is_none() {
+        eprintln!(
+            "warning: @include {} produces empty string (module has no body text)",
+            inc.alias
+        );
+    }
+
     Ok(ns.prompt_body.clone().unwrap_or_default())
 }
 

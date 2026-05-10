@@ -7,6 +7,7 @@ use crate::evaluator::evaluate;
 use crate::lexer::tokenize;
 use crate::parser::parse;
 use crate::scope::{FunctionDef, NamespaceScope, Scope};
+use crate::validator;
 use crate::value::Value;
 
 /// A resolved module with its AST, exports, and prompt body.
@@ -159,6 +160,9 @@ impl ModuleCache {
             }
         }
 
+        // Validate semantic correctness before evaluation
+        validator::validate(&module.body, &scope)?;
+
         // Evaluate the body to get prompt text
         let prompt_body = evaluate(&module.body, &mut scope)?;
         let prompt_body = if prompt_body.trim().is_empty() {
@@ -203,8 +207,10 @@ impl ModuleCache {
                 validate_import_path(path)?;
                 let import_path = resolve_path(base_dir, path);
                 let resolved = self.resolve(&import_path, runtime_vars)?;
-                // Merge exports into current scope
                 for (name, func) in resolved.get_all_exports() {
+                    if scope.get_function(&name).is_some() {
+                        return Err(MdsError::NameCollision { name });
+                    }
                     scope.set_function(&name, func);
                 }
                 for (name, value) in &resolved.vars {
