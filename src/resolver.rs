@@ -325,15 +325,15 @@ fn validate_file_type(path: &Path) -> Result<(), MdsError> {
 
 /// Parse YAML frontmatter into a map of values.
 pub fn parse_frontmatter(raw: &str) -> Result<HashMap<String, Value>, MdsError> {
-    let yaml: serde_yaml::Value = serde_yaml::from_str(raw).map_err(|e| MdsError::YamlError {
+    let yaml: serde_yml::Value = serde_yml::from_str(raw).map_err(|e| MdsError::YamlError {
         message: e.to_string(),
     })?;
 
     let mut vars = HashMap::new();
-    if let serde_yaml::Value::Mapping(map) = yaml {
+    if let serde_yml::Value::Mapping(map) = yaml {
         for (key, val) in map {
             let key_str = match key {
-                serde_yaml::Value::String(s) => s,
+                serde_yml::Value::String(s) => s,
                 _ => continue,
             };
             let value = Value::from_yaml(val).map_err(|e| MdsError::YamlError { message: e })?;

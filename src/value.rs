@@ -24,12 +24,12 @@ impl Value {
         }
     }
 
-    /// Convert a serde_yaml::Value into our Value enum.
-    pub fn from_yaml(yaml: serde_yaml::Value) -> Result<Value, String> {
+    /// Convert a serde_yml::Value into our Value enum.
+    pub fn from_yaml(yaml: serde_yml::Value) -> Result<Value, String> {
         match yaml {
-            serde_yaml::Value::Null => Ok(Value::Null),
-            serde_yaml::Value::Bool(b) => Ok(Value::Boolean(b)),
-            serde_yaml::Value::Number(n) => {
+            serde_yml::Value::Null => Ok(Value::Null),
+            serde_yml::Value::Bool(b) => Ok(Value::Boolean(b)),
+            serde_yml::Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
                     Ok(Value::Number(i as f64))
                 } else if let Some(f) = n.as_f64() {
@@ -38,16 +38,16 @@ impl Value {
                     Err(format!("unsupported number: {n:?}"))
                 }
             }
-            serde_yaml::Value::String(s) => Ok(Value::String(s)),
-            serde_yaml::Value::Sequence(seq) => {
+            serde_yml::Value::String(s) => Ok(Value::String(s)),
+            serde_yml::Value::Sequence(seq) => {
                 let items: Result<Vec<Value>, String> =
                     seq.into_iter().map(Value::from_yaml).collect();
                 Ok(Value::Array(items?))
             }
-            serde_yaml::Value::Mapping(_) => {
+            serde_yml::Value::Mapping(_) => {
                 Err("object/map types are not supported in MDS v0.1".to_string())
             }
-            serde_yaml::Value::Tagged(t) => Value::from_yaml(t.value),
+            serde_yml::Value::Tagged(t) => Value::from_yaml(t.value),
         }
     }
 

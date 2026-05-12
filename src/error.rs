@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use miette::{Diagnostic, SourceSpan};
 use thiserror::Error;
 
@@ -11,7 +13,7 @@ pub enum MdsError {
         #[label("{message}")]
         span: Option<SourceSpan>,
         #[source_code]
-        src: Option<miette::NamedSource<String>>,
+        src: Option<Arc<miette::NamedSource<String>>>,
     },
 
     #[error("undefined variable '{name}'")]
@@ -21,7 +23,7 @@ pub enum MdsError {
         #[label("not defined")]
         span: Option<SourceSpan>,
         #[source_code]
-        src: Option<miette::NamedSource<String>>,
+        src: Option<Arc<miette::NamedSource<String>>>,
     },
 
     #[error("undefined function '{name}'")]
@@ -34,7 +36,7 @@ pub enum MdsError {
         #[label("not defined")]
         span: Option<SourceSpan>,
         #[source_code]
-        src: Option<miette::NamedSource<String>>,
+        src: Option<Arc<miette::NamedSource<String>>>,
     },
 
     #[error("arity mismatch for '{name}': expected {expected} args, got {got}")]
@@ -46,7 +48,7 @@ pub enum MdsError {
         #[label("wrong number of arguments")]
         span: Option<SourceSpan>,
         #[source_code]
-        src: Option<miette::NamedSource<String>>,
+        src: Option<Arc<miette::NamedSource<String>>>,
     },
 
     #[error("type error: expected array for @for loop, got {got}")]
@@ -56,7 +58,7 @@ pub enum MdsError {
         #[label("not an array")]
         span: Option<SourceSpan>,
         #[source_code]
-        src: Option<miette::NamedSource<String>>,
+        src: Option<Arc<miette::NamedSource<String>>>,
     },
 
     #[error("circular import detected: {cycle}")]
@@ -122,7 +124,7 @@ impl MdsError {
         MdsError::Syntax {
             message: message.into(),
             span: Some(SourceSpan::new(offset.into(), len)),
-            src: Some(miette::NamedSource::new(file, source.to_string())),
+            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
         }
     }
 
@@ -144,7 +146,7 @@ impl MdsError {
         MdsError::UndefinedVariable {
             name: name.into(),
             span: Some(SourceSpan::new(offset.into(), len)),
-            src: Some(miette::NamedSource::new(file, source.to_string())),
+            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
         }
     }
 

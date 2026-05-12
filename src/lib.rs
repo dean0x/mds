@@ -1,5 +1,3 @@
-#![allow(clippy::result_large_err)]
-
 pub mod ast;
 pub mod error;
 pub mod evaluator;
