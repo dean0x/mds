@@ -272,20 +272,20 @@ fn empty_array_loop() {
 #[test]
 fn compile_str_simple() {
     let source = "---\nname: World\n---\nHello {name}!\n";
-    let result = mds::compile_str(source, None, None).unwrap();
+    let result = mds::compile_str_with(source, None, None).unwrap();
     assert!(result.contains("Hello World!"));
 }
 
 #[test]
 fn compile_str_no_frontmatter() {
-    let result = mds::compile_str("Just plain text.", None, None).unwrap();
+    let result = mds::compile_str_with("Just plain text.", None, None).unwrap();
     assert!(result.contains("Just plain text."));
 }
 
 #[test]
 fn undefined_function_error() {
     let source = "{nonexistent(\"arg\")}\n";
-    let result = mds::compile_str(source, None, None);
+    let result = mds::compile_str_with(source, None, None);
     assert!(result.is_err());
     let err = format!("{}", result.unwrap_err());
     assert!(
@@ -297,7 +297,7 @@ fn undefined_function_error() {
 #[test]
 fn undefined_namespace_in_qualified_call() {
     let source = "{missing_ns.greet(\"Alice\")}\n";
-    let result = mds::compile_str(source, None, None);
+    let result = mds::compile_str_with(source, None, None);
     assert!(result.is_err());
     let err = format!("{}", result.unwrap_err());
     assert!(
@@ -340,7 +340,7 @@ fn type_key_available_in_mds_files() {
 #[test]
 fn undefined_function_error_message_says_function() {
     let source = "{nonexistent_fn(\"arg\")}\n";
-    let result = mds::compile_str(source, None, None);
+    let result = mds::compile_str_with(source, None, None);
     assert!(result.is_err());
     let err = format!("{}", result.unwrap_err());
     assert!(

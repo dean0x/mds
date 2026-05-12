@@ -80,7 +80,13 @@ pub enum MdsError {
 
     #[error("import error: {message}")]
     #[diagnostic(code(mds::import))]
-    ImportError { message: String },
+    ImportError {
+        message: String,
+        #[label("import error")]
+        span: Option<SourceSpan>,
+        #[source_code]
+        src: Option<Arc<miette::NamedSource<String>>>,
+    },
 
     #[error("name collision: '{name}' is already defined")]
     #[diagnostic(code(mds::name_collision))]
@@ -123,7 +129,13 @@ pub enum MdsError {
 
     #[error("export error: {message}")]
     #[diagnostic(code(mds::export))]
-    ExportError { message: String },
+    ExportError {
+        message: String,
+        #[label("export error")]
+        span: Option<SourceSpan>,
+        #[source_code]
+        src: Option<Arc<miette::NamedSource<String>>>,
+    },
 }
 
 impl MdsError {
@@ -260,6 +272,36 @@ impl MdsError {
             path: path.into(),
             span: Some(SourceSpan::new(offset.into(), len)),
             src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
+        }
+    }
+
+    pub fn import_error(message: impl Into<String>) -> Self {
+        MdsError::ImportError {
+            message: message.into(),
+            span: None,
+            src: None,
+        }
+    }
+
+    pub fn import_error_at(
+        message: impl Into<String>,
+        file: &str,
+        source: &str,
+        offset: usize,
+        len: usize,
+    ) -> Self {
+        MdsError::ImportError {
+            message: message.into(),
+            span: Some(SourceSpan::new(offset.into(), len)),
+            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
+        }
+    }
+
+    pub fn export_error(message: impl Into<String>) -> Self {
+        MdsError::ExportError {
+            message: message.into(),
+            span: None,
+            src: None,
         }
     }
 }

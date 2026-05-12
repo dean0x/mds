@@ -26,7 +26,7 @@ enum Commands {
     },
     /// Validate an MDS file without rendering
     Check {
-        /// Input .mds file
+        /// Input .mds file (use "-" to read from stdin)
         input: PathBuf,
         /// JSON file with runtime variable overrides
         #[arg(long)]
@@ -37,6 +37,9 @@ enum Commands {
         /// Output filename
         #[arg(default_value = "hello.mds")]
         filename: PathBuf,
+        /// Overwrite existing file
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -72,7 +75,8 @@ fn run(cli: Cli) -> Result<(), miette::Error> {
                     .map_err(|e| miette::miette!("cannot read stdin: {e}"))?;
                 let cwd = std::env::current_dir()
                     .map_err(|e| miette::miette!("cannot determine current directory: {e}"))?;
-                mds::compile_str(&source, Some(&cwd), runtime_vars).map_err(miette::Error::from)?
+                mds::compile_str_with(&source, Some(&cwd), runtime_vars)
+                    .map_err(miette::Error::from)?
             } else {
                 mds::compile(&input, runtime_vars).map_err(miette::Error::from)?
             };
@@ -88,11 +92,27 @@ fn run(cli: Cli) -> Result<(), miette::Error> {
         }
         Commands::Check { input, vars } => {
             let runtime_vars = load_runtime_vars(vars)?;
-            mds::check(&input, runtime_vars).map_err(miette::Error::from)?;
-            eprintln!("OK: {}", input.display());
+            if input == Path::new("-") {
+                let source = std::io::read_to_string(std::io::stdin())
+                    .map_err(|e| miette::miette!("cannot read stdin: {e}"))?;
+                let cwd = std::env::current_dir()
+                    .map_err(|e| miette::miette!("cannot determine current directory: {e}"))?;
+                mds::check_str_with(&source, Some(&cwd), runtime_vars)
+                    .map_err(miette::Error::from)?;
+                eprintln!("OK: <stdin>");
+            } else {
+                mds::check(&input, runtime_vars).map_err(miette::Error::from)?;
+                eprintln!("OK: {}", input.display());
+            }
             Ok(())
         }
-        Commands::Init { filename } => {
+        Commands::Init { filename, force } => {
+            if filename.exists() && !force {
+                return Err(miette::miette!(
+                    "{} already exists (use --force to overwrite)",
+                    filename.display()
+                ));
+            }
             let starter = "\
 ---
 name: World

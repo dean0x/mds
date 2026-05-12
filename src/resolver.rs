@@ -27,6 +27,9 @@ pub struct ResolvedModule {
 /// Maximum import depth to prevent stack overflow from deeply chained imports.
 const MAX_IMPORT_DEPTH: usize = 64;
 
+/// Maximum file size (10 MB) to prevent runaway memory use.
+const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
 /// Module cache to avoid re-resolving the same file.
 pub struct ModuleCache {
     modules: HashMap<PathBuf, ResolvedModule>,
@@ -34,6 +37,8 @@ pub struct ModuleCache {
     resolving: HashSet<PathBuf>,
     /// Preserves insertion order of the resolving set for cycle path reconstruction.
     resolving_stack: Vec<PathBuf>,
+    /// Root directory for path-traversal prevention (set on first resolve).
+    root_dir: Option<PathBuf>,
 }
 
 impl Default for ModuleCache {
@@ -48,6 +53,7 @@ impl ModuleCache {
             modules: HashMap::new(),
             resolving: HashSet::new(),
             resolving_stack: Vec::new(),
+            root_dir: None,
         }
     }
 
@@ -60,6 +66,16 @@ impl ModuleCache {
         let canonical = path
             .canonicalize()
             .map_err(|_| MdsError::file_not_found(path.display().to_string()))?;
+
+        // Set root_dir on first resolve (entry point directory)
+        if self.root_dir.is_none() {
+            self.root_dir = Some(
+                canonical
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .to_path_buf(),
+            );
+        }
 
         // Check cache
         if let Some(cached) = self.modules.get(&canonical) {
@@ -74,9 +90,32 @@ impl ModuleCache {
 
         // Guard against excessively deep import chains
         if self.resolving.len() >= MAX_IMPORT_DEPTH {
-            return Err(MdsError::ImportError {
+            return Err(MdsError::import_error(format!(
+                "import depth exceeds maximum of {MAX_IMPORT_DEPTH} (possible deep chain)"
+            )));
+        }
+
+        // Prevent path traversal: resolved path must stay within the root directory
+        if let Some(ref root) = self.root_dir {
+            if !canonical.starts_with(root) {
+                return Err(MdsError::import_error(format!(
+                    "import path escapes project directory: {}",
+                    canonical.display()
+                )));
+            }
+        }
+
+        // Check file size before reading
+        let metadata = std::fs::metadata(&canonical).map_err(|e| MdsError::Io {
+            message: format!("cannot read {}: {e}", canonical.display()),
+        })?;
+        if metadata.len() > MAX_FILE_SIZE {
+            return Err(MdsError::Io {
                 message: format!(
-                    "import depth exceeds maximum of {MAX_IMPORT_DEPTH} (possible deep chain)"
+                    "file too large ({} bytes, max {} bytes): {}",
+                    metadata.len(),
+                    MAX_FILE_SIZE,
+                    canonical.display()
                 ),
             });
         }
@@ -124,6 +163,10 @@ impl ModuleCache {
         base_dir: &Path,
         runtime_vars: &HashMap<String, Value>,
     ) -> Result<ResolvedModule, MdsError> {
+        // Set root_dir on first use so path-traversal checks work for imports
+        if self.root_dir.is_none() {
+            self.root_dir = Some(base_dir.to_path_buf());
+        }
         let virtual_path = base_dir.join("<source>");
         self.process_module(source, "<source>", base_dir, virtual_path, runtime_vars)
     }
@@ -285,9 +328,9 @@ impl ModuleCache {
                     if let Some(func) = resolved.get_export(name) {
                         scope.set_function(name, func);
                     } else {
-                        return Err(MdsError::ImportError {
-                            message: format!("'{name}' is not exported from '{path}'"),
-                        });
+                        return Err(MdsError::import_error(format!(
+                            "'{name}' is not exported from '{path}'"
+                        )));
                     }
                 }
             }
@@ -336,15 +379,13 @@ fn resolve_path(base_dir: &Path, relative: &str) -> PathBuf {
 /// the project directory (e.g., null bytes).
 fn validate_import_path(path: &str) -> Result<(), MdsError> {
     if !path.starts_with("./") && !path.starts_with("../") {
-        return Err(MdsError::ImportError {
-            message: format!("import path must be relative (start with './' or '../'): \"{path}\""),
-        });
+        return Err(MdsError::import_error(format!(
+            "import path must be relative (start with './' or '../'): \"{path}\""
+        )));
     }
     // Reject null bytes which could truncate paths in some OS APIs
     if path.contains('\0') {
-        return Err(MdsError::ImportError {
-            message: "import path contains null byte".to_string(),
-        });
+        return Err(MdsError::import_error("import path contains null byte"));
     }
     Ok(())
 }

@@ -21,9 +21,10 @@ use value::Value;
 /// * `path` — Path to the .mds file
 /// * `runtime_vars` — Optional runtime variable overrides (from --vars JSON)
 pub fn compile(
-    path: &Path,
+    path: impl AsRef<Path>,
     runtime_vars: Option<HashMap<String, Value>>,
 ) -> Result<String, MdsError> {
+    let path = path.as_ref();
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let resolved = cache.resolve(path, &vars)?;
@@ -38,9 +39,17 @@ pub fn compile(
 ///
 /// # Arguments
 /// * `source` — MDS source code
+pub fn compile_str(source: &str) -> Result<String, MdsError> {
+    compile_str_with(source, None, None)
+}
+
+/// Compile MDS source code from a string with options.
+///
+/// # Arguments
+/// * `source` — MDS source code
 /// * `base_dir` — Base directory for resolving imports (defaults to current dir)
 /// * `runtime_vars` — Optional runtime variable overrides
-pub fn compile_str(
+pub fn compile_str_with(
     source: &str,
     base_dir: Option<&Path>,
     runtime_vars: Option<HashMap<String, Value>>,
@@ -67,10 +76,41 @@ pub fn compile_str(
 
 /// Check (validate) an MDS file without rendering output.
 /// Returns Ok(()) if the file is valid, or an error describing the problem.
-pub fn check(path: &Path, runtime_vars: Option<HashMap<String, Value>>) -> Result<(), MdsError> {
+pub fn check(
+    path: impl AsRef<Path>,
+    runtime_vars: Option<HashMap<String, Value>>,
+) -> Result<(), MdsError> {
+    let path = path.as_ref();
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     cache.resolve(path, &vars)?;
+    Ok(())
+}
+
+/// Check (validate) MDS source from a string without rendering output.
+pub fn check_str(source: &str) -> Result<(), MdsError> {
+    check_str_with(source, None, None)
+}
+
+/// Check (validate) MDS source from a string with options.
+pub fn check_str_with(
+    source: &str,
+    base_dir: Option<&Path>,
+    runtime_vars: Option<HashMap<String, Value>>,
+) -> Result<(), MdsError> {
+    let vars = runtime_vars.unwrap_or_default();
+    let cwd_buf;
+    let dir = match base_dir {
+        Some(d) => d,
+        None => {
+            cwd_buf = std::env::current_dir().map_err(|e| MdsError::Io {
+                message: format!("cannot determine current directory: {e}"),
+            })?;
+            cwd_buf.as_path()
+        }
+    };
+    let mut cache = ModuleCache::new();
+    cache.resolve_source(source, dir, &vars)?;
     Ok(())
 }
 
