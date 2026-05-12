@@ -1,7 +1,7 @@
 ---
 feature: mds-compiler
 name: MDS Compiler
-description: "Use when working on the MDS compilation pipeline, adding directives, modifying scope/variable handling, extending the module system, or debugging output rendering. Keywords: lexer, parser, evaluator, resolver, validator, scope, frontmatter, interpolation, directive, import, export, include, define, for, if, closure, lexical scope, prompt export."
+description: "Use when working on the MDS compilation pipeline, adding directives, modifying scope/variable handling, extending the module system, or debugging output rendering. Keywords: lexer, parser, evaluator, resolver, validator, scope, frontmatter, interpolation, directive, import, export, include, define, for, if, closure, lexical scope, prompt export, nested function calls, arg parsing."
 category: architecture
 directories: [src/, tests/]
 referencedFiles:
@@ -66,6 +66,16 @@ The `Module` struct holds an optional `Frontmatter` and a `Vec<Node>`. `Node` is
 
 `TextNode` is a struct (`{ text: String }`) with no offset field — offsets are not tracked for raw text. Expressions inside `{...}` are further typed as `Expr::Var`, `Expr::Call`, or `Expr::QualifiedCall`.
 
+**`Arg` enum** has three variants — this is the complete set as of the latest revision:
+
+| Variant | Meaning |
+|---|---|
+| `Arg::StringLiteral(String)` | Quoted string literal, e.g. `"hello"` |
+| `Arg::Var(String)` | Variable reference, e.g. `name` |
+| `Arg::Call { name, args: Vec<Arg> }` | Nested function call, e.g. `inner("arg")` |
+
+`Arg::Call` enables arbitrary nesting: `{outer(inner("arg"))}` parses as `Expr::Call { args: [Arg::Call { ... }] }`. Depth is bounded by `MAX_NESTING_DEPTH = 256` in the parser.
+
 All non-text AST nodes carry a byte `offset` into the original source. This is threaded through to `MdsError` variants to produce precise source-span diagnostics via `miette`.
 
 ### Scope (`src/scope.rs`)
@@ -96,24 +106,32 @@ Both `from_yaml` and `from_json` converters exist, with identical rejection of o
 
 ### Parser (`src/parser.rs`)
 
-The parser converts a token stream to a `Module` AST. Key hardening added:
+The parser converts a token stream to a `Module` AST. Key hardening:
 
-- `MAX_NESTING_DEPTH = 256` — enforced via a `depth` counter on the parser; rejects inputs with more than 256 nested `@if`/`@for`/`@define` blocks
+- `MAX_NESTING_DEPTH = 256` — enforced via a `depth` counter on the parser struct; shared between two independent limits: (1) `@if`/`@for`/`@define` block nesting via `enter_block()`, and (2) nested function call argument depth via `parse_args_inner`
+- `enter_block()` — extracted helper that increments `self.depth` and returns `Err` if the limit is exceeded; called at the start of `parse_if_block`, `parse_for_block`, and `parse_define_block`, with matching `self.depth -= 1` on exit
 - `is_valid_identifier(s)` — all directive names (function names, loop vars, aliases, export names) are validated: must start with ASCII letter or `_`, contain only ASCII alphanumeric or `_`
 - Duplicate `@define` parameter names are rejected at parse time
 - `@else` without colon gives a targeted error message ("use '@else:' with trailing colon")
 
-`parse_args` handles quoted string arguments with escape sequences (`\"`, `\'`, `\\`) and comma splitting that respects string boundaries.
+**Argument parsing internals**: `parse_args` and `parse_single_arg` are thin public wrappers that delegate to `parse_args_inner(s, depth)` and `parse_single_arg_inner(s, depth)`. The `_inner` variants carry the recursion depth. When a `parse_single_arg_inner` encounters `name(...)` syntax, it produces `Arg::Call` and recurses via `parse_args_inner(inner, depth + 1)`.
+
+`parse_args_inner` tracks open parentheses (`paren_depth`) so that commas inside nested calls are not treated as argument separators at the outer level. Quote-escaped commas inside string arguments are similarly skipped.
 
 ### Validator (`src/validator.rs`)
 
 Validates the AST against the current scope **before** evaluation. Catches: undefined variables in `{interpolation}` and `@if` conditions, undefined iterables in `@for`, undefined namespaces in `@include`, undefined functions and arity mismatches in calls, and undefined variable arguments to functions.
 
-**`@for` body validation**: The validator clones the outer scope, injects the loop variable as `Value::Null`, then recurses. Undefined-variable references inside the loop body are caught at validate time.
+**`@for` body validation**: The validator clones the outer scope, injects the loop variable as `Value::Null`, then recurses via top-level `validate()`. Undefined-variable references inside the loop body are caught at validate time.
 
-**`@define` body validation**: The validator clones the outer scope, injects all params as `Value::Null`, then recurses into the body. Undefined vars inside function bodies are caught at validate time, not evaluation time.
+**`@define` body validation**: The validator clones the outer scope, injects all params as `Value::Null`, then recurses via top-level `validate()`. Both `@for` and `@define` body recursion now delegate to the exported `validate()` function directly (previously an internal `validate_body` helper) — this ensures consistent error reporting.
 
-**Variable argument validation** (`validate_var_args`): For function calls where an argument is a variable reference (not a string literal), the validator checks the variable exists in scope. This is separate from arity checking.
+**`validate_var_args`** is extended to cover all three `Arg` variants:
+- `Arg::StringLiteral` — no validation needed
+- `Arg::Var` — variable existence check against scope
+- `Arg::Call { name, args }` — function existence check, arity check against `func.params.len()`, then recursion into `inner_args` via `validate_var_args`
+
+This means nested calls like `{outer(inner("arg"))}` are fully validated: both `outer` and `inner` must exist with correct arity before evaluation.
 
 The `arity_at` constructor provides source-span-aware arity errors from the validator, in addition to the existing `undefined_var_at`, `undefined_fn_at`, `name_collision_at`, etc.
 
@@ -162,6 +180,12 @@ The evaluator walks the AST and produces the final rendered string. It carries a
 
 `invoke_function` restores the function's captured closure scope (namespaces, functions, vars) before binding parameters, so params shadow captured vars correctly. After evaluation the pushed frame is popped.
 
+**`resolve_args` signature**: `resolve_args(args: &[Arg], scope: &mut Scope, call_stack: &mut HashSet<String>) -> Result<Vec<Value>, MdsError>`. The `call_stack` parameter was added so `Arg::Call` can invoke `call_function` during argument resolution, which itself may recurse. This is the key wiring that makes nested calls work at evaluation time.
+
+The `Arg::Call` arm in `resolve_args` recursively calls `resolve_args` for inner args, then `call_function` for the nested invocation, wrapping the `String` result in `Value::String`. This means the result of a nested call is always a `String` value regardless of what the inner function produces.
+
+Match arms in `evaluate_nodes` and `evaluate_expr` use direct expressions rather than intermediate `let` bindings — the simplification has no behavioral impact but reduces visual noise.
+
 `@include alias` looks up the aliased module's `prompt_body` from the namespace and injects it inline. If the included module has no body text, `evaluate_include` prints a warning to stderr and returns an empty string.
 
 `@import` and `@export` nodes are no-ops in the evaluator (handled entirely by the resolver).
@@ -197,6 +221,15 @@ The `ModuleCache` is created per top-level compile call (not shared across calls
 5. Resolve: if the directive requires file I/O (import-like), handle it in `process_module`'s AST walk
 6. Evaluate: add a match arm in `evaluate_nodes()` — `Import`/`Export` stay as no-ops there
 7. Add integration test fixture in `tests/fixtures/` and a test in `tests/integration.rs`
+
+### Adding a New Arg Variant
+
+If you add a fourth `Arg` variant, update all three sites that match on `Arg`:
+1. `parse_single_arg_inner` in `src/parser.rs` — construct the new variant
+2. `resolve_args` in `src/evaluator.rs` — evaluate to a `Value`
+3. `validate_var_args` in `src/validator.rs` — pre-evaluation validity check
+
+Failing to update any one of these produces an incomplete `match` compilation error, which is intentional — `Arg` has no wildcard arm.
 
 ### Error Reporting Pattern
 
@@ -238,10 +271,11 @@ Currently blocked by design: `Value::from_yaml` and `Value::from_json` both retu
 - **MAX_IMPORT_DEPTH = 64** — prevents stack overflow from deep chains (separate from circular import detection).
 - **MAX_FILE_SIZE = 10MB** — checked before reading; prevents memory exhaustion from large inputs.
 - **MAX_CALL_DEPTH = 128** — prevents stack overflow from deeply nested function calls.
-- **MAX_NESTING_DEPTH = 256** — parser-level limit on `@if`/`@for`/`@define` nesting depth.
+- **MAX_NESTING_DEPTH = 256** — shared constant used for two distinct limits: parser-level block nesting (`@if`/`@for`/`@define`) via `enter_block()`, and argument-level nested call depth via `parse_args_inner`.
 - **Object types unsupported** — YAML mappings and JSON objects are rejected at the value conversion layer.
 - **`.md` files require `type: mds`** in frontmatter to be compiled — `validate_file_type` enforces this.
 - **Recursion is detected at evaluation time** using the call stack set — the validator cannot catch recursive call chains because they depend on runtime scope.
+- **Nested call result is always a String** — `Arg::Call` evaluation wraps the inner function's output in `Value::String`. Functions that return non-string values (e.g., future numeric functions) will still produce a string when used as a nested argument.
 
 ## Anti-Patterns
 
@@ -252,6 +286,8 @@ Currently blocked by design: `Value::from_yaml` and `Value::from_json` both retu
 - **Adding object/map support without updating all Value methods** — `from_yaml`, `from_json`, `Display`, `is_truthy`, `type_name`, and `as_array` must all be consistent.
 - **Forgetting to capture closure scope in new definition-like directives** — any directive that defines a callable entity should call `scope.get_all_namespaces()`, `get_all_functions()`, and `get_all_vars()` at definition time so the callable works correctly when invoked from other modules.
 - **Adding functions to `process_module`'s scope without also capturing current scope into the FunctionDef** — if you add a function to scope after other functions are already captured, the previously captured siblings won't see the new function.
+- **Adding a new `Arg` variant without updating all three match sites** — parser (`parse_single_arg_inner`), evaluator (`resolve_args`), and validator (`validate_var_args`) all pattern-match exhaustively on `Arg`. Adding a variant without updating all three will produce a compile error, which is by design.
+- **Passing `resolve_args` without `call_stack`** — nested `Arg::Call` evaluation requires the call stack for recursion detection. Any future refactor that removes `call_stack` from `resolve_args` will silently allow unbounded recursion through argument nesting.
 
 ## Gotchas
 
@@ -269,24 +305,27 @@ Currently blocked by design: `Value::from_yaml` and `Value::from_json` both retu
 - **Project root is set on first resolve** — `root_dir` is set lazily. If `resolve_source` is called first, `root_dir` is the provided `base_dir`, not a git-root-discovered path.
 - **Cycle detection reconstructs the path from `resolving_stack`** — when circular import is detected, the error builds the chain by finding the repeated path in the stack and joining from that point with `→`. The stack is insertion-ordered, reflecting the actual import sequence.
 - **`TextNode` has no offset** — raw text nodes (`Node::Text(TextNode)`) do not carry a byte offset. Only structured nodes (`Interpolation`, `IfBlock`, `ForBlock`, `IncludeDirective`) have offsets for error reporting.
+- **`enter_block()` must be paired with `self.depth -= 1`** — the helper only increments; callers are responsible for decrementing after the block body is parsed. Failing to decrement will cause subsequent blocks to see an inflated depth and may reject valid inputs.
+- **`parse_single_arg` (no `_inner` suffix) exists only in `#[cfg(test)]`** — the public-facing name is the test shim. In production code, call `parse_single_arg_inner(s, 0)` directly (or use `parse_args`).
 
 ## Key Files
 
 - `src/lib.rs` — public API: `compile`, `compile_str`, `compile_str_with`, `check`, `check_str`, `check_str_with`, `load_vars_file`, `clean_output`
-- `src/ast.rs` — all AST types; the contract between parser and everything downstream
+- `src/ast.rs` — all AST types including `Arg::Call` for nested function call arguments; the contract between parser and everything downstream
 - `src/lexer.rs` — tokenizer; handles frontmatter, code fences, interpolation, directives
-- `src/parser.rs` — converts token stream to `Module` AST; identifier validation, nesting depth guard, duplicate param detection
+- `src/parser.rs` — converts token stream to `Module` AST; `enter_block()` helper, `parse_args_inner`/`parse_single_arg_inner` depth-bounded recursion, identifier validation, duplicate param detection
 - `src/resolver.rs` — orchestrator: drives the full pipeline, module cache, import resolution, closure capture, security guards
-- `src/evaluator.rs` — AST walker that produces the rendered string; restores closure scope, manages call stack and scope frames
-- `src/validator.rs` — pre-evaluation semantic checks with source-span error reporting; validates `@for` and `@define` bodies
+- `src/evaluator.rs` — AST walker that produces the rendered string; `resolve_args` handles `Arg::Call` via recursive evaluation with shared `call_stack`
+- `src/validator.rs` — pre-evaluation semantic checks; `validate_var_args` recursively validates nested `Arg::Call` arguments
 - `src/scope.rs` — scope chain with frames for variables, functions, and namespaces; closure capture helpers
 - `src/value.rs` — runtime value enum with YAML/JSON converters and display rules
 - `src/error.rs` — `MdsError` enum with miette diagnostics; builder methods for span-aware errors
-- `tests/integration.rs` — end-to-end tests covering all features and error paths
+- `tests/integration.rs` — 71 end-to-end tests covering all features, error paths, CLI integration, edge cases, and error format verification
 
 ## Related
 
 - `src/resolver.rs` — canonical reference for the module system, import semantics, and security guards
-- `src/evaluator.rs` — canonical reference for directive execution order, closure restore, and call-depth guards
+- `src/evaluator.rs` — canonical reference for directive execution order, closure restore, call-depth guards, and nested arg evaluation
 - `src/scope.rs` — canonical reference for closure capture API (`get_all_*` methods)
-- `tests/integration.rs` — covers all directive combinations; read before adding new directives to understand existing fixture patterns
+- `src/ast.rs` — canonical reference for `Arg` variants; any new argument form starts here
+- `tests/integration.rs` — covers all directive combinations including nested function calls; read before adding new directives to understand existing fixture patterns
