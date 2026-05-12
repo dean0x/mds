@@ -182,7 +182,10 @@ mod tests {
         });
         let scope = Scope::new();
         let result = validate(&[define], &scope, "test.mds", "");
-        assert!(result.is_ok(), "param reference inside @define must pass: {result:?}");
+        assert!(
+            result.is_ok(),
+            "param reference inside @define must pass: {result:?}"
+        );
     }
 }
 

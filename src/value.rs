@@ -199,14 +199,24 @@ mod tests {
     #[test]
     fn from_impls() {
         assert_eq!(Value::from("hello"), Value::String("hello".to_owned()));
-        assert_eq!(Value::from("hello".to_owned()), Value::String("hello".to_owned()));
+        assert_eq!(
+            Value::from("hello".to_owned()),
+            Value::String("hello".to_owned())
+        );
         assert_eq!(Value::from(3.14_f64), Value::Number(3.14));
         assert_eq!(Value::from(42_i64), Value::Number(42.0));
         assert_eq!(Value::from(7_i32), Value::Number(7.0));
         assert_eq!(Value::from(true), Value::Boolean(true));
         assert_eq!(Value::from(false), Value::Boolean(false));
         let v: Value = vec![1_i32, 2, 3].into();
-        assert_eq!(v, Value::Array(vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)]));
+        assert_eq!(
+            v,
+            Value::Array(vec![
+                Value::Number(1.0),
+                Value::Number(2.0),
+                Value::Number(3.0)
+            ])
+        );
     }
 
     #[test]

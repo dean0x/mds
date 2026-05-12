@@ -395,7 +395,10 @@ fn file_size_limit_rejects_huge_file() {
     let result = mds::compile(&huge, None);
     assert!(result.is_err());
     let err = format!("{}", result.unwrap_err());
-    assert!(err.contains("file too large"), "Expected 'file too large' error, got: {err}");
+    assert!(
+        err.contains("file too large"),
+        "Expected 'file too large' error, got: {err}"
+    );
 }
 
 #[test]
@@ -456,7 +459,10 @@ fn init_does_not_overwrite_existing_file() {
         .args(["init", existing.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(!output.status.success(), "init should fail on existing file without --force");
+    assert!(
+        !output.status.success(),
+        "init should fail on existing file without --force"
+    );
 
     // Verify original content preserved
     let content = std::fs::read_to_string(&existing).unwrap();
@@ -479,7 +485,10 @@ fn cross_module_frontmatter_var_in_function() {
 fn export_nonexistent_symbol_errors() {
     // @export phantom where 'phantom' is never defined should be a compile error.
     let result = mds::compile(&fixture("export_phantom.mds"), None);
-    assert!(result.is_err(), "expected error when exporting undefined symbol");
+    assert!(
+        result.is_err(),
+        "expected error when exporting undefined symbol"
+    );
     let err = format!("{}", result.unwrap_err());
     assert!(
         err.contains("phantom") || err.contains("export") || err.contains("not defined"),
@@ -497,11 +506,19 @@ fn check_stdin_valid() {
         .spawn()
         .and_then(|mut child| {
             use std::io::Write;
-            child.stdin.take().unwrap().write_all(b"---\nname: World\n---\nHello {name}!\n").unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"---\nname: World\n---\nHello {name}!\n")
+                .unwrap();
             child.wait_with_output()
         })
         .unwrap();
-    assert!(output.status.success(), "check stdin should succeed for valid input");
+    assert!(
+        output.status.success(),
+        "check stdin should succeed for valid input"
+    );
 }
 
 #[test]
@@ -509,7 +526,10 @@ fn invalid_identifier_in_for_var() {
     // @for x-y in items: — loop variable 'x-y' is not a valid identifier
     let source = "---\nitems: [a, b]\n---\n@for x-y in items:\n- {item}\n@end\n";
     let result = mds::compile_str_with(source, None, None);
-    assert!(result.is_err(), "invalid loop variable name must be rejected");
+    assert!(
+        result.is_err(),
+        "invalid loop variable name must be rejected"
+    );
     let err = format!("{}", result.unwrap_err());
     assert!(
         err.contains("invalid") || err.contains("x-y"),
@@ -556,7 +576,12 @@ fn selective_import_prompt_body() {
 fn set_flag_cli_overrides() {
     // --set name=Test should override the frontmatter variable 'name'
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_mds"))
-        .args(["build", fixture("simple.mds").to_str().unwrap(), "--set", "name=Test"])
+        .args([
+            "build",
+            fixture("simple.mds").to_str().unwrap(),
+            "--set",
+            "name=Test",
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()

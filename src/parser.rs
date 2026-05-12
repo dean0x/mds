@@ -8,7 +8,11 @@ const MAX_NESTING_DEPTH: usize = 256;
 
 /// Parse a stream of tokens into a Module AST.
 pub fn parse(tokens: &[Token]) -> Result<Module, MdsError> {
-    let mut parser = Parser { tokens, pos: 0, depth: 0 };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     parser.parse_module()
 }
 
@@ -303,9 +307,7 @@ impl Parser<'_> {
         let name = rest[..paren_start].trim().to_string();
 
         if !is_valid_identifier(&name) {
-            return Err(MdsError::syntax(format!(
-                "invalid function name: '{name}'"
-            )));
+            return Err(MdsError::syntax(format!("invalid function name: '{name}'")));
         }
 
         let params_str = &rest[paren_start + 1..paren_end];
@@ -368,9 +370,7 @@ fn parse_import_directive(directive: &str, offset: usize) -> Result<Node, MdsErr
 
         for name in &names {
             if !is_valid_identifier(name) {
-                return Err(MdsError::syntax(format!(
-                    "invalid import name: '{name}'"
-                )));
+                return Err(MdsError::syntax(format!("invalid import name: '{name}'")));
             }
         }
 
@@ -405,9 +405,7 @@ fn parse_import_directive(directive: &str, offset: usize) -> Result<Node, MdsErr
     if let Some(alias) = after.strip_prefix("as ") {
         let alias = alias.trim();
         if !is_valid_identifier(alias) {
-            return Err(MdsError::syntax(format!(
-                "invalid import alias: '{alias}'"
-            )));
+            return Err(MdsError::syntax(format!("invalid import alias: '{alias}'")));
         }
         Ok(Node::Import(ImportDirective::Alias {
             path,
@@ -460,9 +458,7 @@ fn parse_export_directive(directive: &str, offset: usize) -> Result<Node, MdsErr
         return Err(MdsError::syntax("@export requires a name"));
     }
     if !is_valid_identifier(&name) {
-        return Err(MdsError::syntax(format!(
-            "invalid export name: '{name}'"
-        )));
+        return Err(MdsError::syntax(format!("invalid export name: '{name}'")));
     }
     Ok(Node::Export(ExportDirective::Named { name, offset }))
 }
@@ -884,7 +880,10 @@ mod tests {
     #[test]
     fn is_valid_identifier_rejects_unicode() {
         assert!(!is_valid_identifier("café"), "unicode must be rejected");
-        assert!(!is_valid_identifier("αβγ"), "greek letters must be rejected");
+        assert!(
+            !is_valid_identifier("αβγ"),
+            "greek letters must be rejected"
+        );
         assert!(is_valid_identifier("hello"), "ascii ident must be accepted");
         assert!(is_valid_identifier("_foo_42"), "underscored ident ok");
     }

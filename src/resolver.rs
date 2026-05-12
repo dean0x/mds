@@ -406,7 +406,9 @@ impl ResolvedModule {
         if !self.has_prompt_export() {
             return None;
         }
-        self.prompt_body.as_ref().map(|body| Value::String(body.clone()))
+        self.prompt_body
+            .as_ref()
+            .map(|body| Value::String(body.clone()))
     }
 }
 
