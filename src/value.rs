@@ -76,6 +76,7 @@ impl Value {
     }
 
     /// Try to interpret this value as an array.
+    #[must_use]
     pub fn as_array(&self) -> Option<&Vec<Value>> {
         match self {
             Value::Array(a) => Some(a),
@@ -84,6 +85,7 @@ impl Value {
     }
 
     /// Return a human-readable type name for error messages.
+    #[must_use]
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::String(_) => "string",
@@ -100,7 +102,7 @@ impl fmt::Display for Value {
         match self {
             Value::String(s) => write!(f, "{s}"),
             Value::Number(n) => {
-                if *n == (*n as i64) as f64 {
+                if n.fract() == 0.0 {
                     write!(f, "{}", *n as i64)
                 } else {
                     write!(f, "{n}")
@@ -108,7 +110,7 @@ impl fmt::Display for Value {
             }
             Value::Boolean(b) => write!(f, "{b}"),
             Value::Array(items) => {
-                let parts: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+                let parts: Vec<String> = items.iter().map(ToString::to_string).collect();
                 write!(f, "{}", parts.join(", "))
             }
             Value::Null => write!(f, ""),

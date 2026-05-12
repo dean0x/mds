@@ -45,7 +45,7 @@ fn main() {
 
     let result = run(cli);
     if let Err(e) = result {
-        eprintln!("{:?}", e);
+        eprintln!("{e:?}");
         process::exit(1);
     }
 }

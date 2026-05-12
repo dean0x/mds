@@ -24,11 +24,7 @@ pub fn compile(path: &Path, runtime_vars: Option<HashMap<String, Value>>) -> Res
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let resolved = cache.resolve(path, &vars)?;
-
-    match resolved.prompt_body {
-        Some(body) => Ok(clean_output(&body)),
-        None => Ok(String::new()),
-    }
+    Ok(resolved.prompt_body.as_deref().map(clean_output).unwrap_or_default())
 }
 
 /// Compile MDS source code from a string.
@@ -44,22 +40,17 @@ pub fn compile_str(
 ) -> Result<String, MdsError> {
     let vars = runtime_vars.unwrap_or_default();
     let cwd;
-    let dir = match base_dir {
-        Some(d) => d,
-        None => {
-            cwd = std::env::current_dir().map_err(|e| MdsError::Io {
-                message: format!("cannot determine current directory: {e}"),
-            })?;
-            cwd.as_path()
-        }
+    let dir = if let Some(d) = base_dir {
+        d
+    } else {
+        cwd = std::env::current_dir().map_err(|e| MdsError::Io {
+            message: format!("cannot determine current directory: {e}"),
+        })?;
+        cwd.as_path()
     };
     let mut cache = ModuleCache::new();
     let resolved = cache.resolve_source(source, dir, &vars)?;
-
-    match resolved.prompt_body {
-        Some(body) => Ok(clean_output(&body)),
-        None => Ok(String::new()),
-    }
+    Ok(resolved.prompt_body.as_deref().map(clean_output).unwrap_or_default())
 }
 
 /// Check (validate) an MDS file without rendering output.
@@ -67,7 +58,7 @@ pub fn compile_str(
 pub fn check(path: &Path, runtime_vars: Option<HashMap<String, Value>>) -> Result<(), MdsError> {
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
-    let _resolved = cache.resolve(path, &vars)?;
+    cache.resolve(path, &vars)?;
     Ok(())
 }
 
@@ -77,8 +68,8 @@ fn clean_output(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut newline_count = 0;
 
-    // Trim leading whitespace/newlines
-    let s = s.trim_start_matches('\n').trim_start_matches("\r\n");
+    // Trim leading newlines (any line ending style)
+    let s = s.trim_start_matches(['\n', '\r']);
 
     for ch in s.chars() {
         if ch == '\n' {
