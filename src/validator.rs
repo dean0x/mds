@@ -30,13 +30,9 @@ fn validate_node(node: &Node, scope: &Scope, file: &str, source: &str) -> Result
                     block.condition.len(),
                 )
             })?;
-            for node in &block.then_body {
-                validate_node(node, scope, file, source)?;
-            }
+            validate(&block.then_body, scope, file, source)?;
             if let Some(else_body) = &block.else_body {
-                for node in else_body {
-                    validate_node(node, scope, file, source)?;
-                }
+                validate(else_body, scope, file, source)?;
             }
             Ok(())
         }
@@ -52,10 +48,7 @@ fn validate_node(node: &Node, scope: &Scope, file: &str, source: &str) -> Result
             })?;
             let mut inner = scope.clone();
             inner.set_var(&block.var, crate::value::Value::Null);
-            for node in &block.body {
-                validate_node(node, &inner, file, source)?;
-            }
-            Ok(())
+            validate(&block.body, &inner, file, source)
         }
         Node::Define(def) => {
             let mut inner = scope.clone();
@@ -70,10 +63,18 @@ fn validate_node(node: &Node, scope: &Scope, file: &str, source: &str) -> Result
         }
         Node::Include(inc) => {
             // Verify the referenced namespace exists (must have been @import-ed)
-            scope.get_namespace(&inc.alias).ok_or_else(|| {
-                MdsError::undefined_var_at(&inc.alias, file, source, inc.offset, inc.alias.len())
-            })?;
-            Ok(())
+            scope
+                .get_namespace(&inc.alias)
+                .ok_or_else(|| {
+                    MdsError::undefined_var_at(
+                        &inc.alias,
+                        file,
+                        source,
+                        inc.offset,
+                        inc.alias.len(),
+                    )
+                })
+                .map(|_| ())
         }
     }
 }

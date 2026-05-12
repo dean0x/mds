@@ -23,35 +23,25 @@ fn evaluate_nodes(
 
     for node in nodes {
         match node {
-            Node::Text(t) => {
-                output.push_str(&t.text);
-            }
-            Node::EscapedBrace => {
-                output.push('{');
-            }
+            Node::Text(t) => output.push_str(&t.text),
+            Node::EscapedBrace => output.push('{'),
             Node::Interpolation(interp) => {
-                let result = evaluate_expr(&interp.expr, scope, call_stack)?;
-                output.push_str(&result);
+                output.push_str(&evaluate_expr(&interp.expr, scope, call_stack)?);
             }
             Node::If(block) => {
-                let result = evaluate_if(block, scope, call_stack)?;
-                output.push_str(&result);
+                output.push_str(&evaluate_if(block, scope, call_stack)?);
             }
             Node::For(block) => {
-                let result = evaluate_for(block, scope, call_stack)?;
-                output.push_str(&result);
+                output.push_str(&evaluate_for(block, scope, call_stack)?);
             }
             Node::Define(block) => {
-                // Register function in scope
-                let func = FunctionDef::from(block);
-                scope.set_function(&block.name, func);
+                scope.set_function(&block.name, FunctionDef::from(block));
             }
             Node::Import(_) | Node::Export(_) => {
                 // Handled by resolver, skip during evaluation
             }
             Node::Include(inc) => {
-                let result = evaluate_include(inc, scope)?;
-                output.push_str(&result);
+                output.push_str(&evaluate_include(inc, scope)?);
             }
         }
     }

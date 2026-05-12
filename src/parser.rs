@@ -39,6 +39,17 @@ impl Parser<'_> {
         }
     }
 
+    /// Increment nesting depth, returning an error if the limit is exceeded.
+    fn enter_block(&mut self) -> Result<(), MdsError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(MdsError::syntax(format!(
+                "nesting depth exceeds maximum of {MAX_NESTING_DEPTH}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Consume the closing `@end` token, returning an error if absent or wrong.
     fn consume_end(&mut self, block_name: &str) -> Result<(), MdsError> {
         if self.pos >= self.tokens.len() {
@@ -191,12 +202,7 @@ impl Parser<'_> {
     }
 
     fn parse_if_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
-        self.depth += 1;
-        if self.depth > MAX_NESTING_DEPTH {
-            return Err(MdsError::syntax(format!(
-                "nesting depth exceeds maximum of {MAX_NESTING_DEPTH}"
-            )));
-        }
+        self.enter_block()?;
 
         let condition = rest
             .trim()
@@ -241,12 +247,7 @@ impl Parser<'_> {
     }
 
     fn parse_for_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
-        self.depth += 1;
-        if self.depth > MAX_NESTING_DEPTH {
-            return Err(MdsError::syntax(format!(
-                "nesting depth exceeds maximum of {MAX_NESTING_DEPTH}"
-            )));
-        }
+        self.enter_block()?;
 
         let rest = rest.trim();
         let rest = rest
@@ -289,12 +290,7 @@ impl Parser<'_> {
     }
 
     fn parse_define_block(&mut self, rest: &str, _offset: usize) -> Result<Node, MdsError> {
-        self.depth += 1;
-        if self.depth > MAX_NESTING_DEPTH {
-            return Err(MdsError::syntax(format!(
-                "nesting depth exceeds maximum of {MAX_NESTING_DEPTH}"
-            )));
-        }
+        self.enter_block()?;
 
         let rest = rest.trim();
         let rest = rest
