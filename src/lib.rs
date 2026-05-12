@@ -46,14 +46,15 @@ pub fn compile_str(
     runtime_vars: Option<HashMap<String, Value>>,
 ) -> Result<String, MdsError> {
     let vars = runtime_vars.unwrap_or_default();
-    let cwd;
-    let dir = if let Some(d) = base_dir {
-        d
-    } else {
-        cwd = std::env::current_dir().map_err(|e| MdsError::Io {
-            message: format!("cannot determine current directory: {e}"),
-        })?;
-        cwd.as_path()
+    let cwd_buf;
+    let dir = match base_dir {
+        Some(d) => d,
+        None => {
+            cwd_buf = std::env::current_dir().map_err(|e| MdsError::Io {
+                message: format!("cannot determine current directory: {e}"),
+            })?;
+            cwd_buf.as_path()
+        }
     };
     let mut cache = ModuleCache::new();
     let resolved = cache.resolve_source(source, dir, &vars)?;

@@ -13,9 +13,9 @@ struct Parser<'a> {
     pos: usize,
 }
 
-impl<'a> Parser<'a> {
+impl Parser<'_> {
     fn parse_module(&mut self) -> Result<Module, MdsError> {
-        let frontmatter = self.parse_frontmatter()?;
+        let frontmatter = self.parse_frontmatter();
         let body = self.parse_body(&[])?;
         Ok(Module { frontmatter, body })
     }
@@ -30,9 +30,31 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_frontmatter(&mut self) -> Result<Option<Frontmatter>, MdsError> {
+    /// Consume the closing `@end` token, returning an error if absent or wrong.
+    fn consume_end(&mut self, block_name: &str) -> Result<(), MdsError> {
+        if self.pos >= self.tokens.len() {
+            return Err(MdsError::syntax(format!(
+                "unclosed {block_name} block (missing @end)"
+            )));
+        }
+        match &self.tokens[self.pos] {
+            Token::Directive(d, _) if d.trim() == "@end" => {
+                self.pos += 1;
+                Ok(())
+            }
+            Token::Directive(d, _) => Err(MdsError::syntax(format!(
+                "expected @end to close {block_name} block, got '{}'",
+                d.trim()
+            ))),
+            _ => Err(MdsError::syntax(format!(
+                "expected @end to close {block_name} block"
+            ))),
+        }
+    }
+
+    fn parse_frontmatter(&mut self) -> Option<Frontmatter> {
         if !matches!(self.peek(), Some(Token::FrontmatterFence(_))) {
-            return Ok(None);
+            return None;
         }
         self.pos += 1; // skip opening fence
 
@@ -48,7 +70,7 @@ impl<'a> Parser<'a> {
         };
 
         self.skip_if_frontmatter_fence();
-        Ok(fm)
+        fm
     }
 
     /// Parse body nodes until we hit a terminator directive or end of tokens.
@@ -133,10 +155,10 @@ impl<'a> Parser<'a> {
             return self.parse_define_block(rest, offset);
         }
         if trimmed.starts_with("@import") {
-            return self.parse_import_directive(trimmed, offset);
+            return parse_import_directive(trimmed, offset);
         }
         if trimmed.starts_with("@export") {
-            return self.parse_export_directive(trimmed, offset);
+            return parse_export_directive(trimmed, offset);
         }
         if let Some(rest) = trimmed.strip_prefix("@include ") {
             let alias = rest.trim().to_string();
@@ -172,23 +194,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        // Consume @end
-        if self.pos < self.tokens.len() {
-            if let Token::Directive(d, _) = &self.tokens[self.pos] {
-                if d.trim() == "@end" {
-                    self.pos += 1;
-                } else {
-                    return Err(MdsError::syntax(format!(
-                        "expected @end to close @if block, got '{}'",
-                        d.trim()
-                    )));
-                }
-            } else {
-                return Err(MdsError::syntax("expected @end to close @if block"));
-            }
-        } else {
-            return Err(MdsError::syntax("unclosed @if block (missing @end)"));
-        }
+        self.consume_end("@if")?;
 
         Ok(Node::If(IfBlock {
             condition,
@@ -217,23 +223,7 @@ impl<'a> Parser<'a> {
 
         let body = self.parse_body(&["@end"])?;
 
-        // Consume @end
-        if self.pos < self.tokens.len() {
-            if let Token::Directive(d, _) = &self.tokens[self.pos] {
-                if d.trim() == "@end" {
-                    self.pos += 1;
-                } else {
-                    return Err(MdsError::syntax(format!(
-                        "expected @end to close @for block, got '{}'",
-                        d.trim()
-                    )));
-                }
-            } else {
-                return Err(MdsError::syntax("expected @end to close @for block"));
-            }
-        } else {
-            return Err(MdsError::syntax("unclosed @for block (missing @end)"));
-        }
+        self.consume_end("@for")?;
 
         Ok(Node::For(ForBlock {
             var,
@@ -260,39 +250,19 @@ impl<'a> Parser<'a> {
 
         let name = rest[..paren_start].trim().to_string();
         let params_str = &rest[paren_start + 1..paren_end];
-        let params: Vec<String> = if params_str.trim().is_empty() {
-            Vec::new()
-        } else {
-            params_str
-                .split(',')
-                .map(|p| p.trim().to_string())
-                .collect()
-        };
+        let params: Vec<String> = params_str
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
 
         let body = self.parse_body(&["@end"])?;
 
-        // Strip leading newline from body (whitespace handling)
-        let body = strip_leading_newline(body);
-        // Strip trailing newline from body
-        let body = strip_trailing_newline(body);
+        // Trim surrounding newlines added by the block's colons and @end lines.
+        let body = strip_trailing_newline(strip_leading_newline(body));
 
-        // Consume @end
-        if self.pos < self.tokens.len() {
-            if let Token::Directive(d, _) = &self.tokens[self.pos] {
-                if d.trim() == "@end" {
-                    self.pos += 1;
-                } else {
-                    return Err(MdsError::syntax(format!(
-                        "expected @end to close @define block, got '{}'",
-                        d.trim()
-                    )));
-                }
-            } else {
-                return Err(MdsError::syntax("expected @end to close @define block"));
-            }
-        } else {
-            return Err(MdsError::syntax("unclosed @define block (missing @end)"));
-        }
+        self.consume_end("@define")?;
 
         Ok(Node::Define(DefineBlock {
             name,
@@ -301,90 +271,92 @@ impl<'a> Parser<'a> {
             offset,
         }))
     }
+}
 
-    fn parse_import_directive(&mut self, directive: &str, offset: usize) -> Result<Node, MdsError> {
-        let rest = directive.strip_prefix("@import").unwrap().trim();
+/// Parse an `@import` directive into a Node.
+fn parse_import_directive(directive: &str, offset: usize) -> Result<Node, MdsError> {
+    let rest = directive.strip_prefix("@import").unwrap().trim();
 
-        // Selective import: @import { name1, name2 } from "path"
-        if rest.starts_with('{') {
-            let brace_end = rest
-                .find('}')
-                .ok_or_else(|| MdsError::syntax("unclosed { in selective import"))?;
-            let names_str = &rest[1..brace_end];
-            let names: Vec<String> = names_str
-                .split(',')
-                .map(|n| n.trim().to_string())
-                .filter(|n| !n.is_empty())
-                .collect();
+    // Selective import: @import { name1, name2 } from "path"
+    if rest.starts_with('{') {
+        let brace_end = rest
+            .find('}')
+            .ok_or_else(|| MdsError::syntax("unclosed { in selective import"))?;
+        let names_str = &rest[1..brace_end];
+        let names: Vec<String> = names_str
+            .split(',')
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect();
 
-            let after = rest[brace_end + 1..].trim();
-            let path_part = after
-                .strip_prefix("from")
-                .ok_or_else(|| MdsError::syntax("selective import requires 'from' keyword"))?
-                .trim();
-            let path = parse_quoted_path(path_part)?;
+        let after = rest[brace_end + 1..].trim();
+        let path_part = after
+            .strip_prefix("from")
+            .ok_or_else(|| MdsError::syntax("selective import requires 'from' keyword"))?
+            .trim();
+        let path = parse_quoted_path(path_part)?;
 
-            return Ok(Node::Import(ImportDirective::Selective {
-                names,
-                path,
-                offset,
-            }));
-        }
-
-        // Alias import: @import "path" as alias
-        // Merge import: @import "path"
-        let path = parse_quoted_path(rest)?;
-        let after_path_start = rest.find('"').unwrap();
-        let after_path_end = rest[after_path_start + 1..].find('"').unwrap() + after_path_start + 2;
-        let after = rest[after_path_end..].trim();
-
-        if let Some(alias) = after.strip_prefix("as ") {
-            Ok(Node::Import(ImportDirective::Alias {
-                path,
-                alias: alias.trim().to_string(),
-                offset,
-            }))
-        } else if after.is_empty() {
-            Ok(Node::Import(ImportDirective::Merge { path, offset }))
-        } else {
-            Err(MdsError::syntax(format!(
-                "unexpected text after import path: '{after}'"
-            )))
-        }
+        return Ok(Node::Import(ImportDirective::Selective {
+            names,
+            path,
+            offset,
+        }));
     }
 
-    fn parse_export_directive(&mut self, directive: &str, offset: usize) -> Result<Node, MdsError> {
-        let rest = directive.strip_prefix("@export").unwrap().trim();
+    // Alias import: @import "path" as alias
+    // Merge import: @import "path"
+    let path = parse_quoted_path(rest)?;
+    let after_path_start = rest.find('"').unwrap();
+    let after_path_end = rest[after_path_start + 1..].find('"').unwrap() + after_path_start + 2;
+    let after = rest[after_path_end..].trim();
 
-        // Wildcard re-export: @export * from "path"
-        if rest.starts_with("* from ") || rest.starts_with("*from ") {
-            let from_part = rest
-                .strip_prefix("* from ")
-                .or_else(|| rest.strip_prefix("*from "))
-                .unwrap();
-            let path = parse_quoted_path(from_part.trim())?;
-            return Ok(Node::Export(ExportDirective::Wildcard { path, offset }));
-        }
-
-        // Check for "name from" pattern: @export name from "path"
-        let parts: Vec<&str> = rest.splitn(3, ' ').collect();
-        if parts.len() >= 3 && parts[1] == "from" {
-            let name = parts[0].to_string();
-            let path = parse_quoted_path(parts[2])?;
-            return Ok(Node::Export(ExportDirective::ReExport {
-                name,
-                path,
-                offset,
-            }));
-        }
-
-        // Named export: @export name
-        let name = rest.trim().to_string();
-        if name.is_empty() {
-            return Err(MdsError::syntax("@export requires a name"));
-        }
-        Ok(Node::Export(ExportDirective::Named { name, offset }))
+    if let Some(alias) = after.strip_prefix("as ") {
+        Ok(Node::Import(ImportDirective::Alias {
+            path,
+            alias: alias.trim().to_string(),
+            offset,
+        }))
+    } else if after.is_empty() {
+        Ok(Node::Import(ImportDirective::Merge { path, offset }))
+    } else {
+        Err(MdsError::syntax(format!(
+            "unexpected text after import path: '{after}'"
+        )))
     }
+}
+
+/// Parse an `@export` directive into a Node.
+fn parse_export_directive(directive: &str, offset: usize) -> Result<Node, MdsError> {
+    let rest = directive.strip_prefix("@export").unwrap().trim();
+
+    // Wildcard re-export: @export * from "path"
+    if rest.starts_with("* from ") || rest.starts_with("*from ") {
+        let from_part = rest
+            .strip_prefix("* from ")
+            .or_else(|| rest.strip_prefix("*from "))
+            .unwrap();
+        let path = parse_quoted_path(from_part.trim())?;
+        return Ok(Node::Export(ExportDirective::Wildcard { path, offset }));
+    }
+
+    // Check for "name from" pattern: @export name from "path"
+    let parts: Vec<&str> = rest.splitn(3, ' ').collect();
+    if parts.len() >= 3 && parts[1] == "from" {
+        let name = parts[0].to_string();
+        let path = parse_quoted_path(parts[2])?;
+        return Ok(Node::Export(ExportDirective::ReExport {
+            name,
+            path,
+            offset,
+        }));
+    }
+
+    // Named export: @export name
+    let name = rest.trim().to_string();
+    if name.is_empty() {
+        return Err(MdsError::syntax("@export requires a name"));
+    }
+    Ok(Node::Export(ExportDirective::Named { name, offset }))
 }
 
 /// Parse a quoted path like `"./utils.mds"` and return the inner string.
@@ -396,7 +368,7 @@ fn parse_quoted_path(s: &str) -> Result<String, MdsError> {
     let end = s[1..]
         .find('"')
         .ok_or_else(|| MdsError::syntax("unclosed quote in path"))?;
-    Ok(s[1..end + 1].to_string())
+    Ok(s[1..=end].to_string())
 }
 
 /// Parse the expression inside `{ }` into an Expr.

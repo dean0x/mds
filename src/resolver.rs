@@ -124,12 +124,12 @@ impl ModuleCache {
 
         if let Some(ref fm) = module.frontmatter {
             let yaml_vars = parse_frontmatter(&fm.raw)?;
-            for (key, value) in &yaml_vars {
-                if key != "type" {
-                    // Skip the 'type' meta-field
-                    scope.set_var(key, value.clone());
-                    vars.insert(key.clone(), value.clone());
+            for (key, value) in yaml_vars {
+                if key == "type" {
+                    continue; // Skip the 'type' meta-field
                 }
+                scope.set_var(&key, value.clone());
+                vars.insert(key, value);
             }
         }
 
@@ -279,18 +279,11 @@ impl ResolvedModule {
 
     /// Get all exported functions.
     pub fn get_all_exports(&self) -> Vec<(String, FunctionDef)> {
-        if self.has_explicit_exports {
-            self.functions
-                .iter()
-                .filter(|(name, _)| self.explicit_exports.contains(*name))
-                .map(|(name, func)| (name.clone(), func.clone()))
-                .collect()
-        } else {
-            self.functions
-                .iter()
-                .map(|(name, func)| (name.clone(), func.clone()))
-                .collect()
-        }
+        self.functions
+            .iter()
+            .filter(|(name, _)| !self.has_explicit_exports || self.explicit_exports.contains(*name))
+            .map(|(name, func)| (name.clone(), func.clone()))
+            .collect()
     }
 }
 
@@ -355,9 +348,8 @@ pub fn parse_frontmatter(raw: &str) -> Result<HashMap<String, Value>, MdsError> 
     let mut vars = HashMap::new();
     if let serde_yml::Value::Mapping(map) = yaml {
         for (key, val) in map {
-            let key_str = match key {
-                serde_yml::Value::String(s) => s,
-                _ => continue,
+            let serde_yml::Value::String(key_str) = key else {
+                continue;
             };
             let value = Value::from_yaml(val).map_err(|e| MdsError::YamlError { message: e })?;
             vars.insert(key_str, value);

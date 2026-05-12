@@ -45,16 +45,7 @@ pub fn tokenize(source: &str, file: &str) -> Result<Vec<Token>, MdsError> {
     // Check for frontmatter at the very start
     if source.starts_with("---\n") || source.starts_with("---\r\n") {
         tokens.push(Token::FrontmatterFence(0));
-        pos = 3;
-        // skip the newline after ---
-        if pos < chars.len() && chars[pos] == '\n' {
-            pos += 1;
-        } else if pos < chars.len() && chars[pos] == '\r' {
-            pos += 1;
-            if pos < chars.len() && chars[pos] == '\n' {
-                pos += 1;
-            }
-        }
+        pos = skip_newline(&chars, 3);
 
         // Find closing ---
         let fm_start = pos;
@@ -70,16 +61,7 @@ pub fn tokenize(source: &str, file: &str) -> Result<Vec<Token>, MdsError> {
                     let fm_byte_offset = byte_pos(fm_start);
                     tokens.push(Token::FrontmatterContent(content, fm_byte_offset));
                     tokens.push(Token::FrontmatterFence(byte_pos(pos)));
-                    pos = end_pos;
-                    // skip newline after closing ---
-                    if pos < chars.len() && chars[pos] == '\n' {
-                        pos += 1;
-                    } else if pos < chars.len() && chars[pos] == '\r' {
-                        pos += 1;
-                        if pos < chars.len() && chars[pos] == '\n' {
-                            pos += 1;
-                        }
-                    }
+                    pos = skip_newline(&chars, end_pos);
                     found_close = true;
                     break;
                 }
@@ -111,14 +93,7 @@ pub fn tokenize(source: &str, file: &str) -> Result<Vec<Token>, MdsError> {
                 fence.push(chars[pos]);
                 pos += 1;
             }
-            // consume newline
-            if pos < chars.len() && chars[pos] == '\r' {
-                pos += 1;
-            }
-            if pos < chars.len() && chars[pos] == '\n' {
-                pos += 1;
-            }
-
+            pos = skip_newline(&chars, pos);
             in_code_block = !in_code_block;
             tokens.push(Token::CodeFence(fence, fence_start));
             continue;
@@ -234,10 +209,23 @@ pub fn tokenize(source: &str, file: &str) -> Result<Vec<Token>, MdsError> {
 /// Check if the given char position is at the start of a line,
 /// using the chars array for safe multi-byte character handling.
 fn is_line_start_chars(chars: &[char], pos: usize) -> bool {
-    if pos == 0 {
-        return true;
+    pos == 0 || chars[pos - 1] == '\n'
+}
+
+/// Advance `pos` past a line ending (`\n` or `\r\n`), if present.
+fn skip_newline(chars: &[char], pos: usize) -> usize {
+    if pos < chars.len() && chars[pos] == '\r' {
+        let pos = pos + 1;
+        if pos < chars.len() && chars[pos] == '\n' {
+            pos + 1
+        } else {
+            pos
+        }
+    } else if pos < chars.len() && chars[pos] == '\n' {
+        pos + 1
+    } else {
+        pos
     }
-    chars[pos - 1] == '\n'
 }
 
 #[cfg(test)]

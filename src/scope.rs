@@ -28,7 +28,7 @@ pub struct Scope {
     frames: Vec<Frame>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct Frame {
     vars: HashMap<String, Value>,
     functions: HashMap<String, FunctionDef>,
@@ -54,21 +54,13 @@ impl Default for Scope {
 impl Scope {
     pub fn new() -> Self {
         Scope {
-            frames: vec![Frame {
-                vars: HashMap::new(),
-                functions: HashMap::new(),
-                namespaces: HashMap::new(),
-            }],
+            frames: vec![Frame::default()],
         }
     }
 
     /// Push a new scope frame (for blocks, function calls).
     pub fn push(&mut self) {
-        self.frames.push(Frame {
-            vars: HashMap::new(),
-            functions: HashMap::new(),
-            namespaces: HashMap::new(),
-        });
+        self.frames.push(Frame::default());
     }
 
     /// Pop the innermost scope frame.

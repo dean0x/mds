@@ -18,10 +18,10 @@ fn validate_node(node: &Node, scope: &Scope) -> Result<(), MdsError> {
         Node::Text(_) | Node::EscapedBrace => Ok(()),
         Node::Interpolation(interp) => validate_expr(&interp.expr, scope),
         Node::If(block) => {
-            // Condition must be a variable (truthiness check on a value)
-            if scope.get_var(&block.condition).is_none() {
-                return Err(MdsError::undefined_var(&block.condition));
-            }
+            // Condition must be a defined variable (truthiness is checked at evaluation time)
+            scope
+                .get_var(&block.condition)
+                .ok_or_else(|| MdsError::undefined_var(&block.condition))?;
             for node in &block.then_body {
                 validate_node(node, scope)?;
             }
@@ -33,16 +33,14 @@ fn validate_node(node: &Node, scope: &Scope) -> Result<(), MdsError> {
             Ok(())
         }
         Node::For(block) => {
-            // Iterable must exist
-            if scope.get_var(&block.iterable).is_none() {
-                return Err(MdsError::undefined_var(&block.iterable));
-            }
-            // We cannot fully validate the loop body here since the loop var
-            // is block-scoped and only available at evaluation time.
+            // Iterable must be defined; loop var is block-scoped and checked at evaluation time.
+            scope
+                .get_var(&block.iterable)
+                .ok_or_else(|| MdsError::undefined_var(&block.iterable))?;
             Ok(())
         }
         Node::Define(_) => {
-            // Function definitions are validated when called
+            // Function bodies are validated when called
             Ok(())
         }
         Node::Import(_) | Node::Export(_) => {
@@ -51,9 +49,9 @@ fn validate_node(node: &Node, scope: &Scope) -> Result<(), MdsError> {
         }
         Node::Include(inc) => {
             // Verify the referenced namespace exists (must have been @import-ed)
-            if scope.get_namespace(&inc.alias).is_none() {
-                return Err(MdsError::undefined_var(&inc.alias));
-            }
+            scope
+                .get_namespace(&inc.alias)
+                .ok_or_else(|| MdsError::undefined_var(&inc.alias))?;
             Ok(())
         }
     }
@@ -62,21 +60,17 @@ fn validate_node(node: &Node, scope: &Scope) -> Result<(), MdsError> {
 fn validate_expr(expr: &Expr, scope: &Scope) -> Result<(), MdsError> {
     match expr {
         Expr::Var(name) => {
-            if scope.get_var(name).is_none() {
-                return Err(MdsError::undefined_var(name));
-            }
+            scope
+                .get_var(name)
+                .ok_or_else(|| MdsError::undefined_var(name))?;
             Ok(())
         }
         Expr::Call { name, args } => {
-            match scope.get_function(name) {
-                Some(func) => {
-                    if args.len() != func.params.len() {
-                        return Err(MdsError::arity(name, func.params.len(), args.len()));
-                    }
-                }
-                None => {
-                    return Err(MdsError::undefined_fn(name));
-                }
+            let func = scope
+                .get_function(name)
+                .ok_or_else(|| MdsError::undefined_fn(name))?;
+            if args.len() != func.params.len() {
+                return Err(MdsError::arity(name, func.params.len(), args.len()));
             }
             validate_var_args(args, scope)
         }
@@ -85,27 +79,16 @@ fn validate_expr(expr: &Expr, scope: &Scope) -> Result<(), MdsError> {
             name,
             args,
         } => {
-            match scope.get_namespace(namespace) {
-                Some(ns) => {
-                    let qualified = format!("{namespace}.{name}");
-                    match ns.functions.get(name) {
-                        Some(func) => {
-                            if args.len() != func.params.len() {
-                                return Err(MdsError::arity(
-                                    &qualified,
-                                    func.params.len(),
-                                    args.len(),
-                                ));
-                            }
-                        }
-                        None => {
-                            return Err(MdsError::undefined_fn(&qualified));
-                        }
-                    }
-                }
-                None => {
-                    return Err(MdsError::undefined_var(namespace));
-                }
+            let ns = scope
+                .get_namespace(namespace)
+                .ok_or_else(|| MdsError::undefined_var(namespace))?;
+            let qualified = format!("{namespace}.{name}");
+            let func = ns
+                .functions
+                .get(name)
+                .ok_or_else(|| MdsError::undefined_fn(&qualified))?;
+            if args.len() != func.params.len() {
+                return Err(MdsError::arity(&qualified, func.params.len(), args.len()));
             }
             validate_var_args(args, scope)
         }

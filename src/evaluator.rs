@@ -206,18 +206,20 @@ fn evaluate_for(
 ) -> Result<String, MdsError> {
     let iterable = scope
         .get_var(&block.iterable)
-        .ok_or_else(|| MdsError::undefined_var(&block.iterable))?
-        .clone();
+        .ok_or_else(|| MdsError::undefined_var(&block.iterable))?;
 
+    // Validate it's an array before cloning the items.
+    let type_name = iterable.type_name();
     let items = iterable
         .as_array()
-        .ok_or_else(|| MdsError::type_error(iterable.type_name()))?;
+        .ok_or_else(|| MdsError::type_error(type_name))?
+        .clone();
 
     let mut output = String::new();
 
     for item in items {
         scope.push();
-        scope.set_var(&block.var, item.clone());
+        scope.set_var(&block.var, item);
         let rendered = evaluate_nodes(&block.body, scope, call_stack)?;
         output.push_str(&rendered);
         scope.pop();
@@ -238,7 +240,7 @@ fn evaluate_include(inc: &IncludeDirective, scope: &Scope) -> Result<String, Mds
         );
     }
 
-    Ok(ns.prompt_body.clone().unwrap_or_default())
+    Ok(ns.prompt_body.as_deref().unwrap_or("").to_owned())
 }
 
 #[cfg(test)]
