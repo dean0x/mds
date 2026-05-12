@@ -1,7 +1,7 @@
 use crate::error::MdsError;
 
 /// Token types produced by the lexer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
     /// Raw text content.
     Text(String, usize),

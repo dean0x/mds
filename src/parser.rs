@@ -3,7 +3,7 @@ use crate::error::MdsError;
 use crate::lexer::Token;
 
 /// Parse a stream of tokens into a Module AST.
-pub fn parse(tokens: &[Token], _file: &str) -> Result<Module, MdsError> {
+pub fn parse(tokens: &[Token]) -> Result<Module, MdsError> {
     let mut parser = Parser { tokens, pos: 0 };
     parser.parse_module()
 }
@@ -165,7 +165,9 @@ impl Parser<'_> {
             return Ok(Node::Include(IncludeDirective { alias, offset }));
         }
 
-        Err(MdsError::syntax(format!("unknown directive: {trimmed}")))
+        Err(MdsError::syntax(format!(
+            "unknown directive: {trimmed}. Valid directives: @if, @else, @end, @for, @define, @import, @export, @include"
+        )))
     }
 
     fn parse_if_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
@@ -424,7 +426,7 @@ fn parse_interpolation_expr(content: &str, offset: usize) -> Result<Interpolatio
     // Simple variable reference
     if !is_valid_identifier(content) {
         return Err(MdsError::syntax(format!(
-            "invalid interpolation expression: '{content}'"
+            "invalid interpolation: '{content}' is not a valid expression. Use a variable name (letters, numbers, underscores), a function call like func(), or escape with \\{{{{ for literal braces."
         )));
     }
     Ok(Interpolation {
@@ -538,7 +540,7 @@ mod tests {
     #[test]
     fn parse_simple_text() {
         let tokens = tokenize("Hello world!", "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         assert!(module.frontmatter.is_none());
         assert_eq!(module.body.len(), 1);
     }
@@ -547,7 +549,7 @@ mod tests {
     fn parse_frontmatter() {
         let src = "---\nname: Alice\n---\nHello!";
         let tokens = tokenize(src, "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         assert!(module.frontmatter.is_some());
         assert!(module.frontmatter.unwrap().raw.contains("name: Alice"));
     }
@@ -556,7 +558,7 @@ mod tests {
     fn parse_if_block() {
         let src = "@if premium:\nPremium!\n@end\n";
         let tokens = tokenize(src, "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         assert!(matches!(module.body[0], Node::If(_)));
     }
 
@@ -564,7 +566,7 @@ mod tests {
     fn parse_if_else() {
         let src = "@if premium:\nPremium!\n@else:\nFree!\n@end\n";
         let tokens = tokenize(src, "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         if let Node::If(block) = &module.body[0] {
             assert!(block.else_body.is_some());
         } else {
@@ -576,7 +578,7 @@ mod tests {
     fn parse_for_block() {
         let src = "@for item in items:\n- {item}\n@end\n";
         let tokens = tokenize(src, "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         assert!(matches!(module.body[0], Node::For(_)));
     }
 
@@ -584,7 +586,7 @@ mod tests {
     fn parse_define() {
         let src = "@define greet(name):\nHello {name}!\n@end\n";
         let tokens = tokenize(src, "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         assert!(matches!(module.body[0], Node::Define(_)));
     }
 
@@ -592,7 +594,7 @@ mod tests {
     fn parse_import_alias() {
         let src = "@import \"./utils.mds\" as utils\n";
         let tokens = tokenize(src, "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         assert!(matches!(
             module.body[0],
             Node::Import(ImportDirective::Alias { .. })
@@ -603,7 +605,7 @@ mod tests {
     fn parse_import_merge() {
         let src = "@import \"./base.mds\"\n";
         let tokens = tokenize(src, "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         assert!(matches!(
             module.body[0],
             Node::Import(ImportDirective::Merge { .. })
@@ -614,7 +616,7 @@ mod tests {
     fn parse_import_selective() {
         let src = "@import { greet, farewell } from \"./utils.mds\"\n";
         let tokens = tokenize(src, "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         if let Node::Import(ImportDirective::Selective { names, .. }) = &module.body[0] {
             assert_eq!(names, &["greet", "farewell"]);
         } else {
@@ -626,7 +628,7 @@ mod tests {
     fn parse_export_named() {
         let src = "@export greet\n";
         let tokens = tokenize(src, "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         assert!(matches!(
             module.body[0],
             Node::Export(ExportDirective::Named { .. })
@@ -637,7 +639,7 @@ mod tests {
     fn parse_export_reexport() {
         let src = "@export greet from \"./greetings.mds\"\n";
         let tokens = tokenize(src, "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         assert!(matches!(
             module.body[0],
             Node::Export(ExportDirective::ReExport { .. })
@@ -648,7 +650,7 @@ mod tests {
     fn parse_export_wildcard() {
         let src = "@export * from \"./formatting.mds\"\n";
         let tokens = tokenize(src, "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         assert!(matches!(
             module.body[0],
             Node::Export(ExportDirective::Wildcard { .. })
@@ -659,7 +661,7 @@ mod tests {
     fn parse_include() {
         let src = "@include footer\n";
         let tokens = tokenize(src, "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         assert!(matches!(module.body[0], Node::Include(_)));
     }
 
@@ -667,7 +669,7 @@ mod tests {
     fn parse_function_call_interpolation() {
         let src = "{greet(\"Alice\")}";
         let tokens = tokenize(src, "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         if let Node::Interpolation(interp) = &module.body[0] {
             assert!(matches!(interp.expr, Expr::Call { .. }));
         } else {
@@ -679,7 +681,7 @@ mod tests {
     fn parse_qualified_call() {
         let src = "{utils.greet(\"Alice\")}";
         let tokens = tokenize(src, "test.mds").unwrap();
-        let module = parse(&tokens, "test.mds").unwrap();
+        let module = parse(&tokens).unwrap();
         if let Node::Interpolation(interp) = &module.body[0] {
             assert!(matches!(interp.expr, Expr::QualifiedCall { .. }));
         } else {

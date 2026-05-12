@@ -9,6 +9,7 @@ pub struct Module {
 #[derive(Debug, Clone)]
 pub struct Frontmatter {
     pub raw: String,
+    #[allow(dead_code)]
     pub offset: usize,
 }
 
@@ -38,6 +39,7 @@ pub enum Node {
 #[derive(Debug, Clone)]
 pub struct TextNode {
     pub text: String,
+    #[allow(dead_code)]
     pub offset: usize,
 }
 
@@ -92,6 +94,7 @@ pub struct DefineBlock {
     pub name: String,
     pub params: Vec<String>,
     pub body: Vec<Node>,
+    #[allow(dead_code)]
     pub offset: usize,
 }
 
@@ -101,14 +104,20 @@ pub enum ImportDirective {
     Alias {
         path: String,
         alias: String,
+        #[allow(dead_code)]
         offset: usize,
     },
     /// `@import "path"` (merge)
-    Merge { path: String, offset: usize },
+    Merge {
+        path: String,
+        #[allow(dead_code)]
+        offset: usize,
+    },
     /// `@import { name1, name2 } from "path"`
     Selective {
         names: Vec<String>,
         path: String,
+        #[allow(dead_code)]
         offset: usize,
     },
 }
@@ -116,15 +125,24 @@ pub enum ImportDirective {
 #[derive(Debug, Clone)]
 pub enum ExportDirective {
     /// `@export name`
-    Named { name: String, offset: usize },
+    Named {
+        name: String,
+        #[allow(dead_code)]
+        offset: usize,
+    },
     /// `@export name from "path"`
     ReExport {
         name: String,
         path: String,
+        #[allow(dead_code)]
         offset: usize,
     },
     /// `@export * from "path"`
-    Wildcard { path: String, offset: usize },
+    Wildcard {
+        path: String,
+        #[allow(dead_code)]
+        offset: usize,
+    },
 }
 
 #[derive(Debug, Clone)]

@@ -6,6 +6,7 @@ use crate::value::Value;
 /// A function definition stored in scope.
 #[derive(Debug, Clone)]
 pub struct FunctionDef {
+    #[allow(dead_code)]
     pub name: String,
     pub params: Vec<String>,
     pub body: Vec<crate::ast::Node>,
@@ -40,6 +41,7 @@ struct Frame {
 #[derive(Debug, Clone)]
 pub struct NamespaceScope {
     pub functions: HashMap<String, FunctionDef>,
+    #[allow(dead_code)]
     pub vars: HashMap<String, Value>,
     /// The compiled prompt body of the imported module.
     pub prompt_body: Option<String>,
@@ -122,6 +124,7 @@ impl Scope {
     }
 
     /// Check if an identifier exists in any form (var, function, namespace).
+    #[allow(dead_code)]
     pub fn has(&self, name: &str) -> bool {
         self.get_var(name).is_some()
             || self.get_function(name).is_some()

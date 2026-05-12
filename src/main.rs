@@ -108,7 +108,11 @@ Your items:
 ";
             std::fs::write(&filename, starter)
                 .map_err(|e| miette::miette!("cannot write {}: {e}", filename.display()))?;
-            eprintln!("Created {}", filename.display());
+            eprintln!(
+                "Created {}\n  Try: mds build {}",
+                filename.display(),
+                filename.display()
+            );
             Ok(())
         }
     }

@@ -13,7 +13,9 @@ use crate::value::Value;
 /// A resolved module with its AST, exports, and prompt body.
 #[derive(Debug, Clone)]
 pub struct ResolvedModule {
+    #[allow(dead_code)]
     pub path: PathBuf,
+    #[allow(dead_code)]
     pub module: Module,
     pub functions: HashMap<String, FunctionDef>,
     pub vars: HashMap<String, Value>,
@@ -128,17 +130,19 @@ impl ModuleCache {
     ) -> Result<ResolvedModule, MdsError> {
         // Tokenize and parse
         let tokens = tokenize(source, file_str)?;
-        let module = parse(&tokens, file_str)?;
+        let module = parse(&tokens)?;
 
         // Build scope from frontmatter
         let mut scope = Scope::new();
         let mut vars = HashMap::new();
 
+        let is_md = path.extension().and_then(|e| e.to_str()) == Some("md");
+
         if let Some(ref fm) = module.frontmatter {
             let yaml_vars = parse_frontmatter(&fm.raw)?;
             for (key, value) in yaml_vars {
-                if key == "type" {
-                    continue; // Skip the 'type' meta-field
+                if key == "type" && is_md {
+                    continue; // Skip the 'type' meta-field only for .md files
                 }
                 scope.set_var(&key, value.clone());
                 vars.insert(key, value);
@@ -258,6 +262,9 @@ impl ModuleCache {
                     scope.set_function(&name, func);
                 }
                 for (name, value) in &resolved.vars {
+                    if scope.get_var(name).is_some() {
+                        return Err(MdsError::NameCollision { name: name.clone() });
+                    }
                     scope.set_var(name, value.clone());
                 }
             }
@@ -341,12 +348,17 @@ fn validate_file_type(path: &Path, source: &str) -> Result<(), MdsError> {
     match ext {
         "mds" => Ok(()),
         "md" => {
-            // Check for `type: mds` in frontmatter
-            if let Some(after_prefix) = source.strip_prefix("---") {
-                if let Some(end) = after_prefix.find("---") {
+            // Check for `type: mds` in frontmatter by parsing YAML properly
+            if let Some(after_prefix) = source
+                .strip_prefix("---\n")
+                .or_else(|| source.strip_prefix("---\r\n"))
+            {
+                if let Some(end) = after_prefix.find("\n---") {
                     let fm = &after_prefix[..end];
-                    if fm.contains("type: mds") || fm.contains("type: \"mds\"") {
-                        return Ok(());
+                    if let Ok(map) = serde_yml::from_str::<HashMap<String, serde_yml::Value>>(fm) {
+                        if map.get("type").and_then(|v| v.as_str()) == Some("mds") {
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -361,7 +373,7 @@ fn validate_file_type(path: &Path, source: &str) -> Result<(), MdsError> {
 }
 
 /// Parse YAML frontmatter into a map of values.
-pub fn parse_frontmatter(raw: &str) -> Result<HashMap<String, Value>, MdsError> {
+fn parse_frontmatter(raw: &str) -> Result<HashMap<String, Value>, MdsError> {
     let yaml: serde_yml::Value = serde_yml::from_str(raw).map_err(|e| MdsError::YamlError {
         message: e.to_string(),
     })?;

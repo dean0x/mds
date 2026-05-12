@@ -1,11 +1,11 @@
-pub mod ast;
+pub(crate) mod ast;
 pub mod error;
-pub mod evaluator;
-pub mod lexer;
-pub mod parser;
-pub mod resolver;
-pub mod scope;
-pub mod validator;
+pub(crate) mod evaluator;
+pub(crate) mod lexer;
+pub(crate) mod parser;
+pub(crate) mod resolver;
+pub(crate) mod scope;
+pub(crate) mod validator;
 pub mod value;
 
 use std::collections::HashMap;

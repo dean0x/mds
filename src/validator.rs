@@ -41,7 +41,6 @@ fn validate_node(node: &Node, scope: &Scope, file: &str, source: &str) -> Result
             Ok(())
         }
         Node::For(block) => {
-            // Iterable must be defined; loop var is block-scoped and checked at evaluation time.
             scope.get_var(&block.iterable).ok_or_else(|| {
                 MdsError::undefined_var_at(
                     &block.iterable,
@@ -51,6 +50,11 @@ fn validate_node(node: &Node, scope: &Scope, file: &str, source: &str) -> Result
                     block.iterable.len(),
                 )
             })?;
+            let mut inner = scope.clone();
+            inner.set_var(&block.var, crate::value::Value::Null);
+            for node in &block.body {
+                validate_node(node, &inner, file, source)?;
+            }
             Ok(())
         }
         Node::Define(_) => {
@@ -89,7 +93,7 @@ fn validate_expr(
         Expr::Call { name, args } => {
             let func = scope
                 .get_function(name)
-                .ok_or_else(|| MdsError::undefined_var_at(name, file, source, offset, len))?;
+                .ok_or_else(|| MdsError::undefined_fn_at(name, file, source, offset, len))?;
             if args.len() != func.params.len() {
                 return Err(MdsError::ArityMismatch {
                     name: name.clone(),
@@ -116,7 +120,7 @@ fn validate_expr(
             let func = ns
                 .functions
                 .get(name)
-                .ok_or_else(|| MdsError::undefined_var_at(&qualified, file, source, offset, len))?;
+                .ok_or_else(|| MdsError::undefined_fn_at(&qualified, file, source, offset, len))?;
             if args.len() != func.params.len() {
                 return Err(MdsError::ArityMismatch {
                     name: qualified,

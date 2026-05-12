@@ -309,3 +309,53 @@ fn name_collision_on_merge_import() {
         "expected name collision error, got: {err}"
     );
 }
+
+#[test]
+fn merge_import_variable_collision_errors() {
+    let result = mds::compile(&fixture("var_collision_consumer.mds"), None);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("name collision") || err.contains("role"),
+        "expected name collision error for variable, got: {err}"
+    );
+}
+
+#[test]
+fn type_key_available_in_mds_files() {
+    let result = mds::compile(&fixture("type_variable.mds"), None).unwrap();
+    assert!(
+        result.contains("assistant"),
+        "expected 'type' variable to be available in .mds files, got: {result}"
+    );
+}
+
+#[test]
+fn undefined_function_error_message_says_function() {
+    let source = "{nonexistent_fn(\"arg\")}\n";
+    let result = mds::compile_str(source, None, None);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("undefined function") || err.contains("nonexistent_fn"),
+        "expected 'undefined function' error, not 'undefined variable', got: {err}"
+    );
+    assert!(
+        !err.contains("undefined variable"),
+        "error should say 'function', not 'variable', got: {err}"
+    );
+}
+
+#[test]
+fn for_body_undefined_var_errors_at_validate_time() {
+    let result = mds::compile(&fixture("for_body_undef.mds"), None);
+    assert!(
+        result.is_err(),
+        "expected error for undefined var in @for body"
+    );
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("undefined") || err.contains("undefined_var_in_body"),
+        "expected undefined variable error in for body, got: {err}"
+    );
+}

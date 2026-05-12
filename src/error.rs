@@ -42,7 +42,7 @@ pub enum MdsError {
         src: Option<Arc<miette::NamedSource<String>>>,
     },
 
-    #[error("arity mismatch for '{name}': expected {expected} args, got {got}")]
+    #[error("arity mismatch for '{name}': expected {expected} {}, got {got}", if *expected == 1 { "argument" } else { "arguments" })]
     #[diagnostic(code(mds::arity))]
     ArityMismatch {
         name: String,
@@ -158,6 +158,20 @@ impl MdsError {
             name: name.into(),
             span: None,
             src: None,
+        }
+    }
+
+    pub fn undefined_fn_at(
+        name: impl Into<String>,
+        file: &str,
+        source: &str,
+        offset: usize,
+        len: usize,
+    ) -> Self {
+        MdsError::UndefinedFunction {
+            name: name.into(),
+            span: Some(SourceSpan::new(offset.into(), len)),
+            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
         }
     }
 
