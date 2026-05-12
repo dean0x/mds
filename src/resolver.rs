@@ -333,7 +333,7 @@ fn resolve_path(base_dir: &Path, relative: &str) -> PathBuf {
 /// Validate that an import path is safe and relative.
 ///
 /// Rejects absolute paths and paths containing components that could escape
-/// the project directory (e.g., null bytes or excessively long paths).
+/// the project directory (e.g., null bytes).
 fn validate_import_path(path: &str) -> Result<(), MdsError> {
     if !path.starts_with("./") && !path.starts_with("../") {
         return Err(MdsError::ImportError {

@@ -277,7 +277,7 @@ impl Parser<'_> {
 
 /// Parse an `@import` directive into a Node.
 fn parse_import_directive(directive: &str, offset: usize) -> Result<Node, MdsError> {
-    let rest = directive.strip_prefix("@import").unwrap().trim();
+    let rest = directive.trim_start_matches("@import").trim();
 
     // Selective import: @import { name1, name2 } from "path"
     if rest.starts_with('{') {
@@ -336,14 +336,14 @@ fn parse_import_directive(directive: &str, offset: usize) -> Result<Node, MdsErr
 
 /// Parse an `@export` directive into a Node.
 fn parse_export_directive(directive: &str, offset: usize) -> Result<Node, MdsError> {
-    let rest = directive.strip_prefix("@export").unwrap().trim();
+    let rest = directive.trim_start_matches("@export").trim();
 
     // Wildcard re-export: @export * from "path"
     if rest.starts_with("* from ") || rest.starts_with("*from ") {
         let from_part = rest
             .strip_prefix("* from ")
             .or_else(|| rest.strip_prefix("*from "))
-            .unwrap();
+            .unwrap_or("");
         let path = parse_quoted_path(from_part.trim())?;
         return Ok(Node::Export(ExportDirective::Wildcard { path, offset }));
     }
