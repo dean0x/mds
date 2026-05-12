@@ -155,10 +155,17 @@ impl Parser<'_> {
         if let Some(rest) = trimmed.strip_prefix("@define ") {
             return self.parse_define_block(rest, offset);
         }
-        if trimmed.starts_with("@import") {
+        if trimmed == "@import"
+            || trimmed.starts_with("@import ")
+            || trimmed.starts_with("@import\t")
+            || trimmed.starts_with("@import{")
+        {
             return parse_import_directive(trimmed, offset);
         }
-        if trimmed.starts_with("@export") {
+        if trimmed == "@export"
+            || trimmed.starts_with("@export ")
+            || trimmed.starts_with("@export\t")
+        {
             return parse_export_directive(trimmed, offset);
         }
         if let Some(rest) = trimmed.strip_prefix("@include ") {
@@ -171,8 +178,15 @@ impl Parser<'_> {
             return Ok(Node::Include(IncludeDirective { alias, offset }));
         }
 
+        // Give a targeted hint if the user wrote @else without the required colon
+        if trimmed == "@else" {
+            return Err(MdsError::syntax(
+                "found '@else' without colon — use '@else:' (with trailing colon)",
+            ));
+        }
+
         Err(MdsError::syntax(format!(
-            "unknown directive: {trimmed}. Valid directives: @if, @else, @end, @for, @define, @import, @export, @include"
+            "unknown directive: {trimmed}. Valid directives: @if, @else:, @end, @for, @define, @import, @export, @include"
         )))
     }
 
