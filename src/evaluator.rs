@@ -118,12 +118,18 @@ fn invoke_function(
     }
     scope.push();
     // Restore captured lexical scope from definition site so the function body
-    // can resolve alias imports and sibling functions from its defining module.
+    // can resolve alias imports, sibling functions, and frontmatter variables
+    // from its defining module.
     for (alias, ns) in &func.captured_namespaces {
         scope.set_namespace(alias, ns.clone());
     }
     for (name, f) in &func.captured_functions {
         scope.set_function(name, f.clone());
+    }
+    // Captured vars are restored before param binding so that params shadow
+    // captured vars correctly (params take precedence over closure variables).
+    for (name, val) in &func.captured_vars {
+        scope.set_var(name, val.clone());
     }
     for (param, value) in func.params.iter().zip(args.iter()) {
         scope.set_var(param, value.clone());
@@ -222,7 +228,16 @@ fn evaluate_include(inc: &IncludeDirective, scope: &Scope) -> Result<String, Mds
         .get_namespace(&inc.alias)
         .ok_or_else(|| MdsError::undefined_var(&inc.alias))?;
 
-    Ok(ns.prompt_body.as_deref().unwrap_or("").to_owned())
+    match &ns.prompt_body {
+        Some(body) => Ok(body.clone()),
+        None => {
+            eprintln!(
+                "warning: @include {} produces empty output (module has no body text)",
+                inc.alias
+            );
+            Ok(String::new())
+        }
+    }
 }
 
 #[cfg(test)]

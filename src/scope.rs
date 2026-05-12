@@ -14,6 +14,8 @@ pub struct FunctionDef {
     pub captured_namespaces: HashMap<String, NamespaceScope>,
     /// Functions captured from the function's definition site (lexical scope).
     pub captured_functions: HashMap<String, FunctionDef>,
+    /// Variables captured from the function's definition site (lexical scope).
+    pub captured_vars: HashMap<String, Value>,
 }
 
 impl From<&DefineBlock> for FunctionDef {
@@ -24,6 +26,7 @@ impl From<&DefineBlock> for FunctionDef {
             body: d.body.clone(),
             captured_namespaces: HashMap::new(),
             captured_functions: HashMap::new(),
+            captured_vars: HashMap::new(),
         }
     }
 }
@@ -73,6 +76,7 @@ impl Scope {
 
     /// Pop the innermost scope frame.
     pub fn pop(&mut self) {
+        debug_assert!(self.frames.len() > 1, "cannot pop the global scope frame");
         if self.frames.len() > 1 {
             self.frames.pop();
         }
@@ -160,6 +164,18 @@ impl Scope {
         }
         result
     }
+
+    /// Get all variables visible in the current scope (for closure capture).
+    /// Inner frames shadow outer frames — last write wins, matching shadowing semantics.
+    pub fn get_all_vars(&self) -> HashMap<String, Value> {
+        let mut result = HashMap::new();
+        for frame in &self.frames {
+            for (name, val) in &frame.vars {
+                result.insert(name.clone(), val.clone());
+            }
+        }
+        result
+    }
 }
 
 #[cfg(test)]
@@ -188,6 +204,7 @@ mod tests {
                 body: vec![],
                 captured_namespaces: HashMap::new(),
                 captured_functions: HashMap::new(),
+                captured_vars: HashMap::new(),
             },
         );
         assert!(scope.get_function("greet").is_some());

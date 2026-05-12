@@ -318,13 +318,15 @@ fn name_collision_on_merge_import() {
 }
 
 #[test]
-fn merge_import_variable_collision_errors() {
+fn merge_import_does_not_leak_vars() {
+    // Per spec: merge imports bring in functions only, NOT frontmatter variables.
+    // Two merge-imported modules that both define the same variable should NOT cause
+    // a name collision — because variables are not imported at all.
     let result = mds::compile(&fixture("var_collision_consumer.mds"), None);
-    assert!(result.is_err());
-    let err = format!("{}", result.unwrap_err());
     assert!(
-        err.contains("name collision") || err.contains("role"),
-        "expected name collision error for variable, got: {err}"
+        result.is_ok(),
+        "merge import should not leak variables (no collision expected), got: {:?}",
+        result.unwrap_err()
     );
 }
 
@@ -459,6 +461,30 @@ fn init_does_not_overwrite_existing_file() {
     // Verify original content preserved
     let content = std::fs::read_to_string(&existing).unwrap();
     assert_eq!(content, "original content");
+}
+
+#[test]
+fn cross_module_frontmatter_var_in_function() {
+    // A function defined in module A that references module A's frontmatter variable
+    // must resolve that variable from its *definition* site (lexical scope) even when
+    // called from module B, which has no knowledge of that variable.
+    let result = mds::compile(&fixture("fm_var_consumer.mds"), None).unwrap();
+    assert!(
+        result.contains("Hello from module A"),
+        "expected frontmatter variable to be accessible in cross-module function call, got: {result}"
+    );
+}
+
+#[test]
+fn export_nonexistent_symbol_errors() {
+    // @export phantom where 'phantom' is never defined should be a compile error.
+    let result = mds::compile(&fixture("export_phantom.mds"), None);
+    assert!(result.is_err(), "expected error when exporting undefined symbol");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("phantom") || err.contains("export") || err.contains("not defined"),
+        "expected export error mentioning 'phantom', got: {err}"
+    );
 }
 
 #[test]

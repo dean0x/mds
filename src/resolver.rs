@@ -1,6 +1,23 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+/// Walk up from a directory to find the project root.
+/// Looks for `.git` or `.mdsroot` markers.
+/// Falls back to the given directory if no marker is found.
+fn find_project_root(start: &Path) -> PathBuf {
+    let mut dir = start.to_path_buf();
+    loop {
+        for marker in &[".git", ".mdsroot"] {
+            if dir.join(marker).exists() {
+                return dir;
+            }
+        }
+        if !dir.pop() {
+            return start.to_path_buf();
+        }
+    }
+}
+
 use crate::ast::*;
 use crate::error::MdsError;
 use crate::evaluator::evaluate;
@@ -67,14 +84,10 @@ impl ModuleCache {
             .canonicalize()
             .map_err(|_| MdsError::file_not_found(path.display().to_string()))?;
 
-        // Set root_dir on first resolve (entry point directory)
+        // Set root_dir on first resolve (project root, not just entry point directory)
         if self.root_dir.is_none() {
-            self.root_dir = Some(
-                canonical
-                    .parent()
-                    .unwrap_or(Path::new("."))
-                    .to_path_buf(),
-            );
+            let entry_dir = canonical.parent().unwrap_or(Path::new("."));
+            self.root_dir = Some(find_project_root(entry_dir));
         }
 
         // Check cache
@@ -217,10 +230,12 @@ impl ModuleCache {
                 Node::Define(def) => {
                     let mut func = FunctionDef::from(def);
                     // Capture definition-site scope for lexical closure semantics so the
-                    // function body can resolve alias imports from its defining module even
-                    // when called from a different module.
+                    // function body can resolve alias imports, sibling functions, and
+                    // frontmatter variables from its defining module even when called from
+                    // a different module.
                     func.captured_namespaces = scope.get_all_namespaces();
                     func.captured_functions = scope.get_all_functions();
+                    func.captured_vars = scope.get_all_vars();
                     functions.insert(def.name.clone(), func.clone());
                     scope.set_function(&def.name, func);
                 }
@@ -271,6 +286,15 @@ impl ModuleCache {
             }
         }
 
+        // Validate that all named exports refer to defined functions
+        for name in &explicit_exports {
+            if !functions.contains_key(name) {
+                return Err(MdsError::export_error(format!(
+                    "cannot export '{name}': not defined in this module"
+                )));
+            }
+        }
+
         // Validate semantic correctness before evaluation
         validator::validate(&module.body, &scope, file_str, source)?;
 
@@ -312,17 +336,13 @@ impl ModuleCache {
                 validate_import_path(path)?;
                 let import_path = resolve_path(base_dir, path);
                 let resolved = self.resolve(&import_path, runtime_vars)?;
+                // Per spec: only functions (and prompt body) are imported via merge.
+                // Frontmatter variables from the imported module are NOT brought into scope.
                 for (name, func) in resolved.get_all_exports() {
                     if scope.get_function(&name).is_some() {
                         return Err(MdsError::name_collision(name));
                     }
                     scope.set_function(&name, func);
-                }
-                for (name, value) in &resolved.vars {
-                    if scope.get_var(name).is_some() {
-                        return Err(MdsError::name_collision(name.clone()));
-                    }
-                    scope.set_var(name, value.clone());
                 }
             }
             ImportDirective::Selective { names, path, .. } => {
