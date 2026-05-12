@@ -515,6 +515,15 @@ fn parse_interpolation_expr(content: &str, offset: usize) -> Result<Interpolatio
 /// Parse function call arguments.
 /// Handles nested parentheses so that `inner("arg")` is kept as a single token.
 fn parse_args(args_str: &str) -> Result<Vec<Arg>, MdsError> {
+    parse_args_inner(args_str, 0)
+}
+
+fn parse_args_inner(args_str: &str, depth: usize) -> Result<Vec<Arg>, MdsError> {
+    if depth > MAX_NESTING_DEPTH {
+        return Err(MdsError::syntax(format!(
+            "nested function call depth exceeds maximum of {MAX_NESTING_DEPTH}"
+        )));
+    }
     let args_str = args_str.trim();
     if args_str.is_empty() {
         return Ok(Vec::new());
@@ -554,7 +563,7 @@ fn parse_args(args_str: &str) -> Result<Vec<Arg>, MdsError> {
             paren_depth = paren_depth.saturating_sub(1);
             current.push(ch);
         } else if ch == ',' && paren_depth == 0 {
-            args.push(parse_single_arg(current.trim())?);
+            args.push(parse_single_arg_inner(current.trim(), depth)?);
             current.clear();
         } else {
             current.push(ch);
@@ -563,13 +572,18 @@ fn parse_args(args_str: &str) -> Result<Vec<Arg>, MdsError> {
 
     let trimmed = current.trim();
     if !trimmed.is_empty() {
-        args.push(parse_single_arg(trimmed)?);
+        args.push(parse_single_arg_inner(trimmed, depth)?);
     }
 
     Ok(args)
 }
 
+#[cfg(test)]
 fn parse_single_arg(s: &str) -> Result<Arg, MdsError> {
+    parse_single_arg_inner(s, 0)
+}
+
+fn parse_single_arg_inner(s: &str, depth: usize) -> Result<Arg, MdsError> {
     let s = s.trim();
     if s.len() >= 2
         && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
@@ -591,7 +605,7 @@ fn parse_single_arg(s: &str) -> Result<Arg, MdsError> {
         let inner = s[paren_pos + 1..]
             .strip_suffix(')')
             .ok_or_else(|| MdsError::syntax("unclosed parenthesis in nested function call"))?;
-        let nested_args = parse_args(inner)?;
+        let nested_args = parse_args_inner(inner, depth + 1)?;
         Ok(Arg::Call {
             name,
             args: nested_args,
