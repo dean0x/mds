@@ -382,3 +382,98 @@ fn cross_module_function_preserves_lexical_scope() {
         "expected 'Welcome' in output, got: {result}"
     );
 }
+
+#[test]
+fn file_size_limit_rejects_huge_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let huge = dir.path().join("huge.mds");
+    // Create a file just over 10MB
+    let content = "x".repeat(10 * 1024 * 1024 + 1);
+    std::fs::write(&huge, &content).unwrap();
+    let result = mds::compile(&huge, None);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("file too large"), "Expected 'file too large' error, got: {err}");
+}
+
+#[test]
+fn path_traversal_import_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+
+    // Create a file outside 'sub' directory
+    let outside = dir.path().join("secret.mds");
+    std::fs::write(&outside, "Secret content").unwrap();
+
+    // Create a file inside 'sub' that tries to import outside its root
+    let child = sub.join("child.mds");
+    std::fs::write(&child, "@import \"../secret.mds\" as s\n\n@include s\n").unwrap();
+
+    let result = mds::compile(&child, None);
+    assert!(result.is_err(), "Traversal import should be rejected");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("escapes project directory") || err.contains("import"),
+        "Expected path traversal error, got: {err}"
+    );
+}
+
+#[test]
+fn import_depth_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    // Create a chain of 66 files, each importing the next
+    let depth = 66;
+    for i in 0..depth {
+        let name = format!("mod_{i}.mds");
+        let content = if i < depth - 1 {
+            let next = format!("mod_{}.mds", i + 1);
+            format!("@import \"./{next}\" as m{}\n\nLevel {i}\n", i + 1)
+        } else {
+            format!("End of chain {i}\n")
+        };
+        std::fs::write(dir.path().join(&name), content).unwrap();
+    }
+    let result = mds::compile(&dir.path().join("mod_0.mds"), None);
+    assert!(result.is_err(), "Deep import chain should be rejected");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("import depth") || err.contains("64"),
+        "Expected import depth error, got: {err}"
+    );
+}
+
+#[test]
+fn init_does_not_overwrite_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let existing = dir.path().join("existing.mds");
+    std::fs::write(&existing, "original content").unwrap();
+
+    // Try to init over existing file - should fail
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mds"))
+        .args(["init", existing.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "init should fail on existing file without --force");
+
+    // Verify original content preserved
+    let content = std::fs::read_to_string(&existing).unwrap();
+    assert_eq!(content, "original content");
+}
+
+#[test]
+fn check_stdin_valid() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mds"))
+        .args(["check", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(b"---\nname: World\n---\nHello {name}!\n").unwrap();
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(output.status.success(), "check stdin should succeed for valid input");
+}

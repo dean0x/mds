@@ -2,15 +2,20 @@ use crate::ast::*;
 use crate::error::MdsError;
 use crate::lexer::Token;
 
+/// Maximum nesting depth for @if/@for/@define blocks.
+/// Prevents stack overflow from crafted inputs with thousands of nested blocks.
+const MAX_NESTING_DEPTH: usize = 256;
+
 /// Parse a stream of tokens into a Module AST.
 pub fn parse(tokens: &[Token]) -> Result<Module, MdsError> {
-    let mut parser = Parser { tokens, pos: 0 };
+    let mut parser = Parser { tokens, pos: 0, depth: 0 };
     parser.parse_module()
 }
 
 struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -171,6 +176,13 @@ impl Parser<'_> {
     }
 
     fn parse_if_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(MdsError::syntax(format!(
+                "nesting depth exceeds maximum of {MAX_NESTING_DEPTH}"
+            )));
+        }
+
         let condition = rest
             .trim()
             .strip_suffix(':')
@@ -198,6 +210,7 @@ impl Parser<'_> {
 
         self.consume_end("@if")?;
 
+        self.depth -= 1;
         Ok(Node::If(IfBlock {
             condition,
             then_body,
@@ -207,6 +220,13 @@ impl Parser<'_> {
     }
 
     fn parse_for_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(MdsError::syntax(format!(
+                "nesting depth exceeds maximum of {MAX_NESTING_DEPTH}"
+            )));
+        }
+
         let rest = rest.trim();
         let rest = rest
             .strip_suffix(':')
@@ -227,6 +247,7 @@ impl Parser<'_> {
 
         self.consume_end("@for")?;
 
+        self.depth -= 1;
         Ok(Node::For(ForBlock {
             var,
             iterable,
@@ -236,6 +257,13 @@ impl Parser<'_> {
     }
 
     fn parse_define_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(MdsError::syntax(format!(
+                "nesting depth exceeds maximum of {MAX_NESTING_DEPTH}"
+            )));
+        }
+
         let rest = rest.trim();
         let rest = rest
             .strip_suffix(':')
@@ -266,6 +294,7 @@ impl Parser<'_> {
 
         self.consume_end("@define")?;
 
+        self.depth -= 1;
         Ok(Node::Define(DefineBlock {
             name,
             params,
@@ -734,6 +763,51 @@ mod tests {
         } else {
             panic!("expected StringLiteral");
         }
+    }
+
+    #[test]
+    fn parse_nesting_depth_limit_rejected() {
+        // Build a source string with MAX_NESTING_DEPTH + 1 nested @if blocks.
+        // Each @if requires a condition variable — we use "x" consistently.
+        let depth = MAX_NESTING_DEPTH + 1;
+        let mut src = String::new();
+        for _ in 0..depth {
+            src.push_str("@if x:\n");
+        }
+        for _ in 0..depth {
+            src.push_str("@end\n");
+        }
+        let tokens = tokenize(&src, "test.mds").unwrap();
+        let result = parse(&tokens);
+        assert!(
+            result.is_err(),
+            "nesting depth > MAX_NESTING_DEPTH must be rejected"
+        );
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nesting depth"),
+            "error must mention nesting depth, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_nesting_depth_at_limit_accepted() {
+        // Exactly MAX_NESTING_DEPTH nested @if blocks must succeed.
+        let depth = MAX_NESTING_DEPTH;
+        let mut src = String::new();
+        for _ in 0..depth {
+            src.push_str("@if x:\n");
+        }
+        for _ in 0..depth {
+            src.push_str("@end\n");
+        }
+        let tokens = tokenize(&src, "test.mds").unwrap();
+        let result = parse(&tokens);
+        assert!(
+            result.is_ok(),
+            "nesting depth == MAX_NESTING_DEPTH must be accepted: {result:?}"
+        );
     }
 
     // Fix 3: ASCII-only identifier validation

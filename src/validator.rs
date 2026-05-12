@@ -98,16 +98,15 @@ fn validate_expr(
                 .get_function(name)
                 .ok_or_else(|| MdsError::undefined_fn_at(name, file, source, offset, len))?;
             if args.len() != func.params.len() {
-                return Err(MdsError::ArityMismatch {
-                    name: name.clone(),
-                    expected: func.params.len(),
-                    got: args.len(),
-                    span: Some(miette::SourceSpan::new(offset.into(), len)),
-                    src: Some(std::sync::Arc::new(miette::NamedSource::new(
-                        file,
-                        source.to_string(),
-                    ))),
-                });
+                return Err(MdsError::arity_at(
+                    name,
+                    func.params.len(),
+                    args.len(),
+                    file,
+                    source,
+                    offset,
+                    len,
+                ));
             }
             validate_var_args(args, scope, file, source, offset)
         }
@@ -125,16 +124,15 @@ fn validate_expr(
                 .get(name)
                 .ok_or_else(|| MdsError::undefined_fn_at(&qualified, file, source, offset, len))?;
             if args.len() != func.params.len() {
-                return Err(MdsError::ArityMismatch {
-                    name: qualified,
-                    expected: func.params.len(),
-                    got: args.len(),
-                    span: Some(miette::SourceSpan::new(offset.into(), len)),
-                    src: Some(std::sync::Arc::new(miette::NamedSource::new(
-                        file,
-                        source.to_string(),
-                    ))),
-                });
+                return Err(MdsError::arity_at(
+                    &qualified,
+                    func.params.len(),
+                    args.len(),
+                    file,
+                    source,
+                    offset,
+                    len,
+                ));
             }
             validate_var_args(args, scope, file, source, offset)
         }

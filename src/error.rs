@@ -215,11 +215,43 @@ impl MdsError {
         }
     }
 
+    pub fn arity_at(
+        name: impl Into<String>,
+        expected: usize,
+        got: usize,
+        file: &str,
+        source: &str,
+        offset: usize,
+        len: usize,
+    ) -> Self {
+        MdsError::ArityMismatch {
+            name: name.into(),
+            expected,
+            got,
+            span: Some(SourceSpan::new(offset.into(), len)),
+            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
+        }
+    }
+
     pub fn type_error(got: impl Into<String>) -> Self {
         MdsError::TypeError {
             got: got.into(),
             span: None,
             src: None,
+        }
+    }
+
+    pub fn type_error_at(
+        got: impl Into<String>,
+        file: &str,
+        source: &str,
+        offset: usize,
+        len: usize,
+    ) -> Self {
+        MdsError::TypeError {
+            got: got.into(),
+            span: Some(SourceSpan::new(offset.into(), len)),
+            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
         }
     }
 
@@ -250,6 +282,20 @@ impl MdsError {
             name: name.into(),
             span: None,
             src: None,
+        }
+    }
+
+    pub fn recursion_at(
+        name: impl Into<String>,
+        file: &str,
+        source: &str,
+        offset: usize,
+        len: usize,
+    ) -> Self {
+        MdsError::Recursion {
+            name: name.into(),
+            span: Some(SourceSpan::new(offset.into(), len)),
+            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
         }
     }
 
