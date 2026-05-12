@@ -62,11 +62,16 @@ pub enum Expr {
     },
 }
 
-/// A function argument — either a string literal or a variable reference.
+/// A function argument — a string literal, variable reference, or nested call.
 #[derive(Debug, Clone)]
 pub enum Arg {
     StringLiteral(String),
     Var(String),
+    /// Nested function call: `{outer(inner("arg"))}`
+    Call {
+        name: String,
+        args: Vec<Arg>,
+    },
 }
 
 #[derive(Debug, Clone)]

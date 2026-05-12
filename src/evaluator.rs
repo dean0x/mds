@@ -72,7 +72,7 @@ fn evaluate_expr(
             Ok(value.to_string())
         }
         Expr::Call { name, args } => {
-            let resolved_args = resolve_args(args, scope)?;
+            let resolved_args = resolve_args(args, scope, call_stack)?;
             call_function(name, &resolved_args, scope, call_stack)
         }
         Expr::QualifiedCall {
@@ -80,13 +80,17 @@ fn evaluate_expr(
             name,
             args,
         } => {
-            let resolved_args = resolve_args(args, scope)?;
+            let resolved_args = resolve_args(args, scope, call_stack)?;
             call_qualified_function(namespace, name, &resolved_args, scope, call_stack)
         }
     }
 }
 
-fn resolve_args(args: &[Arg], scope: &Scope) -> Result<Vec<Value>, MdsError> {
+fn resolve_args(
+    args: &[Arg],
+    scope: &mut Scope,
+    call_stack: &mut HashSet<String>,
+) -> Result<Vec<Value>, MdsError> {
     args.iter()
         .map(|arg| match arg {
             Arg::StringLiteral(s) => Ok(Value::String(s.clone())),
@@ -94,6 +98,14 @@ fn resolve_args(args: &[Arg], scope: &Scope) -> Result<Vec<Value>, MdsError> {
                 .get_var(name)
                 .cloned()
                 .ok_or_else(|| MdsError::undefined_var(name)),
+            Arg::Call {
+                name,
+                args: inner_args,
+            } => {
+                let resolved = resolve_args(inner_args, scope, call_stack)?;
+                let result = call_function(name, &resolved, scope, call_stack)?;
+                Ok(Value::String(result))
+            }
         })
         .collect()
 }

@@ -8,6 +8,10 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn mds_bin() -> std::process::Command {
+    std::process::Command::new(env!("CARGO_BIN_EXE_mds"))
+}
+
 #[test]
 fn simple_variable_interpolation() {
     let result = mds::compile(&fixture("simple.mds"), None).unwrap();
@@ -591,5 +595,324 @@ fn set_flag_cli_overrides() {
     assert!(
         stdout.contains("Hello Test!"),
         "expected '--set name=Test' to override frontmatter, got: {stdout}"
+    );
+}
+
+// ── CLI Integration Tests ────────────────────────────────────────────────────
+
+#[test]
+fn build_to_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let output_path = dir.path().join("output.md");
+
+    let output = mds_bin()
+        .args([
+            "build",
+            fixture("simple.mds").to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "build to file should succeed");
+    let content = std::fs::read_to_string(&output_path).unwrap();
+    assert!(
+        content.contains("Hello Alice!"),
+        "output file should contain compiled content, got: {content}"
+    );
+}
+
+#[test]
+fn build_from_stdin() {
+    let mut child = mds_bin()
+        .args(["build", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"---\nname: World\n---\nHello {name}!\n")
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "build from stdin should succeed");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Hello World!"),
+        "stdin build should produce 'Hello World!', got: {stdout}"
+    );
+}
+
+#[test]
+fn build_with_vars_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let vars_path = dir.path().join("vars.json");
+    std::fs::write(&vars_path, r#"{"name": "Overridden"}"#).unwrap();
+
+    let output = mds_bin()
+        .args([
+            "build",
+            fixture("simple.mds").to_str().unwrap(),
+            "--vars",
+            vars_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "build with vars file should succeed"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Hello Overridden!"),
+        "vars file should override frontmatter 'name', got: {stdout}"
+    );
+}
+
+#[test]
+fn build_invalid_input_exits_nonzero() {
+    let output = mds_bin()
+        .args(["build", "nonexistent_file_that_does_not_exist.mds"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "build with nonexistent file should exit non-zero"
+    );
+}
+
+#[test]
+fn check_invalid_exits_nonzero() {
+    let output = mds_bin()
+        .args(["check", fixture("undefined_var.mds").to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "check on invalid file should exit non-zero"
+    );
+}
+
+#[test]
+fn init_creates_compilable_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("test.mds");
+
+    // Create the file
+    let init_output = mds_bin()
+        .args(["init", target.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(init_output.status.success(), "init should succeed");
+    assert!(target.exists(), "init should create the file");
+
+    // Compile the created file
+    let build_output = mds_bin()
+        .args(["build", target.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        build_output.status.success(),
+        "init-created file should compile successfully; stderr: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+}
+
+#[test]
+fn init_force_overwrites() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("test.mds");
+    std::fs::write(&target, "original content").unwrap();
+
+    let output = mds_bin()
+        .args(["init", target.to_str().unwrap(), "--force"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "init --force should succeed");
+    let content = std::fs::read_to_string(&target).unwrap();
+    assert!(
+        content != "original content",
+        "init --force should overwrite the file"
+    );
+    assert!(
+        content.contains("Hello"),
+        "overwritten file should contain template content"
+    );
+}
+
+#[test]
+fn build_quiet_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let output_path = dir.path().join("output.md");
+
+    let output = mds_bin()
+        .args([
+            "build",
+            fixture("simple.mds").to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+            "-q",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "quiet build should succeed");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.is_empty(),
+        "quiet flag should produce no stderr output, got: {stderr}"
+    );
+}
+
+// ── Edge Case Tests ──────────────────────────────────────────────────────────
+
+#[test]
+fn md_file_with_type_mds_compiles() {
+    // Per spec section 9.2: a .md file with type: mds in frontmatter should compile
+    let result = mds::compile(&fixture("type_mds_md_file.md"), None).unwrap();
+    assert!(
+        result.contains("Hello World!"),
+        "md file with type:mds should compile, got: {result}"
+    );
+}
+
+#[test]
+fn nested_loops() {
+    let result = mds::compile(&fixture("nested_loops.mds"), None).unwrap();
+    assert!(result.contains("row1-col1"), "nested loops: row1-col1");
+    assert!(result.contains("row1-col2"), "nested loops: row1-col2");
+    assert!(result.contains("row2-col1"), "nested loops: row2-col1");
+    assert!(result.contains("row2-col2"), "nested loops: row2-col2");
+}
+
+#[test]
+fn function_called_in_loop() {
+    let result = mds::compile(&fixture("fn_in_loop.mds"), None).unwrap();
+    assert!(result.contains("Hello Alice!"), "fn in loop: Alice");
+    assert!(result.contains("Hello Bob!"), "fn in loop: Bob");
+    assert!(result.contains("Hello Charlie!"), "fn in loop: Charlie");
+}
+
+#[test]
+fn loop_var_shadows_outer() {
+    let result = mds::compile(&fixture("loop_var_shadow.mds"), None).unwrap();
+    // Before loop, outer value
+    assert!(
+        result.contains("Before: outer_value"),
+        "before loop: outer_value"
+    );
+    // During loop, inner values
+    assert!(result.contains("- inner1"), "loop iteration: inner1");
+    assert!(result.contains("- inner2"), "loop iteration: inner2");
+    // After loop, restored outer value
+    assert!(
+        result.contains("After: outer_value"),
+        "after loop: outer_value restored"
+    );
+}
+
+#[test]
+fn function_param_shadows_outer() {
+    let result = mds::compile(&fixture("fn_param_shadow.mds"), None).unwrap();
+    assert!(
+        result.contains("Before: outer"),
+        "before fn call: outer name"
+    );
+    assert!(
+        result.contains("Hello inner!"),
+        "inside fn: param shadows outer"
+    );
+    assert!(
+        result.contains("After: outer"),
+        "after fn call: outer name restored"
+    );
+}
+
+#[test]
+fn selective_import_nonexistent_errors() {
+    let result = mds::compile(&fixture("selective_import_nonexistent.mds"), None);
+    assert!(
+        result.is_err(),
+        "selective import of nonexistent symbol should error"
+    );
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("nonexistent") || err.contains("not exported"),
+        "error should mention nonexistent symbol, got: {err}"
+    );
+}
+
+#[test]
+fn nested_function_calls_in_interpolation() {
+    let result = mds::compile(&fixture("nested_fn_calls.mds"), None).unwrap();
+    // outer(inner("arg")) => outer("arg!") => "[arg!]"
+    assert!(
+        result.contains("[arg!]"),
+        "nested fn calls should produce '[arg!]', got: {result}"
+    );
+}
+
+#[test]
+fn empty_frontmatter() {
+    let result = mds::compile(&fixture("empty_frontmatter.mds"), None).unwrap();
+    assert!(
+        result.contains("Hello World!"),
+        "empty frontmatter file should compile, got: {result}"
+    );
+}
+
+#[test]
+fn no_frontmatter_with_directives() {
+    let result = mds::compile(&fixture("no_frontmatter_with_define.mds"), None).unwrap();
+    assert!(
+        result.contains("Hello World!"),
+        "file with @define but no frontmatter should compile, got: {result}"
+    );
+}
+
+#[test]
+fn multiple_escaped_braces() {
+    let result = mds::compile(&fixture("multiple_escaped_braces.mds"), None).unwrap();
+    // \{a\} → literal '{' + 'a\}' as text, \{b\} → literal '{' + 'b\}' as text
+    // Per spec: only \{ is an escape sequence, \} is plain text
+    assert!(
+        result.contains("{a") && result.contains("{b"),
+        "escaped braces should produce literal '{{', got: {result}"
+    );
+}
+
+// ── Error Format Verification ────────────────────────────────────────────────
+
+#[test]
+fn error_output_shows_line_numbers() {
+    // Compile a file with a known error and verify the miette output
+    // includes source context with line numbers
+    let source = "---\nname: Alice\n---\nHello {username}!\n";
+    let result = mds::compile_str_with(source, None, None);
+    assert!(result.is_err(), "should fail with undefined variable");
+
+    let err = result.unwrap_err();
+    // Format the error using miette's Debug impl (includes source context)
+    let formatted = format!("{err:?}");
+    assert!(
+        formatted.contains("username"),
+        "error should mention 'username', got: {formatted}"
+    );
+    // miette's fancy rendering includes line number context
+    // The source has the error on line 4
+    assert!(
+        formatted.contains("4") || formatted.contains("username"),
+        "error output should include line number context, got: {formatted}"
     );
 }

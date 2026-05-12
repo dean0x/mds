@@ -517,6 +517,7 @@ fn parse_interpolation_expr(content: &str, offset: usize) -> Result<Interpolatio
 }
 
 /// Parse function call arguments.
+/// Handles nested parentheses so that `inner("arg")` is kept as a single token.
 fn parse_args(args_str: &str) -> Result<Vec<Arg>, MdsError> {
     let args_str = args_str.trim();
     if args_str.is_empty() {
@@ -528,6 +529,7 @@ fn parse_args(args_str: &str) -> Result<Vec<Arg>, MdsError> {
     let mut in_string = false;
     let mut string_char = '"';
     let mut escaped = false;
+    let mut paren_depth: usize = 0;
 
     for ch in args_str.chars() {
         if escaped {
@@ -547,7 +549,15 @@ fn parse_args(args_str: &str) -> Result<Vec<Arg>, MdsError> {
             in_string = true;
             string_char = ch;
             current.push(ch);
-        } else if ch == ',' {
+        } else if ch == '(' {
+            paren_depth += 1;
+            current.push(ch);
+        } else if ch == ')' {
+            // paren_depth should not reach 0 here since the outer call site
+            // already stripped the closing ')' of the top-level call
+            paren_depth = paren_depth.saturating_sub(1);
+            current.push(ch);
+        } else if ch == ',' && paren_depth == 0 {
             args.push(parse_single_arg(current.trim())?);
             current.clear();
         } else {
@@ -574,6 +584,22 @@ fn parse_single_arg(s: &str) -> Result<Arg, MdsError> {
             .replace("\\'", "'")
             .replace("\\\\", "\\");
         Ok(Arg::StringLiteral(unescaped))
+    } else if let Some(paren_pos) = s.find('(') {
+        // Nested function call: name(args)
+        let name = s[..paren_pos].trim().to_string();
+        if !is_valid_identifier(&name) {
+            return Err(MdsError::syntax(format!(
+                "invalid function name in argument: '{name}'"
+            )));
+        }
+        let inner = s[paren_pos + 1..]
+            .strip_suffix(')')
+            .ok_or_else(|| MdsError::syntax("unclosed parenthesis in nested function call"))?;
+        let nested_args = parse_args(inner)?;
+        Ok(Arg::Call {
+            name,
+            args: nested_args,
+        })
     } else if is_valid_identifier(s) {
         // Variable reference
         Ok(Arg::Var(s.to_string()))

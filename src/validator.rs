@@ -186,7 +186,7 @@ mod tests {
     }
 }
 
-/// Check that all variable arguments reference defined variables.
+/// Check that all arguments are valid: variable refs exist, nested calls are well-formed.
 fn validate_var_args(
     args: &[Arg],
     scope: &Scope,
@@ -195,15 +195,39 @@ fn validate_var_args(
     offset: usize,
 ) -> Result<(), MdsError> {
     for arg in args {
-        if let Arg::Var(var_name) = arg {
-            if scope.get_var(var_name).is_none() {
-                return Err(MdsError::undefined_var_at(
-                    var_name,
-                    file,
-                    source,
-                    offset,
-                    var_name.len(),
-                ));
+        match arg {
+            Arg::StringLiteral(_) => {}
+            Arg::Var(var_name) => {
+                if scope.get_var(var_name).is_none() {
+                    return Err(MdsError::undefined_var_at(
+                        var_name,
+                        file,
+                        source,
+                        offset,
+                        var_name.len(),
+                    ));
+                }
+            }
+            Arg::Call {
+                name,
+                args: inner_args,
+            } => {
+                // Validate the nested call as if it were a top-level Expr::Call
+                let func = scope.get_function(name).ok_or_else(|| {
+                    MdsError::undefined_fn_at(name, file, source, offset, name.len())
+                })?;
+                if inner_args.len() != func.params.len() {
+                    return Err(MdsError::arity_at(
+                        name,
+                        func.params.len(),
+                        inner_args.len(),
+                        file,
+                        source,
+                        offset,
+                        name.len(),
+                    ));
+                }
+                validate_var_args(inner_args, scope, file, source, offset)?;
             }
         }
     }
