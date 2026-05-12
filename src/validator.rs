@@ -45,8 +45,15 @@ fn validate_node(node: &Node, scope: &Scope) -> Result<(), MdsError> {
             // Function definitions are validated when called
             Ok(())
         }
-        Node::Import(_) | Node::Export(_) | Node::Include(_) => {
+        Node::Import(_) | Node::Export(_) => {
             // Handled by resolver
+            Ok(())
+        }
+        Node::Include(inc) => {
+            // Verify the referenced namespace exists (must have been @import-ed)
+            if scope.get_namespace(&inc.alias).is_none() {
+                return Err(MdsError::undefined_var(&inc.alias));
+            }
             Ok(())
         }
     }
@@ -61,9 +68,14 @@ fn validate_expr(expr: &Expr, scope: &Scope) -> Result<(), MdsError> {
             Ok(())
         }
         Expr::Call { name, args } => {
-            if let Some(func) = scope.get_function(name) {
-                if args.len() != func.params.len() {
-                    return Err(MdsError::arity(name, func.params.len(), args.len()));
+            match scope.get_function(name) {
+                Some(func) => {
+                    if args.len() != func.params.len() {
+                        return Err(MdsError::arity(name, func.params.len(), args.len()));
+                    }
+                }
+                None => {
+                    return Err(MdsError::undefined_fn(name));
                 }
             }
             validate_var_args(args, scope)
@@ -73,12 +85,26 @@ fn validate_expr(expr: &Expr, scope: &Scope) -> Result<(), MdsError> {
             name,
             args,
         } => {
-            if let Some(ns) = scope.get_namespace(namespace) {
-                if let Some(func) = ns.functions.get(name) {
-                    if args.len() != func.params.len() {
-                        let qualified = format!("{namespace}.{name}");
-                        return Err(MdsError::arity(&qualified, func.params.len(), args.len()));
+            match scope.get_namespace(namespace) {
+                Some(ns) => {
+                    let qualified = format!("{namespace}.{name}");
+                    match ns.functions.get(name) {
+                        Some(func) => {
+                            if args.len() != func.params.len() {
+                                return Err(MdsError::arity(
+                                    &qualified,
+                                    func.params.len(),
+                                    args.len(),
+                                ));
+                            }
+                        }
+                        None => {
+                            return Err(MdsError::undefined_fn(&qualified));
+                        }
                     }
+                }
+                None => {
+                    return Err(MdsError::undefined_var(namespace));
                 }
             }
             validate_var_args(args, scope)

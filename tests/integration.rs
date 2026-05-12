@@ -271,3 +271,27 @@ fn compile_str_no_frontmatter() {
     let result = mds::compile_str("Just plain text.", None, None).unwrap();
     assert!(result.contains("Just plain text."));
 }
+
+#[test]
+fn undefined_function_error() {
+    let source = "{nonexistent(\"arg\")}\n";
+    let result = mds::compile_str(source, None, None);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("undefined function") || err.contains("nonexistent"),
+        "expected undefined function error, got: {err}"
+    );
+}
+
+#[test]
+fn undefined_namespace_in_qualified_call() {
+    let source = "{missing_ns.greet(\"Alice\")}\n";
+    let result = mds::compile_str(source, None, None);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("undefined") || err.contains("missing_ns"),
+        "expected undefined namespace error, got: {err}"
+    );
+}

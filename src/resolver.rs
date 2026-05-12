@@ -66,13 +66,13 @@ impl ModuleCache {
             return Err(MdsError::CircularImport { cycle });
         }
 
-        // Validate file type
-        validate_file_type(&canonical)?;
-
         // Read source
         let source = std::fs::read_to_string(&canonical).map_err(|e| MdsError::Io {
             message: format!("cannot read {}: {e}", canonical.display()),
         })?;
+
+        // Validate file type (uses already-read source for .md frontmatter check)
+        validate_file_type(&canonical, &source)?;
 
         let file_str = canonical.display().to_string();
         let base_dir = canonical.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -315,7 +315,8 @@ fn validate_import_path(path: &str) -> Result<(), MdsError> {
 }
 
 /// Validate that a file is a valid MDS file.
-fn validate_file_type(path: &Path) -> Result<(), MdsError> {
+/// Accepts the already-read source content to avoid double-reading for `.md` files.
+fn validate_file_type(path: &Path, source: &str) -> Result<(), MdsError> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -325,9 +326,6 @@ fn validate_file_type(path: &Path) -> Result<(), MdsError> {
         "mds" => Ok(()),
         "md" => {
             // Check for `type: mds` in frontmatter
-            let source = std::fs::read_to_string(path).map_err(|e| MdsError::Io {
-                message: format!("cannot read {}: {e}", path.display()),
-            })?;
             if let Some(after_prefix) = source.strip_prefix("---") {
                 if let Some(end) = after_prefix.find("---") {
                     let fm = &after_prefix[..end];
