@@ -298,3 +298,14 @@ fn undefined_namespace_in_qualified_call() {
         "expected undefined namespace error, got: {err}"
     );
 }
+
+#[test]
+fn name_collision_on_merge_import() {
+    let result = mds::compile(&fixture("collision_consumer.mds"), None);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("name collision") || err.contains("greet"),
+        "expected name collision error, got: {err}"
+    );
+}

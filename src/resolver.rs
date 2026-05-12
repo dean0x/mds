@@ -211,7 +211,7 @@ impl ModuleCache {
         }
 
         // Validate semantic correctness before evaluation
-        validator::validate(&module.body, &scope)?;
+        validator::validate(&module.body, &scope, file_str, source)?;
 
         // Evaluate the body to get prompt text
         let prompt_body = evaluate(&module.body, &mut scope)?;
