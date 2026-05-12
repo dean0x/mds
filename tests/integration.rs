@@ -544,6 +544,15 @@ fn duplicate_define_params_errors() {
 }
 
 #[test]
+fn selective_import_prompt_body() {
+    let result = mds::compile(&fixture("prompt_consumer.mds"), None).unwrap();
+    assert!(
+        result.contains("This is the module body text."),
+        "selective import of 'prompt' should bring in the module's body text, got: {result}"
+    );
+}
+
+#[test]
 fn set_flag_cli_overrides() {
     // --set name=Test should override the frontmatter variable 'name'
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_mds"))

@@ -286,9 +286,9 @@ impl ModuleCache {
             }
         }
 
-        // Validate that all named exports refer to defined functions
+        // Validate that all named exports refer to defined functions or "prompt"
         for name in &explicit_exports {
-            if !functions.contains_key(name) {
+            if name != "prompt" && !functions.contains_key(name) {
                 return Err(MdsError::export_error(format!(
                     "cannot export '{name}': not defined in this module"
                 )));
@@ -336,7 +336,7 @@ impl ModuleCache {
                 validate_import_path(path)?;
                 let import_path = resolve_path(base_dir, path);
                 let resolved = self.resolve(&import_path, runtime_vars)?;
-                // Per spec: only functions (and prompt body) are imported via merge.
+                // Per spec: only functions and the prompt body are imported via merge.
                 // Frontmatter variables from the imported module are NOT brought into scope.
                 for (name, func) in resolved.get_all_exports() {
                     if scope.get_function(&name).is_some() {
@@ -344,13 +344,24 @@ impl ModuleCache {
                     }
                     scope.set_function(&name, func);
                 }
+                if let Some(val) = resolved.get_prompt_value() {
+                    scope.set_var("prompt", val);
+                }
             }
             ImportDirective::Selective { names, path, .. } => {
                 validate_import_path(path)?;
                 let import_path = resolve_path(base_dir, path);
                 let resolved = self.resolve(&import_path, runtime_vars)?;
                 for name in names {
-                    if let Some(func) = resolved.get_export(name) {
+                    if name == "prompt" {
+                        if let Some(val) = resolved.get_prompt_value() {
+                            scope.set_var("prompt", val);
+                        } else {
+                            return Err(MdsError::import_error(format!(
+                                "'{name}' is not exported from '{path}'"
+                            )));
+                        }
+                    } else if let Some(func) = resolved.get_export(name) {
                         scope.set_function(name, func);
                     } else {
                         return Err(MdsError::import_error(format!(
@@ -380,6 +391,22 @@ impl ResolvedModule {
             .filter(|(name, _)| !self.has_explicit_exports || self.explicit_exports.contains(*name))
             .map(|(name, func)| (name.clone(), func.clone()))
             .collect()
+    }
+
+    /// Check if `prompt` is an available export for this module.
+    pub fn has_prompt_export(&self) -> bool {
+        if self.prompt_body.is_none() {
+            return false;
+        }
+        !self.has_explicit_exports || self.explicit_exports.contains("prompt")
+    }
+
+    /// Get the prompt body as a Value, if exportable.
+    pub fn get_prompt_value(&self) -> Option<Value> {
+        if !self.has_prompt_export() {
+            return None;
+        }
+        self.prompt_body.as_ref().map(|body| Value::String(body.clone()))
     }
 }
 
