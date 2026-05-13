@@ -186,15 +186,15 @@ fn build_runtime_vars(
     Ok(runtime_vars)
 }
 
-/// Exit with an error if the input path is a directory (only file or stdin allowed).
-fn reject_directory_input(input: &Path) {
+/// Return an error if the input path is a directory (only file or stdin allowed).
+fn reject_directory_input(input: &Path) -> Result<(), miette::Error> {
     if input != Path::new("-") && input.is_dir() {
-        eprintln!(
-            "error: expected a file, got a directory: {}",
+        return Err(miette::miette!(
+            "expected a file, got a directory: {}",
             input.display()
-        );
-        process::exit(1);
+        ));
     }
+    Ok(())
 }
 
 /// Read from stdin and return the source string along with the current working directory.
@@ -229,7 +229,7 @@ fn run(cli: Cli) -> Result<(), miette::Error> {
                 }
             };
 
-            reject_directory_input(&input);
+            reject_directory_input(&input)?;
 
             let (compiled, warnings) = if input == Path::new("-") {
                 let (source, cwd) = read_stdin()?;
@@ -270,7 +270,7 @@ fn run(cli: Cli) -> Result<(), miette::Error> {
                 None => auto_detect_mds_file()?,
             };
 
-            reject_directory_input(&input);
+            reject_directory_input(&input)?;
 
             if input == Path::new("-") {
                 let (source, cwd) = read_stdin()?;
