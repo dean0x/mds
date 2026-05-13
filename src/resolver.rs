@@ -353,8 +353,9 @@ impl ModuleCache {
                 validate_import_path(path)?;
                 let import_path = resolve_path(base_dir, path);
                 let resolved = self.resolve(&import_path, runtime_vars, warnings)?;
-                let not_exported =
-                    |name: &str| MdsError::import_error(format!("'{name}' is not exported from '{path}'"));
+                let not_exported = |name: &str| {
+                    MdsError::import_error(format!("'{name}' is not exported from '{path}'"))
+                };
                 for name in names {
                     if name == "prompt" {
                         scope.set_var(
@@ -366,7 +367,9 @@ impl ModuleCache {
                     } else {
                         scope.set_function(
                             name,
-                            resolved.get_export(name).ok_or_else(|| not_exported(name))?,
+                            resolved
+                                .get_export(name)
+                                .ok_or_else(|| not_exported(name))?,
                         );
                     }
                 }
