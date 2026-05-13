@@ -84,10 +84,10 @@ impl Scope {
 
     /// Set a variable in the current (innermost) frame.
     pub fn set_var(&mut self, name: &str, value: Value) {
+        // Scope::new() always pushes a frame, and pop() refuses to remove the last one,
+        // so last_mut() is always Some.
         debug_assert!(!self.frames.is_empty(), "scope always has at least one frame");
-        if let Some(frame) = self.frames.last_mut() {
-            frame.vars.insert(name.to_string(), value);
-        }
+        self.frames.last_mut().unwrap().vars.insert(name.to_string(), value);
     }
 
     /// Look up a variable by walking the scope chain (innermost first).
@@ -98,9 +98,7 @@ impl Scope {
     /// Define a function in the current frame.
     pub fn set_function(&mut self, name: &str, func: FunctionDef) {
         debug_assert!(!self.frames.is_empty(), "scope always has at least one frame");
-        if let Some(frame) = self.frames.last_mut() {
-            frame.functions.insert(name.to_string(), func);
-        }
+        self.frames.last_mut().unwrap().functions.insert(name.to_string(), func);
     }
 
     /// Look up a function by walking the scope chain.
@@ -111,9 +109,7 @@ impl Scope {
     /// Register a namespace (for aliased imports).
     pub fn set_namespace(&mut self, alias: &str, ns: NamespaceScope) {
         debug_assert!(!self.frames.is_empty(), "scope always has at least one frame");
-        if let Some(frame) = self.frames.last_mut() {
-            frame.namespaces.insert(alias.to_string(), ns);
-        }
+        self.frames.last_mut().unwrap().namespaces.insert(alias.to_string(), ns);
     }
 
     /// Look up a namespace by alias.

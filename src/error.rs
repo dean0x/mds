@@ -326,6 +326,21 @@ impl MdsError {
         }
     }
 
+    pub fn recursion_at(
+        name: impl Into<String>,
+        file: &str,
+        source: &str,
+        offset: usize,
+        len: usize,
+    ) -> Self {
+        let (span, src) = at(file, source, offset, len);
+        MdsError::Recursion {
+            name: name.into(),
+            span,
+            src,
+        }
+    }
+
     pub fn file_not_found(path: impl Into<String>) -> Self {
         MdsError::FileNotFound {
             path: path.into(),
@@ -372,6 +387,14 @@ impl MdsError {
         }
     }
 
+    pub fn circular_import(cycle: impl Into<String>) -> Self {
+        MdsError::CircularImport {
+            cycle: cycle.into(),
+            span: None,
+            src: None,
+        }
+    }
+
     pub fn circular_import_at(
         cycle: impl Into<String>,
         file: &str,
@@ -395,35 +418,6 @@ impl MdsError {
         }
     }
 
-    pub fn resource_limit(message: impl Into<String>) -> Self {
-        MdsError::ResourceLimit {
-            message: message.into(),
-        }
-    }
-
-    pub fn circular_import(cycle: impl Into<String>) -> Self {
-        MdsError::CircularImport {
-            cycle: cycle.into(),
-            span: None,
-            src: None,
-        }
-    }
-
-    pub fn recursion_at(
-        name: impl Into<String>,
-        file: &str,
-        source: &str,
-        offset: usize,
-        len: usize,
-    ) -> Self {
-        let (span, src) = at(file, source, offset, len);
-        MdsError::Recursion {
-            name: name.into(),
-            span,
-            src,
-        }
-    }
-
     pub fn export_error_at(
         message: impl Into<String>,
         file: &str,
@@ -436,6 +430,12 @@ impl MdsError {
             message: message.into(),
             span,
             src,
+        }
+    }
+
+    pub fn resource_limit(message: impl Into<String>) -> Self {
+        MdsError::ResourceLimit {
+            message: message.into(),
         }
     }
 }
