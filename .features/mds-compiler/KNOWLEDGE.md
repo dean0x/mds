@@ -1,7 +1,7 @@
 ---
 feature: mds-compiler
 name: MDS Compiler
-description: "Use when working on the MDS compilation pipeline, adding directives, modifying scope/variable handling, extending the module system, or debugging output rendering. Keywords: lexer, parser, evaluator, resolver, validator, scope, frontmatter, interpolation, directive, import, export, include, define, for, if, closure, lexical scope, prompt export, nested function calls, arg parsing, warnings, quiet mode, stdin, auto-detect, compile_file."
+description: "Use when working on the MDS compilation pipeline, adding directives, modifying scope/variable handling, extending the module system, or debugging output rendering. Keywords: lexer, parser, evaluator, resolver, validator, scope, frontmatter, interpolation, directive, import, export, include, define, for, if, closure, lexical scope, prompt export, nested function calls, arg parsing, warnings, quiet mode, stdin, auto-detect, compile_file, reexport."
 category: architecture
 directories: [src/, tests/]
 referencedFiles:
@@ -45,6 +45,8 @@ The binary is a CLI tool (`mds build`, `mds check`, `mds init`) backed by a libr
 | `load_vars_file(path)` | Load runtime vars from a JSON file |
 
 `compile_file` is the simplest entry point for embedding MDS in tools that already have a path as `&str`. It does not accept runtime vars; use `compile` directly when runtime overrides are needed.
+
+All public `compile*` and `check*` functions carry `#[must_use = "..."]` attributes. The Rust compiler will warn if a caller discards the return value — discarding compiled output is almost certainly a bug. When adding new public API functions, include `#[must_use]`.
 
 All compile/check functions funnel through `ModuleCache::resolve` / `ModuleCache::resolve_source`, which is the single entry point to the full pipeline. The CLI and any programmatic callers share exactly the same compilation behavior.
 
@@ -115,6 +117,8 @@ The `Value` enum has five variants: `String`, `Number(f64)`, `Boolean`, `Array(V
 
 Both `from_yaml` and `from_json` converters exist, with identical rejection of object/map types. `from_yaml` also handles `serde_yml::Value::Tagged` by unwrapping the tag and recursing.
 
+The `Value` enum implements `From` for common Rust types: `&str`, `String`, `f64`, `i64`, `i32`, `bool`, and `Vec<T: Into<Value>>`. Use these conversions in test setup and programmatic API code rather than constructing enum variants directly. The generic `Vec<T>` impl means `vec![1_i32, 2, 3].into()` produces `Value::Array`.
+
 ### Parser (`src/parser.rs`)
 
 The parser converts a token stream to a `Module` AST. Key hardening:
@@ -164,7 +168,7 @@ The resolver is the orchestrator. `ModuleCache` drives the full pipeline for eac
 - `resolving: HashSet<PathBuf>` — O(1) membership test
 - `resolving_stack: Vec<PathBuf>` — insertion-ordered list for cycle path reconstruction (e.g., `a.mds → b.mds → a.mds`)
 
-`build_cycle_string` reconstructs the cycle path by finding the repeated path in `resolving_stack` using `.position(...).expect(...)`. The `.expect` is intentional — the invariant is that `repeated` is always in the stack at cycle-detection time (it was placed there by the caller). This is a documented internal invariant, not a defensive guard.
+`build_cycle_string` reconstructs the cycle path by finding the repeated path in `resolving_stack` using `.position(...).expect(...)`. The `.expect` is intentional — the invariant is that `repeated` is always in the stack at cycle-detection time (it was placed there by the caller). This is a documented internal invariant, not a defensive guard. A private `path_display_name` helper extracts the filename portion of each path for display in cycle strings, falling back to the full path or `"?"`.
 
 **`process_module`** is the inner workhorse: it tokenizes, parses, builds scope from frontmatter + runtime vars, walks the AST to register functions (capturing closure scope) and resolve imports, validates, and evaluates. The result is a `ResolvedModule`. Warnings are threaded through as `&mut Vec<String>` from the public API all the way into `evaluate`.
 
@@ -174,18 +178,24 @@ The resolver is the orchestrator. `ModuleCache` drives the full pipeline for eac
 - `has_explicit_exports: bool` — true once any `@export` appears
 - `explicit_exports: HashSet<String>` — the explicitly listed export names
 
+**`ResolvedModule` methods**:
+- `get_export(name)` → `Option<FunctionDef>` — returns `None` if the module has explicit exports and `name` is not in the list; otherwise clones from `functions`
+- `get_all_exports()` → `Vec<(String, FunctionDef)>` — returns all exported (name, func) pairs, filtered by `explicit_exports` when present
+- `has_prompt_export()` — `true` when `prompt_body` is `Some` and `prompt` is not hidden by explicit exports
+- `get_prompt_value()` — returns `prompt_body` as `Value::String` if it is an available export; `None` otherwise
+
 **`prompt` as an export**: Any module with a non-empty body implicitly exports it as `prompt`, unless the module has explicit exports and `"prompt"` is not listed. Importers can bring in the body text:
 - `@import { prompt } from "./module.mds"` → binds body text to `prompt` variable
 - Merge import of a module with a body → `prompt` variable brought into scope
 
-**Export validation**: After collecting all `@export` directives, the resolver checks every named export either refers to a defined function or is the string `"prompt"`. Exporting an unknown name is a compile error.
+**Export validation**: After collecting all `@export` directives, the resolver checks every named export either refers to a defined function or is the string `"prompt"`. Exporting an unknown name is a compile error. For re-exports (`@export name from "path"`), the source module is resolved first and `get_export(name)` is called — if `None`, an export error is returned immediately with a message mentioning the symbol and source path.
 
 **Import semantics**:
 - **Alias** (`@import "path" as ns`): resolved module becomes a `NamespaceScope` under `ns`; functions accessed as `{ns.fn(arg)}`
 - **Merge** (`@import "path"`): all exported functions brought into scope; frontmatter variables from the imported module are NOT brought in (only functions and `prompt` body)
 - **Selective** (`@import { fn } from "path"`): only named exports brought in; `prompt` is handled specially (bound as a variable, not a function)
 
-**Re-export semantics** (`@export name from "path"`, `@export * from "path"`): The source module is resolved and its exports are added to the current module's `functions` map. They are NOT added to the current file's runtime scope — they are only available to modules that import the current module.
+**Re-export semantics** (`@export name from "path"`, `@export * from "path"`): The source module is resolved and its exports are added to the current module's `functions` map. They are NOT added to the current file's runtime scope — they are only available to modules that import the current module. If a named re-export target does not exist in the source module's exports, the error is raised at the re-export site (not at the consumer), with a message of the form `"cannot re-export '{name}': not exported from \"{path}\""`.
 
 **Closure capture**: When a `@define` node is processed, the resolver calls `FunctionDef::from(def)` (which creates empty captures), then immediately fills `func.captured_namespaces`, `func.captured_functions`, and `func.captured_vars` from the current scope state. This means a function sees the scope as it existed at its definition point, not at its call point.
 
@@ -331,6 +341,7 @@ Both `Build` and `Check` commands use `input: Option<PathBuf>`. When `None`, the
 - **Passing `resolve_args` without `call_stack` or `warnings`** — nested `Arg::Call` evaluation requires the call stack for recursion detection and warnings for diagnostics. Any future refactor that removes these from `resolve_args` will silently allow unbounded recursion through argument nesting or lose warning context.
 - **Using `compile` instead of `compile_collecting_warnings` in CLI code** — the CLI must use the collecting variants to properly gate warning output on the `--quiet` flag.
 - **Using `.unwrap_or(0)` or silent fallbacks in invariant-enforcing code** — when a `position()` or similar lookup encodes a known program invariant (like `build_cycle_string` finding the repeated path in the stack), use `.expect("descriptive message")` to document the invariant and catch violations loudly in debug builds.
+- **Calling `get_all_exports()` and expecting a `HashMap`** — `ResolvedModule::get_all_exports()` returns `Vec<(String, FunctionDef)>`, not a `HashMap`. Callers that need map-like access must collect explicitly.
 
 ## Gotchas
 
@@ -347,12 +358,15 @@ Both `Build` and `Check` commands use `input: Option<PathBuf>`. When `None`, the
 - **Closure capture is eager and shallow** — `get_all_vars()` / `get_all_functions()` / `get_all_namespaces()` snapshot the scope at definition time. Functions defined after the closure capture are not visible to the captured function. Within `process_module`, `@define` nodes are processed in top-to-bottom AST order, so later-defined functions are not visible to earlier ones.
 - **`get_all_*` iteration order matters for shadowing** — all three `get_all_*` methods iterate outer→inner frames, so when a key exists in multiple frames the inner frame wins. The resulting `HashMap` thus correctly reflects inner-scope shadowing. This is the correct behavior for snapshot captures.
 - **`compile_str` / `resolve_source` uses a virtual path `<source>`** — in-memory sources cannot be canonicalized. Repeated calls to `compile_str` re-parse every time; there is no caching for in-memory sources.
-- **Project root is set on first resolve** — `root_dir` is set lazily. If `resolve_source` is called first, `root_dir` is the provided `base_dir`, not a git-root-discovered path.
+- **Project root is set on first resolve** — `root_dir` is set lazily. If `resolve_source` is called first (e.g., via `compile_str_with`), `root_dir` is set to the _canonicalized_ `base_dir` via `canonicalize().unwrap_or_else(|_| base_dir.to_path_buf())`, not a git-root-discovered path. Canonicalization ensures `starts_with` comparisons are consistent even when `base_dir` contains `.` or `..` components — without it, path traversal checks could be bypassed via relative segments. The `unwrap_or_else` fallback to the raw path handles non-existent or unmounted directories gracefully.
 - **Cycle detection reconstructs the path from `resolving_stack`** — when circular import is detected, `build_cycle_string` uses `.position(...).expect(...)` to find the start of the cycle. This is an internal invariant: `repeated` is always in the stack, so `.expect` documents that assumption and will panic (in debug) if the invariant breaks.
 - **`TextNode` has no offset** — raw text nodes (`Node::Text(TextNode)`) do not carry a byte offset. Only structured nodes (`Interpolation`, `IfBlock`, `ForBlock`, `IncludeDirective`) have offsets for error reporting. `EscapedBrace` is also a unit variant with no offset.
 - **`enter_block()` must be paired with `self.depth -= 1`** — the helper only increments; callers are responsible for decrementing after the block body is parsed. Failing to decrement will cause subsequent blocks to see an inflated depth and may reject valid inputs.
+- **String literal escapes are not full Rust/JSON escapes** — `unescape_string` in the parser only recognizes `\\`, `\"`, and `\'`. A backslash followed by any other character (e.g., `\n`, `\t`) is kept verbatim as both backslash and the following character — it is NOT converted to a control character. Template authors writing `{greet("say \nhello")}` will get the literal two-character sequence `\n`, not a newline. This matches the least-surprise principle for a template language where `\n` in a string argument is rarely intended.
 - **Evaluator's `Node::Define` arm does not restore closures** — the evaluator re-registers a function via `FunctionDef::from(block)` with empty captures. Closure capture only happens in the resolver and is only restored inside `invoke_function`. This design means the resolver's pre-evaluation scope pass is load-bearing for cross-module function calls.
 - **`help(...)` attributes are variant-level, not constructor-level** — `CircularImport`, `Recursion`, and `TypeError` now have `#[diagnostic(help(...))]` annotations that miette renders automatically. When adding new error variants, add the `help` attribute directly on the variant, not in the constructor method.
+- **Re-export errors are raised at the barrel module, not the consumer** — when `@export name from "path"` fails because `name` is not exported from the source module, the error surfaces when the barrel itself is compiled, not when the consumer imports from the barrel. This means `reexport_nonexistent.mds` fails at compile time regardless of whether any consumer uses it.
+- **`--set KEY=VAL` last-write wins for duplicate keys** — when `--set name=First --set name=Second` is passed, the second value wins because runtime vars are collected into a `HashMap` and later writes overwrite earlier ones.
 
 ## Key Files
 
@@ -361,21 +375,22 @@ Both `Build` and `Check` commands use `input: Option<PathBuf>`. When `None`, the
 - `src/ast.rs` — all AST types including `Arg::Call` for nested function call arguments; the contract between parser and everything downstream
 - `src/lexer.rs` — tokenizer; handles frontmatter, code fences, interpolation, directives
 - `src/parser.rs` — converts token stream to `Module` AST; `enter_block()` helper, `parse_args_inner`/`parse_single_arg_inner` depth-bounded recursion, identifier validation, duplicate param detection
-- `src/resolver.rs` — orchestrator: drives the full pipeline, module cache, import resolution, closure capture, security guards; `build_cycle_string` uses `.expect` to document invariant; threads `&mut Vec<String>` warnings through to evaluate
+- `src/resolver.rs` — orchestrator: drives the full pipeline, module cache, import resolution, closure capture, security guards; `build_cycle_string` uses `.expect` to document invariant; threads `&mut Vec<String>` warnings through to evaluate; `ResolvedModule::get_export` and `get_all_exports` for export visibility
 - `src/evaluator.rs` — AST walker that produces the rendered string; `resolve_args` handles `Arg::Call` via recursive evaluation with shared `call_stack` and `warnings`; `evaluate_include` pushes to warnings vec, never calls `eprintln!`
 - `src/validator.rs` — pre-evaluation semantic checks; `validate_var_args` recursively validates nested `Arg::Call` arguments
 - `src/scope.rs` — scope chain with frames for variables, functions, and namespaces; closure capture helpers; `get_all_*` iterate outer→inner for correct shadowing semantics
 - `src/value.rs` — runtime value enum with YAML/JSON converters and display rules; test numerics use `2.5` (not `3.14`) to satisfy clippy `approx_constant`
 - `src/error.rs` — `MdsError` enum with miette diagnostics; `CircularImport`, `Recursion`, `TypeError` carry `help(...)` diagnostic attributes; builder methods for span-aware errors
-- `tests/integration.rs` — end-to-end tests covering all features, error paths, CLI integration (stdin, file output, vars file, quiet flag, auto-detect), edge cases (nested loops, loop shadowing, falsy values, mutual recursion, escape sequences in blocks/functions), `compile_file` API, and error help-text verification
+- `tests/integration.rs` — end-to-end tests covering all features, error paths, CLI integration (stdin, file output, vars file, quiet flag, auto-detect), edge cases (nested loops, loop shadowing, falsy values, mutual recursion, escape sequences in blocks/functions, zero-param functions, empty function bodies, re-export errors), `compile_file` API, error help-text verification, and spec-compliance tests for scope visibility, export visibility, and `--set` coercion rules
+- `tests/fixtures/reexport_nonexistent.mds` — fixture for re-export error: `@export nonexistent_fn from "./greetings.mds"` where `nonexistent_fn` is not exported, verifying the error is raised at the barrel module
 
 ## Related
 
-- `src/resolver.rs` — canonical reference for the module system, import semantics, and security guards
+- `src/resolver.rs` — canonical reference for the module system, import semantics, security guards, and `ResolvedModule` export API
 - `src/evaluator.rs` — canonical reference for directive execution order, closure restore, call-depth guards, nested arg evaluation, and warning collection
 - `src/scope.rs` — canonical reference for closure capture API (`get_all_*` methods) and shadowing semantics
 - `src/ast.rs` — canonical reference for `Arg` variants; any new argument form starts here
 - `src/lib.rs` — canonical reference for the two-tier warning API (`compile` vs `compile_collecting_warnings`) and `compile_file` convenience entry point
 - `src/main.rs` — canonical reference for CLI auto-detection logic and `parse_cli_value` coercion rules
 - `src/error.rs` — canonical reference for `help(...)` diagnostic attribute placement on `MdsError` variants
-- `tests/integration.rs` — covers all directive combinations including nested function calls, CLI stdin/quiet mode, auto-detect, `compile_file`, error help-text, and edge cases; read before adding new directives to understand existing fixture patterns
+- `tests/integration.rs` — covers all directive combinations including nested function calls, CLI stdin/quiet mode, auto-detect, `compile_file`, error help-text, scope/export visibility rules, `--set` coercion and deduplication, and re-export error scenarios; read before adding new directives to understand existing fixture patterns
