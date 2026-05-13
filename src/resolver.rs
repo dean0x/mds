@@ -140,9 +140,8 @@ impl ModuleCache {
 
         // Read the file as bytes first, then check size (avoids TOCTOU race between
         // a separate metadata call and the actual read).
-        let bytes = std::fs::read(&canonical).map_err(|e| MdsError::Io {
-            message: format!("cannot read {}: {e}", canonical.display()),
-        })?;
+        let bytes = std::fs::read(&canonical)
+            .map_err(|e| MdsError::io(format!("cannot read {}: {e}", canonical.display())))?;
         if bytes.len() as u64 > MAX_FILE_SIZE {
             return Err(MdsError::resource_limit(format!(
                 "file too large ({} bytes, max {} bytes): {}",
@@ -151,8 +150,8 @@ impl ModuleCache {
                 canonical.display()
             )));
         }
-        let source = String::from_utf8(bytes).map_err(|e| MdsError::Io {
-            message: format!("invalid UTF-8 in {}: {e}", canonical.display()),
+        let source = String::from_utf8(bytes).map_err(|e| {
+            MdsError::io(format!("invalid UTF-8 in {}: {e}", canonical.display()))
         })?;
 
         // Validate file type (uses already-read source for .md frontmatter check)
@@ -194,8 +193,11 @@ impl ModuleCache {
         // Canonicalize to match the canonical paths used by resolve(), ensuring
         // starts_with checks are consistent even when base_dir contains `.` or `..`.
         if self.root_dir.is_none() {
-            self.root_dir = Some(base_dir.canonicalize().map_err(|e| MdsError::Io {
-                message: format!("cannot resolve base directory {}: {e}", base_dir.display()),
+            self.root_dir = Some(base_dir.canonicalize().map_err(|e| {
+                MdsError::io(format!(
+                    "cannot resolve base directory {}: {e}",
+                    base_dir.display()
+                ))
             })?);
         }
         self.process_module(source, "<source>", base_dir, false, runtime_vars, warnings)
@@ -528,9 +530,7 @@ fn validate_file_type(path: &Path, source: &str) -> Result<(), MdsError> {
         }
     }
 
-    Err(MdsError::NotMdsFile {
-        path: path.display().to_string(),
-    })
+    Err(MdsError::not_mds_file(path.display().to_string()))
 }
 
 /// Format a cycle chain like "a.mds → b.mds → a.mds" from the resolving stack.
@@ -586,9 +586,8 @@ fn attach_import_span(
 }
 
 fn parse_frontmatter(raw: &str) -> Result<HashMap<String, Value>, MdsError> {
-    let yaml: serde_yml::Value = serde_yml::from_str(raw).map_err(|e| MdsError::YamlError {
-        message: e.to_string(),
-    })?;
+    let yaml: serde_yml::Value =
+        serde_yml::from_str(raw).map_err(|e| MdsError::yaml_error(e.to_string()))?;
 
     let mut vars = HashMap::new();
     if let serde_yml::Value::Mapping(map) = yaml {

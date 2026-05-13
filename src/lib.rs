@@ -178,9 +178,8 @@ pub fn check_str(source: &str) -> Result<(), MdsError> {
 fn resolve_base_dir(base_dir: Option<&Path>) -> Result<PathBuf, MdsError> {
     match base_dir {
         Some(d) => Ok(d.to_path_buf()),
-        None => std::env::current_dir().map_err(|e| MdsError::Io {
-            message: format!("cannot determine current directory: {e}"),
-        }),
+        None => std::env::current_dir()
+            .map_err(|e| MdsError::io(format!("cannot determine current directory: {e}"))),
     }
 }
 
@@ -393,9 +392,8 @@ pub fn compile_file(path: &str) -> Result<String, MdsError> {
 #[must_use = "the loaded variables should be used"]
 pub fn load_vars_file(path: &Path) -> Result<HashMap<String, Value>, MdsError> {
     // Read bytes first, then check size (same TOCTOU-safe pattern as resolver.rs).
-    let bytes = std::fs::read(path).map_err(|e| MdsError::Io {
-        message: format!("cannot read vars file {}: {e}", path.display()),
-    })?;
+    let bytes = std::fs::read(path)
+        .map_err(|e| MdsError::io(format!("cannot read vars file {}: {e}", path.display())))?;
     if bytes.len() as u64 > resolver::MAX_FILE_SIZE {
         return Err(MdsError::resource_limit(format!(
             "vars file exceeds maximum size of {} bytes: {}",
@@ -403,18 +401,14 @@ pub fn load_vars_file(path: &Path) -> Result<HashMap<String, Value>, MdsError> {
             path.display()
         )));
     }
-    let content = String::from_utf8(bytes).map_err(|e| MdsError::Io {
-        message: format!("invalid UTF-8 in vars file {}: {e}", path.display()),
+    let content = String::from_utf8(bytes).map_err(|e| {
+        MdsError::io(format!("invalid UTF-8 in vars file {}: {e}", path.display()))
     })?;
     let json: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| MdsError::JsonError {
-            message: e.to_string(),
-        })?;
+        serde_json::from_str(&content).map_err(|e| MdsError::json_error(e.to_string()))?;
 
     let serde_json::Value::Object(map) = json else {
-        return Err(MdsError::JsonError {
-            message: "vars file must contain a JSON object".to_string(),
-        });
+        return Err(MdsError::json_error("vars file must contain a JSON object"));
     };
 
     map.into_iter()
@@ -450,5 +444,10 @@ mod tests {
     #[test]
     fn clean_output_preserves_single_blank_line() {
         assert_eq!(clean_output("a\n\nb"), "a\n\nb\n");
+    }
+
+    #[test]
+    fn clean_output_strips_carriage_returns() {
+        assert_eq!(clean_output("hello\r\nworld\r\n"), "hello\nworld\n");
     }
 }

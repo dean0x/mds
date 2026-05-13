@@ -37,9 +37,9 @@ impl Value {
 
     fn from_yaml_inner(yaml: serde_yml::Value, depth: usize) -> Result<Value, MdsError> {
         if depth > MAX_VALUE_DEPTH {
-            return Err(MdsError::YamlError {
-                message: format!("value nesting exceeds maximum depth of {MAX_VALUE_DEPTH}"),
-            });
+            return Err(MdsError::yaml_error(format!(
+                "value nesting exceeds maximum depth of {MAX_VALUE_DEPTH}"
+            )));
         }
         match yaml {
             serde_yml::Value::Null => Ok(Value::Null),
@@ -49,18 +49,16 @@ impl Value {
                 .map(|i| i as f64)
                 .or_else(|| n.as_f64())
                 .map(Value::Number)
-                .ok_or_else(|| MdsError::YamlError {
-                    message: format!("unsupported number: {n:?}"),
-                }),
+                .ok_or_else(|| MdsError::yaml_error(format!("unsupported number: {n:?}"))),
             serde_yml::Value::String(s) => Ok(Value::String(s)),
             serde_yml::Value::Sequence(seq) => seq
                 .into_iter()
                 .map(|v| Self::from_yaml_inner(v, depth + 1))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Value::Array),
-            serde_yml::Value::Mapping(_) => Err(MdsError::YamlError {
-                message: "object/map types are not supported in MDS v0.1".to_string(),
-            }),
+            serde_yml::Value::Mapping(_) => {
+                Err(MdsError::yaml_error("object/map types are not supported"))
+            }
             serde_yml::Value::Tagged(t) => Self::from_yaml_inner(t.value, depth + 1),
         }
     }
@@ -72,9 +70,9 @@ impl Value {
 
     fn from_json_inner(json: serde_json::Value, depth: usize) -> Result<Value, MdsError> {
         if depth > MAX_VALUE_DEPTH {
-            return Err(MdsError::JsonError {
-                message: format!("value nesting exceeds maximum depth of {MAX_VALUE_DEPTH}"),
-            });
+            return Err(MdsError::json_error(format!(
+                "value nesting exceeds maximum depth of {MAX_VALUE_DEPTH}"
+            )));
         }
         match json {
             serde_json::Value::Null => Ok(Value::Null),
@@ -82,9 +80,7 @@ impl Value {
             serde_json::Value::Number(n) => {
                 n.as_f64()
                     .map(Value::Number)
-                    .ok_or_else(|| MdsError::JsonError {
-                        message: format!("unsupported number: {n:?}"),
-                    })
+                    .ok_or_else(|| MdsError::json_error(format!("unsupported number: {n:?}")))
             }
             serde_json::Value::String(s) => Ok(Value::String(s)),
             serde_json::Value::Array(arr) => arr
@@ -92,9 +88,9 @@ impl Value {
                 .map(|v| Self::from_json_inner(v, depth + 1))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Value::Array),
-            serde_json::Value::Object(_) => Err(MdsError::JsonError {
-                message: "object/map types are not supported in MDS v0.1".to_string(),
-            }),
+            serde_json::Value::Object(_) => {
+                Err(MdsError::json_error("object/map types are not supported"))
+            }
         }
     }
 

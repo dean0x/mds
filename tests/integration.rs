@@ -143,7 +143,7 @@ fn runtime_vars_override() {
     let mut vars = HashMap::new();
     vars.insert(
         "name".to_string(),
-        mds::value::Value::String("Override".to_string()),
+        mds::Value::String("Override".to_string()),
     );
     let result = mds::compile(fixture("simple.mds"), Some(vars)).unwrap();
     assert!(result.contains("Hello Override!"));
@@ -190,9 +190,9 @@ fn vars_file_loading() {
     let vars = mds::load_vars_file(&vars_path).unwrap();
     assert_eq!(
         vars.get("name"),
-        Some(&mds::value::Value::String("FromJSON".to_string()))
+        Some(&mds::Value::String("FromJSON".to_string()))
     );
-    assert_eq!(vars.get("count"), Some(&mds::value::Value::Number(99.0)));
+    assert_eq!(vars.get("count"), Some(&mds::Value::Number(99.0)));
 }
 
 #[test]
@@ -254,7 +254,7 @@ fn for_iterate_non_array_error() {
     let mut vars = HashMap::new();
     vars.insert(
         "items".to_string(),
-        mds::value::Value::String("not_an_array".to_string()),
+        mds::Value::String("not_an_array".to_string()),
     );
     let result = mds::compile(fixture("loop.mds"), Some(vars));
     assert!(result.is_err());
@@ -266,7 +266,7 @@ fn for_iterate_non_array_error() {
 fn empty_array_loop() {
     // Iterating over an empty array should produce no output for the loop body
     let mut vars = HashMap::new();
-    vars.insert("items".to_string(), mds::value::Value::Array(vec![]));
+    vars.insert("items".to_string(), mds::Value::Array(vec![]));
     let result = mds::compile(fixture("loop.mds"), Some(vars)).unwrap();
     assert!(!result.contains("- apple"));
     assert!(!result.contains("- banana"));
@@ -2076,7 +2076,7 @@ fn yaml_value_depth_limit_rejects_deeply_nested_sequence() {
         nested = YamlValue::Sequence(vec![nested]);
     }
 
-    let result = mds::value::Value::from_yaml(nested);
+    let result = mds::Value::from_yaml(nested);
     assert!(
         result.is_err(),
         "YAML value nested 65 levels deep must be rejected"
@@ -2098,7 +2098,7 @@ fn json_value_depth_limit_rejects_deeply_nested_array() {
         nested = serde_json::Value::Array(vec![nested]);
     }
 
-    let result = mds::value::Value::from_json(nested);
+    let result = mds::Value::from_json(nested);
     assert!(
         result.is_err(),
         "JSON value nested 65 levels deep must be rejected"

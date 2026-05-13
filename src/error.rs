@@ -440,9 +440,6 @@ impl MdsError {
         }
     }
 
-    // TODO: migrate all raw `MdsError::Io { message: ... }` call sites in
-    // resolver.rs, value.rs, and lib.rs to use these constructors.
-
     pub fn io(message: impl Into<String>) -> Self {
         MdsError::Io {
             message: message.into(),
