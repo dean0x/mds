@@ -18,6 +18,9 @@ const MAX_TOTAL_ITERATIONS: usize = 1_000_000;
 /// Maximum size of the output string in bytes (50 MB).
 const MAX_OUTPUT_SIZE: usize = 50 * 1024 * 1024;
 
+/// Maximum number of accumulated warnings before further warnings are silently dropped.
+const MAX_WARNINGS: usize = 1_000;
+
 /// Evaluate a module body into a final rendered string.
 ///
 /// Warnings (e.g. empty `@include`) are appended to `warnings`.
@@ -113,7 +116,8 @@ fn evaluate_expr(
             Ok(value.to_string())
         }
         Expr::Call { name, args } => {
-            let resolved_args = resolve_args(args, scope, call_stack, total_iterations, warnings)?;
+            let resolved_args =
+                resolve_args(args, scope, call_stack, total_iterations, warnings, 0)?;
             call_function(
                 name,
                 &resolved_args,
@@ -128,7 +132,8 @@ fn evaluate_expr(
             name,
             args,
         } => {
-            let resolved_args = resolve_args(args, scope, call_stack, total_iterations, warnings)?;
+            let resolved_args =
+                resolve_args(args, scope, call_stack, total_iterations, warnings, 0)?;
             call_qualified_function(
                 namespace,
                 name,
@@ -148,7 +153,13 @@ fn resolve_args(
     call_stack: &mut HashSet<String>,
     total_iterations: &mut usize,
     warnings: &mut Vec<String>,
+    depth: usize,
 ) -> Result<Vec<Value>, MdsError> {
+    if depth > MAX_CALL_DEPTH {
+        return Err(MdsError::recursion(format!(
+            "argument expression depth exceeds {MAX_CALL_DEPTH}"
+        )));
+    }
     args.iter()
         .map(|arg| match arg {
             Arg::StringLiteral(s) => Ok(Value::String(s.clone())),
@@ -160,8 +171,14 @@ fn resolve_args(
                 name,
                 args: inner_args,
             } => {
-                let resolved =
-                    resolve_args(inner_args, scope, call_stack, total_iterations, warnings)?;
+                let resolved = resolve_args(
+                    inner_args,
+                    scope,
+                    call_stack,
+                    total_iterations,
+                    warnings,
+                    depth + 1,
+                )?;
                 let result = call_function(
                     name,
                     &resolved,
@@ -338,9 +355,9 @@ fn evaluate_for(
         }
         scope.push();
         scope.set_var(&block.var, item);
-        let rendered = evaluate_nodes(&block.body, scope, call_stack, total_iterations, warnings)?;
-        output.push_str(&rendered);
+        let rendered = evaluate_nodes(&block.body, scope, call_stack, total_iterations, warnings);
         scope.pop()?;
+        output.push_str(&rendered?);
     }
 
     Ok(output)
@@ -358,10 +375,12 @@ fn evaluate_include(
     if let Some(body) = &ns.prompt_body {
         return Ok(body.clone());
     }
-    warnings.push(format!(
-        "warning: @include of '{}' produced empty output — module has no body text",
-        inc.alias
-    ));
+    if warnings.len() < MAX_WARNINGS {
+        warnings.push(format!(
+            "warning: @include of '{}' produced empty output — module has no body text",
+            inc.alias
+        ));
+    }
     Ok(String::new())
 }
 
@@ -416,7 +435,12 @@ mod tests {
         })];
         let mut scope = Scope::new();
         let mut warnings = vec![];
-        assert!(evaluate(&nodes, &mut scope, &mut warnings).is_err());
+        let err = evaluate(&nodes, &mut scope, &mut warnings).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown"),
+            "error message should reference the undefined variable name; got: {msg}"
+        );
     }
 
     #[test]
