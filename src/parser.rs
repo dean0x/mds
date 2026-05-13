@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::ast::*;
 use crate::error::MdsError;
 use crate::lexer::Token;
@@ -289,7 +291,7 @@ impl Parser<'_> {
         }))
     }
 
-    fn parse_define_block(&mut self, rest: &str, _offset: usize) -> Result<Node, MdsError> {
+    fn parse_define_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
         self.enter_block()?;
 
         let rest = rest.trim();
@@ -328,7 +330,7 @@ impl Parser<'_> {
             }
         }
 
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         for param in &params {
             if !seen.insert(param.as_str()) {
                 return Err(MdsError::syntax(format!(
@@ -345,7 +347,12 @@ impl Parser<'_> {
         self.consume_end("@define")?;
 
         self.depth -= 1;
-        Ok(Node::Define(DefineBlock { name, params, body }))
+        Ok(Node::Define(DefineBlock {
+            name,
+            params,
+            body,
+            offset,
+        }))
     }
 }
 
@@ -411,11 +418,10 @@ fn parse_export_directive(directive: &str, _offset: usize) -> Result<Node, MdsEr
     let rest = directive.trim_start_matches("@export").trim();
 
     // Wildcard re-export: @export * from "path"
-    if rest.starts_with("* from ") || rest.starts_with("*from ") {
-        let from_part = rest
-            .strip_prefix("* from ")
-            .or_else(|| rest.strip_prefix("*from "))
-            .unwrap_or("");
+    if let Some(from_part) = rest
+        .strip_prefix("* from ")
+        .or_else(|| rest.strip_prefix("*from "))
+    {
         let path = parse_quoted_path(from_part.trim())?;
         return Ok(Node::Export(ExportDirective::Wildcard { path }));
     }

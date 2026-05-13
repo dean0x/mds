@@ -140,53 +140,6 @@ fn validate_expr(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn define_body_with_undefined_var_fails_at_validate_time() {
-        // @define greet(name): {undefined_var} @end — body references undefined var
-        let body = vec![Node::Interpolation(crate::ast::Interpolation {
-            expr: crate::ast::Expr::Var("undefined_var".to_string()),
-            offset: 0,
-            len: 13,
-        })];
-        let define = Node::Define(crate::ast::DefineBlock {
-            name: "greet".to_string(),
-            params: vec!["name".to_string()],
-            body,
-        });
-        let scope = Scope::new();
-        let result = validate(&[define], &scope, "test.mds", "");
-        assert!(
-            result.is_err(),
-            "undefined var inside @define body must fail at validate time"
-        );
-    }
-
-    #[test]
-    fn define_body_referencing_param_passes_validation() {
-        // @define greet(name): {name} @end — param is in scope, must pass.
-        let body = vec![Node::Interpolation(crate::ast::Interpolation {
-            expr: crate::ast::Expr::Var("name".to_string()),
-            offset: 0,
-            len: 4,
-        })];
-        let define = Node::Define(crate::ast::DefineBlock {
-            name: "greet".to_string(),
-            params: vec!["name".to_string()],
-            body,
-        });
-        let scope = Scope::new();
-        let result = validate(&[define], &scope, "test.mds", "");
-        assert!(
-            result.is_ok(),
-            "param reference inside @define must pass: {result:?}"
-        );
-    }
-}
-
 /// Check that all arguments are valid: variable refs exist, nested calls are well-formed.
 fn validate_var_args(
     args: &[Arg],
@@ -233,4 +186,53 @@ fn validate_var_args(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn define_body_with_undefined_var_fails_at_validate_time() {
+        // @define greet(name): {undefined_var} @end — body references undefined var
+        let body = vec![Node::Interpolation(crate::ast::Interpolation {
+            expr: crate::ast::Expr::Var("undefined_var".to_string()),
+            offset: 0,
+            len: 13,
+        })];
+        let define = Node::Define(crate::ast::DefineBlock {
+            name: "greet".to_string(),
+            params: vec!["name".to_string()],
+            body,
+            offset: 0,
+        });
+        let scope = Scope::new();
+        let result = validate(&[define], &scope, "test.mds", "");
+        assert!(
+            result.is_err(),
+            "undefined var inside @define body must fail at validate time"
+        );
+    }
+
+    #[test]
+    fn define_body_referencing_param_passes_validation() {
+        // @define greet(name): {name} @end — param is in scope, must pass.
+        let body = vec![Node::Interpolation(crate::ast::Interpolation {
+            expr: crate::ast::Expr::Var("name".to_string()),
+            offset: 0,
+            len: 4,
+        })];
+        let define = Node::Define(crate::ast::DefineBlock {
+            name: "greet".to_string(),
+            params: vec!["name".to_string()],
+            body,
+            offset: 0,
+        });
+        let scope = Scope::new();
+        let result = validate(&[define], &scope, "test.mds", "");
+        assert!(
+            result.is_ok(),
+            "param reference inside @define must pass: {result:?}"
+        );
+    }
 }

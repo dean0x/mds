@@ -252,6 +252,20 @@ impl MdsError {
         }
     }
 
+    pub fn name_collision_at(
+        name: impl Into<String>,
+        file: &str,
+        source: &str,
+        offset: usize,
+        len: usize,
+    ) -> Self {
+        MdsError::NameCollision {
+            name: name.into(),
+            span: Some(SourceSpan::new(offset.into(), len)),
+            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
+        }
+    }
+
     pub fn recursion(name: impl Into<String>) -> Self {
         MdsError::Recursion {
             name: name.into(),
@@ -265,6 +279,20 @@ impl MdsError {
             path: path.into(),
             span: None,
             src: None,
+        }
+    }
+
+    pub fn file_not_found_at(
+        path: impl Into<String>,
+        file: &str,
+        source: &str,
+        offset: usize,
+        len: usize,
+    ) -> Self {
+        MdsError::FileNotFound {
+            path: path.into(),
+            span: Some(SourceSpan::new(offset.into(), len)),
+            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
         }
     }
 

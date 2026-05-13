@@ -388,6 +388,7 @@ mod tests {
                     }),
                     text("!"),
                 ],
+                offset: 0,
             }),
             Node::Interpolation(Interpolation {
                 expr: Expr::Call {

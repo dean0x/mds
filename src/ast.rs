@@ -95,6 +95,7 @@ pub struct DefineBlock {
     pub name: String,
     pub params: Vec<String>,
     pub body: Vec<Node>,
+    pub offset: usize,
 }
 
 #[derive(Debug, Clone)]

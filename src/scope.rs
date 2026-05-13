@@ -72,16 +72,14 @@ impl Scope {
     /// Pop the innermost scope frame.
     pub fn pop(&mut self) {
         debug_assert!(self.frames.len() > 1, "cannot pop the global scope frame");
-        if self.frames.len() > 1 {
-            self.frames.pop();
-        }
+        self.frames.pop();
     }
 
     /// Set a variable in the current (innermost) frame.
     pub fn set_var(&mut self, name: &str, value: Value) {
         self.frames
             .last_mut()
-            .unwrap()
+            .expect("scope always has at least one frame")
             .vars
             .insert(name.to_string(), value);
     }
@@ -100,7 +98,7 @@ impl Scope {
     pub fn set_function(&mut self, name: &str, func: FunctionDef) {
         self.frames
             .last_mut()
-            .unwrap()
+            .expect("scope always has at least one frame")
             .functions
             .insert(name.to_string(), func);
     }
@@ -119,7 +117,7 @@ impl Scope {
     pub fn set_namespace(&mut self, alias: &str, ns: NamespaceScope) {
         self.frames
             .last_mut()
-            .unwrap()
+            .expect("scope always has at least one frame")
             .namespaces
             .insert(alias.to_string(), ns);
     }
@@ -135,7 +133,8 @@ impl Scope {
     }
 
     /// Get all namespaces visible in the current scope (for closure capture).
-    /// Outer-to-inner iteration: inner frames shadow outer frames.
+    /// Iterates outer→inner so duplicate keys are overwritten by inner frames,
+    /// preserving correct shadowing semantics.
     pub fn get_all_namespaces(&self) -> HashMap<String, NamespaceScope> {
         self.frames
             .iter()
@@ -144,7 +143,8 @@ impl Scope {
     }
 
     /// Get all functions visible in the current scope (for closure capture).
-    /// Outer-to-inner iteration: inner frames shadow outer frames.
+    /// Iterates outer→inner so duplicate keys are overwritten by inner frames,
+    /// preserving correct shadowing semantics.
     pub fn get_all_functions(&self) -> HashMap<String, FunctionDef> {
         self.frames
             .iter()
@@ -153,7 +153,8 @@ impl Scope {
     }
 
     /// Get all variables visible in the current scope (for closure capture).
-    /// Outer-to-inner iteration: inner frames shadow outer frames.
+    /// Iterates outer→inner so duplicate keys are overwritten by inner frames,
+    /// preserving correct shadowing semantics.
     pub fn get_all_vars(&self) -> HashMap<String, Value> {
         self.frames
             .iter()

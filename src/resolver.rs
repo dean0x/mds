@@ -218,7 +218,13 @@ impl ModuleCache {
             match node {
                 Node::Define(def) => {
                     if functions.contains_key(&def.name) {
-                        return Err(MdsError::name_collision(&def.name));
+                        return Err(MdsError::name_collision_at(
+                            &def.name,
+                            file_str,
+                            source,
+                            def.offset,
+                            def.name.len(),
+                        ));
                     }
                     let mut func = FunctionDef::from(def);
                     // Capture definition-site scope for lexical closure semantics so the
@@ -384,10 +390,8 @@ impl ResolvedModule {
 
     /// Check if `prompt` is an available export for this module.
     pub fn has_prompt_export(&self) -> bool {
-        if self.prompt_body.is_none() {
-            return false;
-        }
-        !self.has_explicit_exports || self.explicit_exports.contains("prompt")
+        self.prompt_body.is_some()
+            && (!self.has_explicit_exports || self.explicit_exports.contains("prompt"))
     }
 
     /// Get the prompt body as a Value, if exportable.
@@ -403,14 +407,8 @@ impl ResolvedModule {
 
 /// Create a NamespaceScope from a resolved module.
 fn module_to_namespace(module: &ResolvedModule) -> NamespaceScope {
-    let functions = module
-        .functions
-        .iter()
-        .filter(|(name, _)| !module.has_explicit_exports || module.explicit_exports.contains(*name))
-        .map(|(name, func)| (name.clone(), func.clone()))
-        .collect();
     NamespaceScope {
-        functions,
+        functions: module.get_all_exports().into_iter().collect(),
         prompt_body: module.prompt_body.clone(),
     }
 }
@@ -478,21 +476,19 @@ fn build_cycle_string(resolving_stack: &[PathBuf], repeated: &Path) -> String {
         .unwrap_or(0);
     let mut parts: Vec<String> = resolving_stack[start..]
         .iter()
-        .map(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_else(|| p.to_str().unwrap_or("?"))
-                .to_string()
-        })
+        .map(|p| path_display_name(p))
         .collect();
-    parts.push(
-        repeated
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_else(|| repeated.to_str().unwrap_or("?"))
-            .to_string(),
-    );
+    parts.push(path_display_name(repeated));
     parts.join(" \u{2192} ")
+}
+
+/// Return a short display name for a path (filename, falling back to full path, then "?").
+fn path_display_name(p: &Path) -> String {
+    p.file_name()
+        .and_then(|n| n.to_str())
+        .or_else(|| p.to_str())
+        .unwrap_or("?")
+        .to_string()
 }
 
 fn parse_frontmatter(raw: &str) -> Result<HashMap<String, Value>, MdsError> {
