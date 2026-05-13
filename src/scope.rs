@@ -83,10 +83,10 @@ impl Scope {
     }
 
     /// Set a variable in the current (innermost) frame.
+    ///
+    /// `Scope::new()` always pushes a frame and `pop()` refuses to remove the last one,
+    /// so `last_mut()` is always `Some`.
     pub fn set_var(&mut self, name: &str, value: Value) {
-        // Scope::new() always pushes a frame, and pop() refuses to remove the last one,
-        // so last_mut() is always Some.
-        debug_assert!(!self.frames.is_empty(), "scope always has at least one frame");
         self.frames
             .last_mut()
             .expect("BUG: scope has no frames")
@@ -101,7 +101,6 @@ impl Scope {
 
     /// Define a function in the current frame.
     pub fn set_function(&mut self, name: &str, func: FunctionDef) {
-        debug_assert!(!self.frames.is_empty(), "scope always has at least one frame");
         self.frames
             .last_mut()
             .expect("BUG: scope has no frames")
@@ -116,7 +115,6 @@ impl Scope {
 
     /// Register a namespace (for aliased imports).
     pub fn set_namespace(&mut self, alias: &str, ns: NamespaceScope) {
-        debug_assert!(!self.frames.is_empty(), "scope always has at least one frame");
         self.frames
             .last_mut()
             .expect("BUG: scope has no frames")

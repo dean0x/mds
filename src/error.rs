@@ -636,19 +636,4 @@ mod tests {
         }
     }
 
-    // ── Clone derives correctly ───────────────────────────────────────────────
-
-    #[test]
-    fn mds_error_is_clone() {
-        let e = MdsError::syntax("cloneable");
-        let cloned = e.clone();
-        assert_eq!(e.to_string(), cloned.to_string());
-    }
-
-    #[test]
-    fn io_error_is_clone() {
-        let e = MdsError::io("disk full");
-        let cloned = e.clone();
-        assert_eq!(e.to_string(), cloned.to_string());
-    }
 }

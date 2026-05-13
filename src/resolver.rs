@@ -585,6 +585,8 @@ fn attach_import_span(
     }
 }
 
+/// Parse raw YAML frontmatter into a variable map.
+/// Non-string keys are silently skipped (YAML allows integer keys; we only support string names).
 fn parse_frontmatter(raw: &str) -> Result<HashMap<String, Value>, MdsError> {
     let yaml: serde_yml::Value =
         serde_yml::from_str(raw).map_err(|e| MdsError::yaml_error(e.to_string()))?;
