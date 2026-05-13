@@ -470,6 +470,14 @@ fn parse_interpolation_expr(content: &str, offset: usize) -> Result<Interpolatio
                 len,
             });
         }
+        // Dot found but no '(' follows — this looks like variable property access
+        // (e.g. {alias.name}), which is not supported. Give a clear, actionable error.
+        let namespace = content[..dot_pos].trim();
+        let field = rest_after_dot.trim();
+        return Err(MdsError::syntax(format!(
+            "dot notation for variables is not supported in v0.1: '{content}'. \
+             To call a function from an imported module use: {{{namespace}.{field}()}}",
+        )));
     }
 
     // Check for function call: name(args)

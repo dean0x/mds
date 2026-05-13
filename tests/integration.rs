@@ -1378,6 +1378,86 @@ fn build_errors_when_multiple_mds_files_in_directory() {
     );
 }
 
+// ── New Coverage Tests ────────────────────────────────────────────────────────
+
+#[test]
+fn export_prompt_selective_import() {
+    // A module with body text uses @export prompt explicitly;
+    // another module imports it via selective import and renders the body.
+    let result = mds::compile(fixture("export_prompt_consumer.mds"), None).unwrap();
+    assert!(
+        result.contains("compiler design"),
+        "selective import of explicitly-exported 'prompt' should render provider body, got: {result}"
+    );
+}
+
+#[test]
+fn multi_param_function() {
+    // @define welcome(name, role): with two params, per spec section 4.5
+    let result = mds::compile(fixture("multi_param.mds"), None).unwrap();
+    assert!(
+        result.contains("Hello Alice! You are logged in as admin."),
+        "two-param function call with string literals should render correctly, got: {result}"
+    );
+    assert!(
+        result.contains("Hello Bob! You are logged in as editor."),
+        "second two-param call should render correctly, got: {result}"
+    );
+}
+
+#[test]
+fn single_quote_string_literal_in_function_args() {
+    // {greet('Alice')} — single-quoted string literals in function arguments.
+    // The parser already supports this; this test locks in the behaviour.
+    let result = mds::compile(fixture("single_quote_args.mds"), None).unwrap();
+    assert!(
+        result.contains("Hello Alice!"),
+        "single-quoted arg should produce same output as double-quoted, got: {result}"
+    );
+    assert!(
+        result.contains("Hello Bob!"),
+        "second single-quoted arg call should render correctly, got: {result}"
+    );
+}
+
+#[test]
+fn crlf_line_endings() {
+    // A fixture with Windows (CRLF) line endings must compile without error
+    // and produce the same output as its LF counterpart.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("crlf.mds");
+    // Write the file with \r\n line endings (Windows style).
+    std::fs::write(
+        &path,
+        b"---\r\nname: Alice\r\n---\r\nHello {name}!\r\n",
+    )
+    .unwrap();
+
+    let result = mds::compile(&path, None).unwrap();
+    assert!(
+        result.contains("Hello Alice!"),
+        "CRLF line endings should compile correctly, got: {result}"
+    );
+}
+
+#[test]
+fn dot_notation_variable_access_gives_clear_error() {
+    // {alias.name} (dot without parens) must produce a helpful error,
+    // not a confusing "unclosed parenthesis" message.
+    let source = "@import \"./utils.mds\" as u\n\n{u.greet}\n";
+    let result = mds::compile_str_with(source, None, None);
+    assert!(result.is_err(), "dot notation without parens should be an error");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("dot notation") || err.contains("not supported"),
+        "error should explain that dot notation for variables is unsupported, got: {err}"
+    );
+    assert!(
+        !err.contains("unclosed parenthesis"),
+        "error must not say 'unclosed parenthesis' — misleading, got: {err}"
+    );
+}
+
 #[test]
 fn check_auto_detects_single_mds_file_in_directory() {
     let dir = tempfile::tempdir().expect("create temp dir");
