@@ -168,7 +168,7 @@ The resolver is the orchestrator. `ModuleCache` drives the full pipeline for eac
 - `resolving: HashSet<PathBuf>` — O(1) membership test
 - `resolving_stack: Vec<PathBuf>` — insertion-ordered list for cycle path reconstruction (e.g., `a.mds → b.mds → a.mds`)
 
-`build_cycle_string` reconstructs the cycle path by finding the repeated path in `resolving_stack` using `.position(...).expect(...)`. The `.expect` is intentional — the invariant is that `repeated` is always in the stack at cycle-detection time (it was placed there by the caller). This is a documented internal invariant, not a defensive guard. A private `path_display_name` helper extracts the filename portion of each path for display in cycle strings, falling back to the full path or `"?"`.
+`build_cycle_string` reconstructs the cycle path by finding the repeated path in `resolving_stack` using `.position(...).unwrap_or(0)`. The `.unwrap_or(0)` is a safe fallback: if for any reason the path is not found (which should not happen in normal operation), the cycle string starts from the beginning of the stack rather than panicking. A private `path_display_name` helper extracts the filename portion of each path for display in cycle strings, falling back to the full path or `"?"`.
 
 **`process_module`** is the inner workhorse: it tokenizes, parses, builds scope from frontmatter + runtime vars, walks the AST to register functions (capturing closure scope) and resolve imports, validates, and evaluates. The result is a `ResolvedModule`. Warnings are threaded through as `&mut Vec<String>` from the public API all the way into `evaluate`.
 
@@ -268,6 +268,8 @@ The two-tier API pattern in `lib.rs`:
 - `compile(path, vars)` — internal convenience that calls `compile_collecting_warnings` then `emit_warnings`
 - `compile_collecting_warnings(path, vars)` — returns `(String, Vec<String>)` — use this when the caller needs to gate warning output (e.g., the CLI's quiet mode)
 
+**`resolve_base_dir` helper**: Both `check_str_with` and `compile_str_collecting_warnings` use the private `resolve_base_dir(base_dir: Option<&Path>) -> Result<PathBuf, MdsError>` helper to convert an optional base directory to a concrete `PathBuf`, falling back to `std::env::current_dir()` when `None`. Any new public string-based API function that accepts an optional `base_dir` should call this helper rather than duplicating the fallback logic.
+
 ### Error Reporting Pattern
 
 All errors are `MdsError` variants (thiserror + miette). The key improvement in recent changes: `CircularImport`, `Recursion`, and `TypeError` variants now carry `help(...)` diagnostic attributes, so `miette` renders actionable hints alongside the error message automatically. No code change needed at call sites — the hint is embedded in the variant definition.
@@ -340,7 +342,7 @@ Both `Build` and `Check` commands use `input: Option<PathBuf>`. When `None`, the
 - **Adding a new `Arg` variant without updating all three match sites** — parser (`parse_single_arg_inner`), evaluator (`resolve_args`), and validator (`validate_var_args`) all pattern-match exhaustively on `Arg`. Adding a variant without updating all three will produce a compile error, which is by design.
 - **Passing `resolve_args` without `call_stack` or `warnings`** — nested `Arg::Call` evaluation requires the call stack for recursion detection and warnings for diagnostics. Any future refactor that removes these from `resolve_args` will silently allow unbounded recursion through argument nesting or lose warning context.
 - **Using `compile` instead of `compile_collecting_warnings` in CLI code** — the CLI must use the collecting variants to properly gate warning output on the `--quiet` flag.
-- **Using `.unwrap_or(0)` or silent fallbacks in invariant-enforcing code** — when a `position()` or similar lookup encodes a known program invariant (like `build_cycle_string` finding the repeated path in the stack), use `.expect("descriptive message")` to document the invariant and catch violations loudly in debug builds.
+- **Duplicating `base_dir` fallback logic in new string-based API functions** — always call `resolve_base_dir(base_dir)` rather than inlining the `current_dir()` fallback. The function also maps the IO error to `MdsError::Io`, which inline code tends to omit.
 - **Calling `get_all_exports()` and expecting a `HashMap`** — `ResolvedModule::get_all_exports()` returns `Vec<(String, FunctionDef)>`, not a `HashMap`. Callers that need map-like access must collect explicitly.
 
 ## Gotchas
@@ -359,7 +361,7 @@ Both `Build` and `Check` commands use `input: Option<PathBuf>`. When `None`, the
 - **`get_all_*` iteration order matters for shadowing** — all three `get_all_*` methods iterate outer→inner frames, so when a key exists in multiple frames the inner frame wins. The resulting `HashMap` thus correctly reflects inner-scope shadowing. This is the correct behavior for snapshot captures.
 - **`compile_str` / `resolve_source` uses a virtual path `<source>`** — in-memory sources cannot be canonicalized. Repeated calls to `compile_str` re-parse every time; there is no caching for in-memory sources.
 - **Project root is set on first resolve** — `root_dir` is set lazily. If `resolve_source` is called first (e.g., via `compile_str_with`), `root_dir` is set to the _canonicalized_ `base_dir` via `canonicalize().unwrap_or_else(|_| base_dir.to_path_buf())`, not a git-root-discovered path. Canonicalization ensures `starts_with` comparisons are consistent even when `base_dir` contains `.` or `..` components — without it, path traversal checks could be bypassed via relative segments. The `unwrap_or_else` fallback to the raw path handles non-existent or unmounted directories gracefully.
-- **Cycle detection reconstructs the path from `resolving_stack`** — when circular import is detected, `build_cycle_string` uses `.position(...).expect(...)` to find the start of the cycle. This is an internal invariant: `repeated` is always in the stack, so `.expect` documents that assumption and will panic (in debug) if the invariant breaks.
+- **Cycle detection reconstructs the path from `resolving_stack`** — when circular import is detected, `build_cycle_string` uses `.position(...).unwrap_or(0)` to find the start of the cycle. If `position` returns `None` (which should not happen at runtime), the cycle string starts from index 0 as a safe fallback rather than panicking.
 - **`TextNode` has no offset** — raw text nodes (`Node::Text(TextNode)`) do not carry a byte offset. Only structured nodes (`Interpolation`, `IfBlock`, `ForBlock`, `IncludeDirective`) have offsets for error reporting. `EscapedBrace` is also a unit variant with no offset.
 - **`enter_block()` must be paired with `self.depth -= 1`** — the helper only increments; callers are responsible for decrementing after the block body is parsed. Failing to decrement will cause subsequent blocks to see an inflated depth and may reject valid inputs.
 - **String literal escapes are not full Rust/JSON escapes** — `unescape_string` in the parser only recognizes `\\`, `\"`, and `\'`. A backslash followed by any other character (e.g., `\n`, `\t`) is kept verbatim as both backslash and the following character — it is NOT converted to a control character. Template authors writing `{greet("say \nhello")}` will get the literal two-character sequence `\n`, not a newline. This matches the least-surprise principle for a template language where `\n` in a string argument is rarely intended.
@@ -370,12 +372,12 @@ Both `Build` and `Check` commands use `input: Option<PathBuf>`. When `None`, the
 
 ## Key Files
 
-- `src/lib.rs` — public API: `compile`, `compile_file`, `compile_str`, `compile_str_with`, `compile_collecting_warnings`, `compile_str_collecting_warnings`, `check`, `check_str`, `check_str_with`, `load_vars_file`, `clean_output`
+- `src/lib.rs` — public API: `compile`, `compile_file`, `compile_str`, `compile_str_with`, `compile_collecting_warnings`, `compile_str_collecting_warnings`, `check`, `check_str`, `check_str_with`, `load_vars_file`, `clean_output`; private `resolve_base_dir` helper shared by all string-based API variants
 - `src/main.rs` — CLI entry point: `auto_detect_mds_file`, `parse_cli_value`/`parse_cli_value_unquoted`, `build_runtime_vars`, `reject_directory_input`, `read_stdin`; `Build` and `Check` use `input: Option<PathBuf>`
 - `src/ast.rs` — all AST types including `Arg::Call` for nested function call arguments; the contract between parser and everything downstream
 - `src/lexer.rs` — tokenizer; handles frontmatter, code fences, interpolation, directives
 - `src/parser.rs` — converts token stream to `Module` AST; `enter_block()` helper, `parse_args_inner`/`parse_single_arg_inner` depth-bounded recursion, identifier validation, duplicate param detection
-- `src/resolver.rs` — orchestrator: drives the full pipeline, module cache, import resolution, closure capture, security guards; `build_cycle_string` uses `.expect` to document invariant; threads `&mut Vec<String>` warnings through to evaluate; `ResolvedModule::get_export` and `get_all_exports` for export visibility
+- `src/resolver.rs` — orchestrator: drives the full pipeline, module cache, import resolution, closure capture, security guards; `build_cycle_string` uses `.unwrap_or(0)` as safe fallback for cycle start index; threads `&mut Vec<String>` warnings through to evaluate; `ResolvedModule::get_export` and `get_all_exports` for export visibility
 - `src/evaluator.rs` — AST walker that produces the rendered string; `resolve_args` handles `Arg::Call` via recursive evaluation with shared `call_stack` and `warnings`; `evaluate_include` pushes to warnings vec, never calls `eprintln!`
 - `src/validator.rs` — pre-evaluation semantic checks; `validate_var_args` recursively validates nested `Arg::Call` arguments
 - `src/scope.rs` — scope chain with frames for variables, functions, and namespaces; closure capture helpers; `get_all_*` iterate outer→inner for correct shadowing semantics
@@ -390,7 +392,7 @@ Both `Build` and `Check` commands use `input: Option<PathBuf>`. When `None`, the
 - `src/evaluator.rs` — canonical reference for directive execution order, closure restore, call-depth guards, nested arg evaluation, and warning collection
 - `src/scope.rs` — canonical reference for closure capture API (`get_all_*` methods) and shadowing semantics
 - `src/ast.rs` — canonical reference for `Arg` variants; any new argument form starts here
-- `src/lib.rs` — canonical reference for the two-tier warning API (`compile` vs `compile_collecting_warnings`) and `compile_file` convenience entry point
+- `src/lib.rs` — canonical reference for the two-tier warning API (`compile` vs `compile_collecting_warnings`), `compile_file` convenience entry point, and `resolve_base_dir` helper for optional base directory resolution
 - `src/main.rs` — canonical reference for CLI auto-detection logic and `parse_cli_value` coercion rules
 - `src/error.rs` — canonical reference for `help(...)` diagnostic attribute placement on `MdsError` variants
 - `tests/integration.rs` — covers all directive combinations including nested function calls, CLI stdin/quiet mode, auto-detect, `compile_file`, error help-text, scope/export visibility rules, `--set` coercion and deduplication, and re-export error scenarios; read before adding new directives to understand existing fixture patterns

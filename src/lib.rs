@@ -57,23 +57,14 @@ use resolver::ModuleCache;
 
 /// Compile an MDS file to a final Markdown string.
 ///
-/// Warnings (e.g. empty `@include`) are printed to stderr.
-///
-/// # Arguments
-/// * `path` — Path to the .mds file
-/// * `runtime_vars` — Optional runtime variable overrides (from --vars JSON)
+/// Warnings (e.g. empty `@include`) are printed to stderr. Pass `runtime_vars`
+/// to override or supply variables that aren't defined in frontmatter.
 ///
 /// # Examples
 ///
 /// ```rust,no_run
 /// use std::path::Path;
-///
-/// // Compile without runtime vars
 /// let md = mds::compile(Path::new("template.mds"), None)?;
-///
-/// // Compile with runtime vars loaded from a JSON file
-/// let vars = mds::load_vars_file(Path::new("vars.json"))?;
-/// let md = mds::compile(Path::new("template.mds"), Some(vars))?;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[must_use = "the compiled Markdown output should be used"]
@@ -90,9 +81,6 @@ pub fn compile(
 ///
 /// Warnings (e.g. empty `@include`) are printed to stderr.
 ///
-/// # Arguments
-/// * `source` — MDS source code
-///
 /// # Examples
 ///
 /// ```rust
@@ -107,12 +95,8 @@ pub fn compile_str(source: &str) -> Result<String, MdsError> {
 
 /// Compile MDS source code from a string with options.
 ///
-/// Warnings (e.g. empty `@include`) are printed to stderr.
-///
-/// # Arguments
-/// * `source` — MDS source code
-/// * `base_dir` — Base directory for resolving imports (defaults to current dir)
-/// * `runtime_vars` — Optional runtime variable overrides
+/// Warnings (e.g. empty `@include`) are printed to stderr. `base_dir` sets the
+/// root for resolving `@import` paths; defaults to the current directory.
 ///
 /// # Examples
 ///
@@ -147,13 +131,10 @@ pub fn compile_str_with(
 ///
 /// ```rust,no_run
 /// use std::path::Path;
-///
-/// match mds::check(Path::new("template.mds"), None) {
-///     Ok(()) => println!("template is valid"),
-///     Err(e) => eprintln!("validation failed: {e}"),
-/// }
+/// mds::check(Path::new("template.mds"), None)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-#[must_use = "the validation result should be checked"]
+#[must_use = "errors should be handled"]
 pub fn check(
     path: impl AsRef<Path>,
     runtime_vars: Option<HashMap<String, Value>>,
@@ -179,7 +160,7 @@ pub fn check(
 /// assert!(mds::check_str("Hello {name}!\n").is_err());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-#[must_use = "the validation result should be checked"]
+#[must_use = "errors should be handled"]
 pub fn check_str(source: &str) -> Result<(), MdsError> {
     check_str_with(source, None, None)
 }
@@ -196,21 +177,17 @@ fn resolve_base_dir(base_dir: Option<&Path>) -> Result<PathBuf, MdsError> {
 
 /// Check (validate) MDS source from a string with options.
 ///
+/// `base_dir` sets the root for resolving `@import` paths; defaults to the
+/// current directory.
+///
 /// # Examples
 ///
 /// ```rust,no_run
 /// use std::path::Path;
-/// use std::collections::HashMap;
-///
-/// let vars = HashMap::from([("env".to_string(), mds::Value::String("prod".to_string()))]);
-/// mds::check_str_with(
-///     "---\nenv: dev\n---\nRunning in {env}.\n",
-///     Some(Path::new("templates/")),
-///     Some(vars),
-/// )?;
+/// mds::check_str_with("---\nenv: dev\n---\nRunning in {env}.\n", Some(Path::new("templates/")), None)?;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-#[must_use = "the validation result should be checked"]
+#[must_use = "errors should be handled"]
 pub fn check_str_with(
     source: &str,
     base_dir: Option<&Path>,
@@ -241,13 +218,8 @@ fn emit_warnings(warnings: &[String]) {
 ///
 /// ```rust,no_run
 /// use std::path::Path;
-///
 /// let (md, warnings) = mds::compile_collecting_warnings(Path::new("template.mds"), None)?;
-/// if warnings.is_empty() {
-///     println!("{md}");
-/// } else {
-///     for w in &warnings { eprintln!("warning: {w}"); }
-/// }
+/// for w in &warnings { eprintln!("warning: {w}"); }
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[must_use = "the compiled Markdown output and warnings should be used"]
