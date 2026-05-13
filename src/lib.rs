@@ -330,18 +330,19 @@ pub fn compile_file(path: &str) -> Result<String, MdsError> {
 /// ```
 #[must_use = "the loaded variables should be used"]
 pub fn load_vars_file(path: &Path) -> Result<HashMap<String, Value>, MdsError> {
-    let metadata = std::fs::metadata(path).map_err(|e| MdsError::Io {
+    // Read bytes first, then check size (same TOCTOU-safe pattern as resolver.rs).
+    let bytes = std::fs::read(path).map_err(|e| MdsError::Io {
         message: format!("cannot read vars file {}: {e}", path.display()),
     })?;
-    if metadata.len() > resolver::MAX_FILE_SIZE {
+    if bytes.len() as u64 > resolver::MAX_FILE_SIZE {
         return Err(MdsError::import_error(format!(
             "vars file exceeds maximum size of {} bytes: {}",
             resolver::MAX_FILE_SIZE,
             path.display()
         )));
     }
-    let content = std::fs::read_to_string(path).map_err(|e| MdsError::Io {
-        message: format!("cannot read vars file {}: {e}", path.display()),
+    let content = String::from_utf8(bytes).map_err(|e| MdsError::Io {
+        message: format!("invalid UTF-8 in vars file {}: {e}", path.display()),
     })?;
     let json: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| MdsError::JsonError {
