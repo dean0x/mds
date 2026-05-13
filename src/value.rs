@@ -19,6 +19,7 @@ impl Value {
     /// MDS truthiness rules:
     /// Falsy: false, null, "", [], 0
     /// Everything else is truthy.
+    #[must_use]
     pub fn is_truthy(&self) -> bool {
         match self {
             Value::Boolean(b) => *b,
@@ -99,7 +100,7 @@ impl Value {
 
     /// Try to interpret this value as an array.
     #[must_use]
-    pub fn as_array(&self) -> Option<&Vec<Value>> {
+    pub fn as_array(&self) -> Option<&[Value]> {
         match self {
             Value::Array(a) => Some(a),
             _ => None,

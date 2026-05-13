@@ -316,7 +316,7 @@ fn evaluate_for(
     let items = iterable
         .as_array()
         .ok_or_else(|| MdsError::type_error(iterable.type_name()))?
-        .clone();
+        .to_vec();
 
     if items.len() > MAX_LOOP_ITERATIONS {
         return Err(MdsError::resource_limit(format!(

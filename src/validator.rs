@@ -111,7 +111,7 @@ fn validate_expr(
                     len,
                 ));
             }
-            validate_var_args(args, scope, file, source, offset)
+            validate_var_args(args, scope, file, source, offset, 0)
         }
         Expr::QualifiedCall {
             namespace,
@@ -137,7 +137,7 @@ fn validate_expr(
                     len,
                 ));
             }
-            validate_var_args(args, scope, file, source, offset)
+            validate_var_args(args, scope, file, source, offset, 0)
         }
     }
 }
@@ -149,7 +149,11 @@ fn validate_var_args(
     file: &str,
     source: &str,
     offset: usize,
+    depth: usize,
 ) -> Result<(), MdsError> {
+    if depth > 256 {
+        return Err(MdsError::syntax("nested argument validation depth exceeded"));
+    }
     for arg in args {
         match arg {
             Arg::StringLiteral(_) => {}
@@ -177,7 +181,7 @@ fn validate_var_args(
                         name.len(),
                     ));
                 }
-                validate_var_args(inner_args, scope, file, source, offset)?;
+                validate_var_args(inner_args, scope, file, source, offset, depth + 1)?;
             }
         }
     }
