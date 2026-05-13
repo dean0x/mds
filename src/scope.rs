@@ -117,7 +117,10 @@ impl Scope {
 
     /// Look up a namespace by alias.
     pub fn get_namespace(&self, alias: &str) -> Option<&NamespaceScope> {
-        self.frames.iter().rev().find_map(|f| f.namespaces.get(alias))
+        self.frames
+            .iter()
+            .rev()
+            .find_map(|f| f.namespaces.get(alias))
     }
 
     /// Get all namespaces visible in the current scope (for closure capture).
