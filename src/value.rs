@@ -228,22 +228,12 @@ mod tests {
 
     #[test]
     fn display_large_number() {
-        // Numbers beyond i64 range should not panic during display
-        let large = Value::Number(1e20);
-        let result = large.to_string();
-        assert!(!result.is_empty());
+        // Numbers beyond i64 range fall through to f64 Display.
+        assert_eq!(Value::Number(1e20).to_string(), "100000000000000000000");
 
-        let huge = Value::Number(f64::MAX);
-        let result = huge.to_string();
-        assert!(!result.is_empty());
-
-        // NaN and infinity should display without panic
-        let nan = Value::Number(f64::NAN);
-        let result = nan.to_string();
-        assert!(!result.is_empty());
-
-        let inf = Value::Number(f64::INFINITY);
-        let result = inf.to_string();
-        assert!(!result.is_empty());
+        // NaN and infinity use f64 Display (no decimal formatting shortcut applies).
+        assert_eq!(Value::Number(f64::NAN).to_string(), "NaN");
+        assert_eq!(Value::Number(f64::INFINITY).to_string(), "inf");
+        assert_eq!(Value::Number(f64::NEG_INFINITY).to_string(), "-inf");
     }
 }

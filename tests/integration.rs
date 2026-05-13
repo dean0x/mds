@@ -178,11 +178,8 @@ fn not_mds_file_error() {
 
 #[test]
 fn vars_file_loading() {
-    // Create a temporary vars file
-    let vars_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("test_vars.json");
+    let dir = tempfile::tempdir().unwrap();
+    let vars_path = dir.path().join("vars.json");
     std::fs::write(&vars_path, r#"{"name": "FromJSON", "count": 99}"#).unwrap();
 
     let vars = mds::load_vars_file(&vars_path).unwrap();
@@ -191,9 +188,6 @@ fn vars_file_loading() {
         Some(&mds::value::Value::String("FromJSON".to_string()))
     );
     assert_eq!(vars.get("count"), Some(&mds::value::Value::Number(99.0)));
-
-    // Clean up
-    let _ = std::fs::remove_file(&vars_path);
 }
 
 #[test]
@@ -1905,46 +1899,3 @@ fn if_negation_error_message_is_actionable() {
     );
 }
 
-// ── Fix 3: NaN and Infinity treated as strings, not numbers ──────────────────
-
-#[test]
-fn set_flag_nan_is_string() {
-    // `--set val=NaN` must NOT produce Value::Number(NaN); it must be a string.
-    // We verify by building a file that interpolates {val} — if it's a number it
-    // would format as "NaN"; the key assertion is that it does NOT crash and that
-    // the type coercion path falls through to string.
-    let output = mds_bin()
-        .args([
-            "build",
-            fixture("set_count.mds").to_str().unwrap(),
-            "--set",
-            "count=NaN",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .unwrap();
-    // The build may succeed (NaN rendered as the string "NaN") or fail (type
-    // mismatch if count is expected to be a number), but must not panic.
-    // What matters is that NaN is stored as Value::String("NaN"), not Value::Number(NaN).
-    // We test the parse function directly via the unit test in main.rs; here we
-    // just verify the CLI doesn't crash.
-    let _ = output; // success or failure is acceptable — no panic is the invariant
-}
-
-#[test]
-fn set_flag_infinity_is_string() {
-    // `--set val=Infinity` must NOT produce Value::Number(inf); it must be a string.
-    let output = mds_bin()
-        .args([
-            "build",
-            fixture("set_count.mds").to_str().unwrap(),
-            "--set",
-            "count=Infinity",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .unwrap();
-    let _ = output; // no panic is the invariant
-}

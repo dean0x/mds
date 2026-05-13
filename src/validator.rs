@@ -1,6 +1,7 @@
 use crate::ast::{Arg, Expr, Node};
 use crate::error::MdsError;
 use crate::scope::Scope;
+use crate::value::Value;
 
 /// Validate semantic correctness of a module AST.
 /// Checks variable references, function arity, and type constraints
@@ -46,7 +47,7 @@ fn validate_node(node: &Node, scope: &Scope, file: &str, source: &str) -> Result
                     block.iterable.len(),
                 )
             })?;
-            if !matches!(iterable_val, crate::value::Value::Array(_)) {
+            if !matches!(iterable_val, Value::Array(_)) {
                 return Err(MdsError::type_error_at(
                     iterable_val.type_name(),
                     file,
@@ -56,7 +57,7 @@ fn validate_node(node: &Node, scope: &Scope, file: &str, source: &str) -> Result
                 ));
             }
             let mut inner = scope.clone();
-            inner.set_var(&block.var, crate::value::Value::Null);
+            inner.set_var(&block.var, Value::Null);
             validate(&block.body, &inner, file, source)
         }
         Node::Define(def) => {
@@ -65,7 +66,7 @@ fn validate_node(node: &Node, scope: &Scope, file: &str, source: &str) -> Result
                 // Use an empty array as the placeholder for each parameter so
                 // that `@for item in param:` inside the body passes the type
                 // check. The actual type is enforced at call time by the evaluator.
-                inner.set_var(param, crate::value::Value::Array(vec![]));
+                inner.set_var(param, Value::Array(vec![]));
             }
             validate(&def.body, &inner, file, source)
         }

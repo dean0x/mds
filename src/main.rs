@@ -116,11 +116,15 @@ fn parse_key_value(s: &str) -> std::result::Result<(String, String), String> {
 /// booleans, integer and float literals become numbers, `null` becomes Null,
 /// and bracket-delimited lists become arrays.  Everything else stays a string.
 fn parse_cli_value(val: String) -> mds::Value {
-    match val.as_str() {
-        "true" => return mds::Value::Boolean(true),
-        "false" => return mds::Value::Boolean(false),
-        "null" => return mds::Value::Null,
-        _ => {}
+    // Keywords first.
+    if val == "true" {
+        return mds::Value::Boolean(true);
+    }
+    if val == "false" {
+        return mds::Value::Boolean(false);
+    }
+    if val == "null" {
+        return mds::Value::Null;
     }
 
     // Integer — parse as i64 so we don't accept "1e3" (scientific notation) here;
