@@ -1,7 +1,7 @@
 ---
 feature: mds-compiler
 name: MDS Compiler
-description: "Use when working on the MDS compilation pipeline, adding directives, modifying scope/variable handling, extending the module system, or debugging output rendering. Keywords: lexer, parser, evaluator, resolver, validator, scope, frontmatter, interpolation, directive, import, export, include, define, for, if, closure, lexical scope, prompt export, nested function calls, arg parsing, warnings, quiet mode, stdin."
+description: "Use when working on the MDS compilation pipeline, adding directives, modifying scope/variable handling, extending the module system, or debugging output rendering. Keywords: lexer, parser, evaluator, resolver, validator, scope, frontmatter, interpolation, directive, import, export, include, define, for, if, closure, lexical scope, prompt export, nested function calls, arg parsing, warnings, quiet mode, stdin, auto-detect, compile_file."
 category: architecture
 directories: [src/, tests/]
 referencedFiles:
@@ -34,6 +34,7 @@ The binary is a CLI tool (`mds build`, `mds check`, `mds init`) backed by a libr
 | Function | Purpose |
 |---|---|
 | `compile(path, runtime_vars)` | Compile a file to Markdown, printing warnings to stderr |
+| `compile_file(path: &str)` | Convenience wrapper: calls `compile(Path::new(path), None)` — no runtime vars |
 | `compile_str(source)` | Compile from string, no options |
 | `compile_str_with(source, base_dir, runtime_vars)` | Compile from string with options |
 | `compile_collecting_warnings(path, runtime_vars)` | Compile and return `(String, Vec<String>)` — caller controls warning output |
@@ -43,13 +44,15 @@ The binary is a CLI tool (`mds build`, `mds check`, `mds init`) backed by a libr
 | `check_str_with(source, base_dir, runtime_vars)` | Validate from string with options |
 | `load_vars_file(path)` | Load runtime vars from a JSON file |
 
+`compile_file` is the simplest entry point for embedding MDS in tools that already have a path as `&str`. It does not accept runtime vars; use `compile` directly when runtime overrides are needed.
+
 All compile/check functions funnel through `ModuleCache::resolve` / `ModuleCache::resolve_source`, which is the single entry point to the full pipeline. The CLI and any programmatic callers share exactly the same compilation behavior.
 
 **Warning collection pattern**: Warnings (e.g. empty `@include`) are passed as a `&mut Vec<String>` through the full pipeline — `process_module` → `evaluate` → `evaluate_nodes` → `evaluate_include`. Nothing in the evaluator or resolver calls `eprintln!` directly. The public `compile*` variants print warnings by calling `emit_warnings(&warnings)` on the collected `Vec`. The `compile_collecting_warnings` variants return warnings without printing — this is what the CLI build command uses so it can gate output on the `--quiet` flag.
 
-The CLI `build` and `check` commands both accept `-` as the input path to read from stdin, resolved against the current working directory for import paths.
+The CLI `build` and `check` commands both accept `-` as the input path to read from stdin, resolved against the current working directory for import paths. When the `input` argument is omitted entirely, both commands call `auto_detect_mds_file()` to scan the CWD for a single `.mds` file. If zero or multiple `.mds` files are found, a diagnostic error with hints is returned.
 
-External dependencies are minimal: `clap` for CLI parsing, `serde_yml`/`serde_json` for frontmatter and runtime vars, `miette`/`thiserror` for rich diagnostic errors, `tempfile` in tests.
+External dependencies are minimal: `clap` for CLI parsing, `serde_json` and `serde_yaml` for frontmatter and runtime vars, `miette`/`thiserror` for rich diagnostic errors, `tempfile` in tests.
 
 ## Component Architecture
 
@@ -161,6 +164,8 @@ The resolver is the orchestrator. `ModuleCache` drives the full pipeline for eac
 - `resolving: HashSet<PathBuf>` — O(1) membership test
 - `resolving_stack: Vec<PathBuf>` — insertion-ordered list for cycle path reconstruction (e.g., `a.mds → b.mds → a.mds`)
 
+`build_cycle_string` reconstructs the cycle path by finding the repeated path in `resolving_stack` using `.position(...).expect(...)`. The `.expect` is intentional — the invariant is that `repeated` is always in the stack at cycle-detection time (it was placed there by the caller). This is a documented internal invariant, not a defensive guard.
+
 **`process_module`** is the inner workhorse: it tokenizes, parses, builds scope from frontmatter + runtime vars, walks the AST to register functions (capturing closure scope) and resolve imports, validates, and evaluates. The result is a `ResolvedModule`. Warnings are threaded through as `&mut Vec<String>` from the public API all the way into `evaluate`.
 
 **`ResolvedModule`** fields:
@@ -255,7 +260,9 @@ The two-tier API pattern in `lib.rs`:
 
 ### Error Reporting Pattern
 
-All errors are `MdsError` variants (thiserror + miette). For errors with source location, use the `_at` constructor variants:
+All errors are `MdsError` variants (thiserror + miette). The key improvement in recent changes: `CircularImport`, `Recursion`, and `TypeError` variants now carry `help(...)` diagnostic attributes, so `miette` renders actionable hints alongside the error message automatically. No code change needed at call sites — the hint is embedded in the variant definition.
+
+For errors with source location, use the `_at` constructor variants:
 
 ```rust
 // Use _at variants to attach a miette SourceSpan — provides file + line in error output.
@@ -280,13 +287,22 @@ MdsError::import_error(message)
 MdsError::export_error(message)
 ```
 
-Several `MdsError` variants (`TypeError`, `Recursion`, `ImportError`, `ExportError`) carry optional `span` and `src` fields in their struct definition but do not yet have public `_at` constructor methods. They are currently always constructed without span info. If you need span-aware versions of these, add `_at` constructor methods following the pattern in `error.rs`.
+`TypeError`, `Recursion`, `ImportError`, and `ExportError` carry optional `span` and `src` fields in their struct definition but do not yet have public `_at` constructor methods. They are currently always constructed without span info. If you need span-aware versions, add `_at` constructor methods following the pattern in `error.rs`.
 
 Always prefer `_at` variants inside the validator and evaluator where source offsets are available from the AST nodes.
 
 ### Adding a New Value Type
 
-Currently blocked by design: `Value::from_yaml` and `Value::from_json` both return `Err` for object/map types. Any new value variant must be added to both converters, to `Value::Display`, `Value::is_truthy`, `Value::type_name`, and `Value::as_array` (if relevant). Tests for display edge cases (especially large numbers) exist in `src/value.rs`.
+Currently blocked by design: `Value::from_yaml` and `Value::from_json` both return `Err` for object/map types. Any new value variant must be added to both converters, to `Value::Display`, `Value::is_truthy`, `Value::type_name`, and `Value::as_array` (if relevant). Tests for display edge cases (especially large numbers) exist in `src/value.rs`. When writing tests for numeric values, avoid `3.14` (clippy `approx_constant` lint) — use values like `2.5` instead.
+
+### CLI Auto-Detection
+
+The `auto_detect_mds_file()` function in `src/main.rs` scans the current working directory for `.mds` files. It returns:
+- `Ok(path)` — exactly one `.mds` file found
+- `Err(...)` with hint "run 'mds init'" — zero files found
+- `Err(...)` with hint to specify a file — multiple files found (names sorted alphabetically)
+
+Both `Build` and `Check` commands use `input: Option<PathBuf>`. When `None`, they call `auto_detect_mds_file()`. `Build` additionally prints `"Building {path}"` to stderr (unless `--quiet`) when auto-detecting, so users know which file was selected.
 
 ## Constraints
 
@@ -314,6 +330,7 @@ Currently blocked by design: `Value::from_yaml` and `Value::from_json` both retu
 - **Adding a new `Arg` variant without updating all three match sites** — parser (`parse_single_arg_inner`), evaluator (`resolve_args`), and validator (`validate_var_args`) all pattern-match exhaustively on `Arg`. Adding a variant without updating all three will produce a compile error, which is by design.
 - **Passing `resolve_args` without `call_stack` or `warnings`** — nested `Arg::Call` evaluation requires the call stack for recursion detection and warnings for diagnostics. Any future refactor that removes these from `resolve_args` will silently allow unbounded recursion through argument nesting or lose warning context.
 - **Using `compile` instead of `compile_collecting_warnings` in CLI code** — the CLI must use the collecting variants to properly gate warning output on the `--quiet` flag.
+- **Using `.unwrap_or(0)` or silent fallbacks in invariant-enforcing code** — when a `position()` or similar lookup encodes a known program invariant (like `build_cycle_string` finding the repeated path in the stack), use `.expect("descriptive message")` to document the invariant and catch violations loudly in debug builds.
 
 ## Gotchas
 
@@ -326,28 +343,31 @@ Currently blocked by design: `Value::from_yaml` and `Value::from_json` both retu
 - **Merged imports bring in `prompt` body but not frontmatter vars** — `@import "path"` (merge) brings functions and the `prompt` body text into scope, but NOT the imported module's frontmatter variables. Two merge-imported modules that both define the same frontmatter variable do not cause a collision.
 - **Selective import of `prompt` binds as a variable, not a function** — `@import { prompt } from "path"` sets `prompt` as a `Value::String` via `scope.set_var`, not `scope.set_function`.
 - **`compile_str` takes no arguments** — the zero-argument form `compile_str(source)` is a convenience wrapper. Use `compile_str_with(source, base_dir, runtime_vars)` when you need import resolution relative to a specific directory or runtime variable overrides.
+- **`compile_file` takes no runtime vars** — `compile_file(path)` calls `compile(Path::new(path), None)`. If runtime vars are needed, call `compile` directly.
 - **Closure capture is eager and shallow** — `get_all_vars()` / `get_all_functions()` / `get_all_namespaces()` snapshot the scope at definition time. Functions defined after the closure capture are not visible to the captured function. Within `process_module`, `@define` nodes are processed in top-to-bottom AST order, so later-defined functions are not visible to earlier ones.
 - **`get_all_*` iteration order matters for shadowing** — all three `get_all_*` methods iterate outer→inner frames, so when a key exists in multiple frames the inner frame wins. The resulting `HashMap` thus correctly reflects inner-scope shadowing. This is the correct behavior for snapshot captures.
 - **`compile_str` / `resolve_source` uses a virtual path `<source>`** — in-memory sources cannot be canonicalized. Repeated calls to `compile_str` re-parse every time; there is no caching for in-memory sources.
 - **Project root is set on first resolve** — `root_dir` is set lazily. If `resolve_source` is called first, `root_dir` is the provided `base_dir`, not a git-root-discovered path.
-- **Cycle detection reconstructs the path from `resolving_stack`** — when circular import is detected, the error builds the chain by finding the repeated path in the stack and joining from that point with `→`. The stack is insertion-ordered, reflecting the actual import sequence.
+- **Cycle detection reconstructs the path from `resolving_stack`** — when circular import is detected, `build_cycle_string` uses `.position(...).expect(...)` to find the start of the cycle. This is an internal invariant: `repeated` is always in the stack, so `.expect` documents that assumption and will panic (in debug) if the invariant breaks.
 - **`TextNode` has no offset** — raw text nodes (`Node::Text(TextNode)`) do not carry a byte offset. Only structured nodes (`Interpolation`, `IfBlock`, `ForBlock`, `IncludeDirective`) have offsets for error reporting. `EscapedBrace` is also a unit variant with no offset.
 - **`enter_block()` must be paired with `self.depth -= 1`** — the helper only increments; callers are responsible for decrementing after the block body is parsed. Failing to decrement will cause subsequent blocks to see an inflated depth and may reject valid inputs.
 - **Evaluator's `Node::Define` arm does not restore closures** — the evaluator re-registers a function via `FunctionDef::from(block)` with empty captures. Closure capture only happens in the resolver and is only restored inside `invoke_function`. This design means the resolver's pre-evaluation scope pass is load-bearing for cross-module function calls.
+- **`help(...)` attributes are variant-level, not constructor-level** — `CircularImport`, `Recursion`, and `TypeError` now have `#[diagnostic(help(...))]` annotations that miette renders automatically. When adding new error variants, add the `help` attribute directly on the variant, not in the constructor method.
 
 ## Key Files
 
-- `src/lib.rs` — public API: `compile`, `compile_str`, `compile_str_with`, `compile_collecting_warnings`, `compile_str_collecting_warnings`, `check`, `check_str`, `check_str_with`, `load_vars_file`, `clean_output`
+- `src/lib.rs` — public API: `compile`, `compile_file`, `compile_str`, `compile_str_with`, `compile_collecting_warnings`, `compile_str_collecting_warnings`, `check`, `check_str`, `check_str_with`, `load_vars_file`, `clean_output`
+- `src/main.rs` — CLI entry point: `auto_detect_mds_file`, `parse_cli_value`/`parse_cli_value_unquoted`, `build_runtime_vars`, `reject_directory_input`, `read_stdin`; `Build` and `Check` use `input: Option<PathBuf>`
 - `src/ast.rs` — all AST types including `Arg::Call` for nested function call arguments; the contract between parser and everything downstream
 - `src/lexer.rs` — tokenizer; handles frontmatter, code fences, interpolation, directives
 - `src/parser.rs` — converts token stream to `Module` AST; `enter_block()` helper, `parse_args_inner`/`parse_single_arg_inner` depth-bounded recursion, identifier validation, duplicate param detection
-- `src/resolver.rs` — orchestrator: drives the full pipeline, module cache, import resolution, closure capture, security guards; threads `&mut Vec<String>` warnings through to evaluate
+- `src/resolver.rs` — orchestrator: drives the full pipeline, module cache, import resolution, closure capture, security guards; `build_cycle_string` uses `.expect` to document invariant; threads `&mut Vec<String>` warnings through to evaluate
 - `src/evaluator.rs` — AST walker that produces the rendered string; `resolve_args` handles `Arg::Call` via recursive evaluation with shared `call_stack` and `warnings`; `evaluate_include` pushes to warnings vec, never calls `eprintln!`
 - `src/validator.rs` — pre-evaluation semantic checks; `validate_var_args` recursively validates nested `Arg::Call` arguments
 - `src/scope.rs` — scope chain with frames for variables, functions, and namespaces; closure capture helpers; `get_all_*` iterate outer→inner for correct shadowing semantics
-- `src/value.rs` — runtime value enum with YAML/JSON converters and display rules
-- `src/error.rs` — `MdsError` enum with miette diagnostics; builder methods for span-aware errors; several variants have optional span fields without public `_at` constructors yet
-- `tests/integration.rs` — end-to-end tests covering all features, error paths, CLI integration (stdin, file output, vars file, quiet flag), edge cases (nested loops, loop shadowing, falsy values, mutual recursion, escape sequences in blocks/functions), and error format verification
+- `src/value.rs` — runtime value enum with YAML/JSON converters and display rules; test numerics use `2.5` (not `3.14`) to satisfy clippy `approx_constant`
+- `src/error.rs` — `MdsError` enum with miette diagnostics; `CircularImport`, `Recursion`, `TypeError` carry `help(...)` diagnostic attributes; builder methods for span-aware errors
+- `tests/integration.rs` — end-to-end tests covering all features, error paths, CLI integration (stdin, file output, vars file, quiet flag, auto-detect), edge cases (nested loops, loop shadowing, falsy values, mutual recursion, escape sequences in blocks/functions), `compile_file` API, and error help-text verification
 
 ## Related
 
@@ -355,5 +375,7 @@ Currently blocked by design: `Value::from_yaml` and `Value::from_json` both retu
 - `src/evaluator.rs` — canonical reference for directive execution order, closure restore, call-depth guards, nested arg evaluation, and warning collection
 - `src/scope.rs` — canonical reference for closure capture API (`get_all_*` methods) and shadowing semantics
 - `src/ast.rs` — canonical reference for `Arg` variants; any new argument form starts here
-- `src/lib.rs` — canonical reference for the two-tier warning API (`compile` vs `compile_collecting_warnings`)
-- `tests/integration.rs` — covers all directive combinations including nested function calls, CLI stdin/quiet mode, and edge cases; read before adding new directives to understand existing fixture patterns
+- `src/lib.rs` — canonical reference for the two-tier warning API (`compile` vs `compile_collecting_warnings`) and `compile_file` convenience entry point
+- `src/main.rs` — canonical reference for CLI auto-detection logic and `parse_cli_value` coercion rules
+- `src/error.rs` — canonical reference for `help(...)` diagnostic attribute placement on `MdsError` variants
+- `tests/integration.rs` — covers all directive combinations including nested function calls, CLI stdin/quiet mode, auto-detect, `compile_file`, error help-text, and edge cases; read before adding new directives to understand existing fixture patterns
