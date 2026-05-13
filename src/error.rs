@@ -3,6 +3,19 @@ use std::sync::Arc;
 use miette::{Diagnostic, SourceSpan};
 use thiserror::Error;
 
+/// Build the `(span, src)` pair shared by all `_at` constructors.
+fn at(
+    file: &str,
+    source: &str,
+    offset: usize,
+    len: usize,
+) -> (Option<SourceSpan>, Option<Arc<miette::NamedSource<String>>>) {
+    (
+        Some(SourceSpan::new(offset.into(), len)),
+        Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
+    )
+}
+
 /// All errors produced by the MDS compiler.
 #[derive(Error, Debug, Diagnostic)]
 pub enum MdsError {
@@ -157,10 +170,11 @@ impl MdsError {
         offset: usize,
         len: usize,
     ) -> Self {
+        let (span, src) = at(file, source, offset, len);
         MdsError::Syntax {
             message: message.into(),
-            span: Some(SourceSpan::new(offset.into(), len)),
-            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
+            span,
+            src,
         }
     }
 
@@ -179,10 +193,11 @@ impl MdsError {
         offset: usize,
         len: usize,
     ) -> Self {
+        let (span, src) = at(file, source, offset, len);
         MdsError::UndefinedVariable {
             name: name.into(),
-            span: Some(SourceSpan::new(offset.into(), len)),
-            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
+            span,
+            src,
         }
     }
 
@@ -201,10 +216,11 @@ impl MdsError {
         offset: usize,
         len: usize,
     ) -> Self {
+        let (span, src) = at(file, source, offset, len);
         MdsError::UndefinedFunction {
             name: name.into(),
-            span: Some(SourceSpan::new(offset.into(), len)),
-            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
+            span,
+            src,
         }
     }
 
@@ -227,12 +243,13 @@ impl MdsError {
         offset: usize,
         len: usize,
     ) -> Self {
+        let (span, src) = at(file, source, offset, len);
         MdsError::ArityMismatch {
             name: name.into(),
             expected,
             got,
-            span: Some(SourceSpan::new(offset.into(), len)),
-            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
+            span,
+            src,
         }
     }
 
@@ -259,10 +276,11 @@ impl MdsError {
         offset: usize,
         len: usize,
     ) -> Self {
+        let (span, src) = at(file, source, offset, len);
         MdsError::NameCollision {
             name: name.into(),
-            span: Some(SourceSpan::new(offset.into(), len)),
-            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
+            span,
+            src,
         }
     }
 
@@ -289,10 +307,11 @@ impl MdsError {
         offset: usize,
         len: usize,
     ) -> Self {
+        let (span, src) = at(file, source, offset, len);
         MdsError::FileNotFound {
             path: path.into(),
-            span: Some(SourceSpan::new(offset.into(), len)),
-            src: Some(Arc::new(miette::NamedSource::new(file, source.to_string()))),
+            span,
+            src,
         }
     }
 

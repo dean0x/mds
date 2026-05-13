@@ -168,17 +168,10 @@ impl Parser<'_> {
         if let Some(rest) = trimmed.strip_prefix("@define ") {
             return self.parse_define_block(rest, offset);
         }
-        if trimmed == "@import"
-            || trimmed.starts_with("@import ")
-            || trimmed.starts_with("@import\t")
-            || trimmed.starts_with("@import{")
-        {
+        if is_directive_token(trimmed, "@import") {
             return parse_import_directive(trimmed, offset);
         }
-        if trimmed == "@export"
-            || trimmed.starts_with("@export ")
-            || trimmed.starts_with("@export\t")
-        {
+        if is_directive_token(trimmed, "@export") {
             return parse_export_directive(trimmed, offset);
         }
         if let Some(rest) = trimmed.strip_prefix("@include ") {
@@ -626,6 +619,16 @@ fn parse_single_arg_inner(s: &str, depth: usize) -> Result<Arg, MdsError> {
     }
 }
 
+/// Return true if `directive` is exactly `keyword` or starts with `keyword`
+/// followed by a space, tab, or `{`.
+fn is_directive_token(directive: &str, keyword: &str) -> bool {
+    directive == keyword
+        || directive
+            .strip_prefix(keyword)
+            .map(|rest| matches!(rest.chars().next(), Some(' ' | '\t' | '{')))
+            .unwrap_or(false)
+}
+
 pub(crate) fn is_valid_identifier(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -641,10 +644,15 @@ pub(crate) fn is_valid_identifier(s: &str) -> bool {
 /// Strip a leading newline from the body text nodes.
 fn strip_leading_newline(mut nodes: Vec<Node>) -> Vec<Node> {
     if let Some(Node::Text(t)) = nodes.first_mut() {
-        if t.text.starts_with('\n') {
-            t.text = t.text[1..].to_string();
-        } else if t.text.starts_with("\r\n") {
-            t.text = t.text[2..].to_string();
+        let strip = if t.text.starts_with("\r\n") {
+            2
+        } else if t.text.starts_with('\n') {
+            1
+        } else {
+            0
+        };
+        if strip > 0 {
+            t.text.drain(..strip);
         }
         if t.text.is_empty() {
             nodes.remove(0);
