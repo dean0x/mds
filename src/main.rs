@@ -216,9 +216,7 @@ fn read_stdin() -> Result<(String, std::path::PathBuf), miette::Error> {
         .read_to_string(&mut source)
         .map_err(|e| miette::miette!("cannot read stdin: {e}"))?;
     if source.len() as u64 > MAX_STDIN_SIZE {
-        return Err(miette::miette!(
-            "stdin input exceeds maximum size of 10 MB"
-        ));
+        return Err(miette::miette!("stdin input exceeds maximum size of 10 MB"));
     }
     let cwd = std::env::current_dir()
         .map_err(|e| miette::miette!("cannot determine current directory: {e}"))?;

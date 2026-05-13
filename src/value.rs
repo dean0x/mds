@@ -2,6 +2,9 @@ use std::fmt;
 
 use crate::error::MdsError;
 
+/// Maximum nesting depth for YAML and JSON value trees.
+const MAX_VALUE_DEPTH: usize = 64;
+
 /// Runtime value type for MDS variables and expressions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -32,10 +35,9 @@ impl Value {
     }
 
     fn from_yaml_inner(yaml: serde_yaml::Value, depth: usize) -> Result<Value, MdsError> {
-        const MAX_DEPTH: usize = 64;
-        if depth > MAX_DEPTH {
+        if depth > MAX_VALUE_DEPTH {
             return Err(MdsError::YamlError {
-                message: format!("value nesting exceeds maximum depth of {MAX_DEPTH}"),
+                message: format!("value nesting exceeds maximum depth of {MAX_VALUE_DEPTH}"),
             });
         }
         match yaml {
@@ -68,10 +70,9 @@ impl Value {
     }
 
     fn from_json_inner(json: serde_json::Value, depth: usize) -> Result<Value, MdsError> {
-        const MAX_DEPTH: usize = 64;
-        if depth > MAX_DEPTH {
+        if depth > MAX_VALUE_DEPTH {
             return Err(MdsError::JsonError {
-                message: format!("value nesting exceeds maximum depth of {MAX_DEPTH}"),
+                message: format!("value nesting exceeds maximum depth of {MAX_VALUE_DEPTH}"),
             });
         }
         match json {

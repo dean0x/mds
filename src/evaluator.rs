@@ -28,7 +28,13 @@ pub fn evaluate(
 ) -> Result<String, MdsError> {
     let mut call_stack: HashSet<String> = HashSet::new();
     let mut total_iterations: usize = 0;
-    evaluate_nodes(nodes, scope, &mut call_stack, &mut total_iterations, warnings)
+    evaluate_nodes(
+        nodes,
+        scope,
+        &mut call_stack,
+        &mut total_iterations,
+        warnings,
+    )
 }
 
 fn evaluate_nodes(
@@ -83,10 +89,7 @@ fn evaluate_nodes(
         }
         if output.len() > MAX_OUTPUT_SIZE {
             return Err(MdsError::Io {
-                message: format!(
-                    "output exceeds maximum size of {} bytes",
-                    MAX_OUTPUT_SIZE
-                ),
+                message: format!("output exceeds maximum size of {} bytes", MAX_OUTPUT_SIZE),
             });
         }
     }
@@ -110,7 +113,14 @@ fn evaluate_expr(
         }
         Expr::Call { name, args } => {
             let resolved_args = resolve_args(args, scope, call_stack, total_iterations, warnings)?;
-            call_function(name, &resolved_args, scope, call_stack, total_iterations, warnings)
+            call_function(
+                name,
+                &resolved_args,
+                scope,
+                call_stack,
+                total_iterations,
+                warnings,
+            )
         }
         Expr::QualifiedCall {
             namespace,
@@ -151,8 +161,14 @@ fn resolve_args(
             } => {
                 let resolved =
                     resolve_args(inner_args, scope, call_stack, total_iterations, warnings)?;
-                let result =
-                    call_function(name, &resolved, scope, call_stack, total_iterations, warnings)?;
+                let result = call_function(
+                    name,
+                    &resolved,
+                    scope,
+                    call_stack,
+                    total_iterations,
+                    warnings,
+                )?;
                 Ok(Value::String(result))
             }
         })
@@ -216,7 +232,15 @@ fn call_function(
         .get_function(name)
         .ok_or_else(|| MdsError::undefined_fn(name))?
         .clone();
-    invoke_function(&func, name, args, scope, call_stack, total_iterations, warnings)
+    invoke_function(
+        &func,
+        name,
+        args,
+        scope,
+        call_stack,
+        total_iterations,
+        warnings,
+    )
 }
 
 fn call_qualified_function(
@@ -263,7 +287,13 @@ fn evaluate_if(
         .ok_or_else(|| MdsError::undefined_var(&block.condition))?;
 
     if value.is_truthy() {
-        evaluate_nodes(&block.then_body, scope, call_stack, total_iterations, warnings)
+        evaluate_nodes(
+            &block.then_body,
+            scope,
+            call_stack,
+            total_iterations,
+            warnings,
+        )
     } else if let Some(else_body) = &block.else_body {
         evaluate_nodes(else_body, scope, call_stack, total_iterations, warnings)
     } else {
@@ -319,8 +349,7 @@ fn evaluate_for(
         }
         scope.push();
         scope.set_var(&block.var, item);
-        let rendered =
-            evaluate_nodes(&block.body, scope, call_stack, total_iterations, warnings)?;
+        let rendered = evaluate_nodes(&block.body, scope, call_stack, total_iterations, warnings)?;
         output.push_str(&rendered);
         scope.pop()?;
     }

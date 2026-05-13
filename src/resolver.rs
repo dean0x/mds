@@ -16,7 +16,7 @@ use crate::value::Value;
 fn find_project_root(start: &Path) -> PathBuf {
     let mut dir = start.to_path_buf();
     loop {
-        for marker in &[".git", ".mdsroot"] {
+        for marker in [".git", ".mdsroot"] {
             if dir.join(marker).exists() {
                 return dir;
             }
@@ -174,14 +174,9 @@ impl ModuleCache {
         // Canonicalize to match the canonical paths used by resolve(), ensuring
         // starts_with checks are consistent even when base_dir contains `.` or `..`.
         if self.root_dir.is_none() {
-            self.root_dir = Some(
-                base_dir.canonicalize().map_err(|e| MdsError::Io {
-                    message: format!(
-                        "cannot resolve base directory {}: {e}",
-                        base_dir.display()
-                    ),
-                })?,
-            );
+            self.root_dir = Some(base_dir.canonicalize().map_err(|e| MdsError::Io {
+                message: format!("cannot resolve base directory {}: {e}", base_dir.display()),
+            })?);
         }
         self.process_module(source, "<source>", base_dir, false, runtime_vars, warnings)
     }
