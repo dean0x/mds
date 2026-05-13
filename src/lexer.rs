@@ -250,20 +250,15 @@ fn scan_fence(chars: &[char], pos: usize) -> (usize, bool) {
     (count, is_close)
 }
 
-/// Advance `pos` past a line ending (`\n` or `\r\n`), if present.
-fn skip_newline(chars: &[char], pos: usize) -> usize {
+/// Advance `pos` past a line ending (`\n`, `\r\n`, or bare `\r`), if present.
+fn skip_newline(chars: &[char], mut pos: usize) -> usize {
     if pos < chars.len() && chars[pos] == '\r' {
-        let pos = pos + 1;
-        if pos < chars.len() && chars[pos] == '\n' {
-            pos + 1
-        } else {
-            pos
-        }
-    } else if pos < chars.len() && chars[pos] == '\n' {
-        pos + 1
-    } else {
-        pos
+        pos += 1;
     }
+    if pos < chars.len() && chars[pos] == '\n' {
+        pos += 1;
+    }
+    pos
 }
 
 #[cfg(test)]

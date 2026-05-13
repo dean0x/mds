@@ -120,10 +120,9 @@ impl Parser<'_> {
                     self.pos += 1;
                 }
                 Token::CodeFence(fence, _offset) => {
-                    // Emit code fence as text
-                    let mut code_text = fence.clone();
-                    code_text.push('\n');
-                    nodes.push(Node::Text(TextNode { text: code_text }));
+                    nodes.push(Node::Text(TextNode {
+                        text: format!("{fence}\n"),
+                    }));
                     self.pos += 1;
                 }
                 Token::CodeContent(content, _offset) => {

@@ -353,21 +353,21 @@ impl ModuleCache {
                 validate_import_path(path)?;
                 let import_path = resolve_path(base_dir, path);
                 let resolved = self.resolve(&import_path, runtime_vars, warnings)?;
+                let not_exported =
+                    |name: &str| MdsError::import_error(format!("'{name}' is not exported from '{path}'"));
                 for name in names {
                     if name == "prompt" {
-                        if let Some(val) = resolved.get_prompt_value() {
-                            scope.set_var("prompt", val);
-                        } else {
-                            return Err(MdsError::import_error(format!(
-                                "'{name}' is not exported from '{path}'"
-                            )));
-                        }
-                    } else if let Some(func) = resolved.get_export(name) {
-                        scope.set_function(name, func);
+                        scope.set_var(
+                            "prompt",
+                            resolved
+                                .get_prompt_value()
+                                .ok_or_else(|| not_exported(name))?,
+                        );
                     } else {
-                        return Err(MdsError::import_error(format!(
-                            "'{name}' is not exported from '{path}'"
-                        )));
+                        scope.set_function(
+                            name,
+                            resolved.get_export(name).ok_or_else(|| not_exported(name))?,
+                        );
                     }
                 }
             }

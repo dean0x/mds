@@ -31,7 +31,7 @@ fn auto_detect_mds_file() -> std::result::Result<PathBuf, miette::Error> {
         _ => {
             let mut names: Vec<String> = entries
                 .iter()
-                .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
+                .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned))
                 .collect();
             names.sort();
             Err(miette::miette!(

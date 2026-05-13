@@ -73,12 +73,12 @@ fn validate_node(node: &Node, scope: &Scope, file: &str, source: &str) -> Result
             // Handled by resolver
             Ok(())
         }
-        Node::Include(inc) => scope
-            .get_namespace(&inc.alias)
-            .ok_or_else(|| {
+        Node::Include(inc) => {
+            scope.get_namespace(&inc.alias).ok_or_else(|| {
                 MdsError::undefined_var_at(&inc.alias, file, source, inc.offset, inc.alias.len())
-            })
-            .map(|_| ()),
+            })?;
+            Ok(())
+        }
     }
 }
 
@@ -155,15 +155,9 @@ fn validate_var_args(
         match arg {
             Arg::StringLiteral(_) => {}
             Arg::Var(var_name) => {
-                if scope.get_var(var_name).is_none() {
-                    return Err(MdsError::undefined_var_at(
-                        var_name,
-                        file,
-                        source,
-                        offset,
-                        var_name.len(),
-                    ));
-                }
+                scope.get_var(var_name).ok_or_else(|| {
+                    MdsError::undefined_var_at(var_name, file, source, offset, var_name.len())
+                })?;
             }
             Arg::Call {
                 name,
