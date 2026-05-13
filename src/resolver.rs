@@ -451,7 +451,8 @@ fn validate_file_type(path: &Path, source: &str) -> Result<(), MdsError> {
             {
                 if let Some(end) = after_prefix.find("\n---") {
                     let fm = &after_prefix[..end];
-                    if let Ok(map) = serde_yml::from_str::<HashMap<String, serde_yml::Value>>(fm) {
+                    if let Ok(map) = serde_yaml::from_str::<HashMap<String, serde_yaml::Value>>(fm)
+                    {
                         if map.get("type").and_then(|v| v.as_str()) == Some("mds") {
                             return Ok(());
                         }
@@ -492,14 +493,14 @@ fn path_display_name(p: &Path) -> String {
 }
 
 fn parse_frontmatter(raw: &str) -> Result<HashMap<String, Value>, MdsError> {
-    let yaml: serde_yml::Value = serde_yml::from_str(raw).map_err(|e| MdsError::YamlError {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(raw).map_err(|e| MdsError::YamlError {
         message: e.to_string(),
     })?;
 
     let mut vars = HashMap::new();
-    if let serde_yml::Value::Mapping(map) = yaml {
+    if let serde_yaml::Value::Mapping(map) = yaml {
         for (key, val) in map {
-            let serde_yml::Value::String(key_str) = key else {
+            let serde_yaml::Value::String(key_str) = key else {
                 continue;
             };
             let value = Value::from_yaml(val)?;
