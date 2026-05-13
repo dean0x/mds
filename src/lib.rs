@@ -2,10 +2,39 @@
 //!
 //! Compile composable LLM prompt templates from `.mds` files to Markdown.
 //!
+//! ## Quick Start
+//!
+//! **In-memory compilation** — compile from a string with no files involved:
+//!
 //! ```rust
-//! // Compile from a string
-//! let output = mds::compile_str("---\nname: World\n---\nHello {name}!\n").unwrap();
+//! let output = mds::compile_str("---\nname: World\n---\nHello {name}!\n")?;
 //! assert_eq!(output, "Hello World!\n");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! **File-based compilation** — compile a template file to Markdown:
+//!
+//! ```rust,no_run
+//! use std::path::Path;
+//! let md = mds::compile(Path::new("template.mds"), None)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! **With runtime variables** — load vars from JSON and pass them in:
+//!
+//! ```rust,no_run
+//! use std::path::Path;
+//! let vars = mds::load_vars_file(Path::new("vars.json"))?;
+//! let md = mds::compile(Path::new("template.mds"), Some(vars))?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! **Validation only** — check a template without rendering output:
+//!
+//! ```rust,no_run
+//! use std::path::Path;
+//! mds::check(Path::new("template.mds"), None)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 pub(crate) mod ast;
@@ -18,12 +47,12 @@ pub(crate) mod scope;
 pub(crate) mod validator;
 pub mod value;
 
+pub use error::MdsError;
 pub use value::Value;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use error::MdsError;
 use resolver::ModuleCache;
 
 /// Compile an MDS file to a final Markdown string.
@@ -33,6 +62,20 @@ use resolver::ModuleCache;
 /// # Arguments
 /// * `path` — Path to the .mds file
 /// * `runtime_vars` — Optional runtime variable overrides (from --vars JSON)
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use std::path::Path;
+///
+/// // Compile without runtime vars
+/// let md = mds::compile(Path::new("template.mds"), None)?;
+///
+/// // Compile with runtime vars loaded from a JSON file
+/// let vars = mds::load_vars_file(Path::new("vars.json"))?;
+/// let md = mds::compile(Path::new("template.mds"), Some(vars))?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[must_use = "the compiled Markdown output should be used"]
 pub fn compile(
     path: impl AsRef<Path>,
@@ -49,6 +92,14 @@ pub fn compile(
 ///
 /// # Arguments
 /// * `source` — MDS source code
+///
+/// # Examples
+///
+/// ```rust
+/// let output = mds::compile_str("---\ngreeting: Hi\n---\n{greeting} there!\n")?;
+/// assert_eq!(output, "Hi there!\n");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[must_use = "the compiled Markdown output should be used"]
 pub fn compile_str(source: &str) -> Result<String, MdsError> {
     compile_str_with(source, None, None)
@@ -62,6 +113,21 @@ pub fn compile_str(source: &str) -> Result<String, MdsError> {
 /// * `source` — MDS source code
 /// * `base_dir` — Base directory for resolving imports (defaults to current dir)
 /// * `runtime_vars` — Optional runtime variable overrides
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use std::path::Path;
+/// use std::collections::HashMap;
+///
+/// let vars = HashMap::from([("lang".to_string(), mds::Value::String("Rust".to_string()))]);
+/// let md = mds::compile_str_with(
+///     "---\nlang: unknown\n---\nI love {lang}!\n",
+///     Some(Path::new("templates/")),
+///     Some(vars),
+/// )?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[must_use = "the compiled Markdown output should be used"]
 pub fn compile_str_with(
     source: &str,
@@ -74,7 +140,19 @@ pub fn compile_str_with(
 }
 
 /// Check (validate) an MDS file without rendering output.
-/// Returns Ok(()) if the file is valid, or an error describing the problem.
+///
+/// Returns `Ok(())` if the file is valid, or an error describing the problem.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use std::path::Path;
+///
+/// match mds::check(Path::new("template.mds"), None) {
+///     Ok(()) => println!("template is valid"),
+///     Err(e) => eprintln!("validation failed: {e}"),
+/// }
+/// ```
 #[must_use = "the validation result should be checked"]
 pub fn check(
     path: impl AsRef<Path>,
@@ -90,6 +168,17 @@ pub fn check(
 }
 
 /// Check (validate) MDS source from a string without rendering output.
+///
+/// # Examples
+///
+/// ```rust
+/// // Valid template — no error
+/// mds::check_str("---\nname: Test\n---\nHello {name}!\n")?;
+///
+/// // Invalid template — undefined variable
+/// assert!(mds::check_str("Hello {name}!\n").is_err());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[must_use = "the validation result should be checked"]
 pub fn check_str(source: &str) -> Result<(), MdsError> {
     check_str_with(source, None, None)
@@ -106,6 +195,21 @@ fn resolve_base_dir(base_dir: Option<&Path>) -> Result<PathBuf, MdsError> {
 }
 
 /// Check (validate) MDS source from a string with options.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use std::path::Path;
+/// use std::collections::HashMap;
+///
+/// let vars = HashMap::from([("env".to_string(), mds::Value::String("prod".to_string()))]);
+/// mds::check_str_with(
+///     "---\nenv: dev\n---\nRunning in {env}.\n",
+///     Some(Path::new("templates/")),
+///     Some(vars),
+/// )?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[must_use = "the validation result should be checked"]
 pub fn check_str_with(
     source: &str,
@@ -132,6 +236,20 @@ fn emit_warnings(warnings: &[String]) {
 ///
 /// Unlike [`compile`], this function does not print warnings to stderr. The caller
 /// is responsible for deciding whether to display them (e.g. based on a quiet flag).
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use std::path::Path;
+///
+/// let (md, warnings) = mds::compile_collecting_warnings(Path::new("template.mds"), None)?;
+/// if warnings.is_empty() {
+///     println!("{md}");
+/// } else {
+///     for w in &warnings { eprintln!("warning: {w}"); }
+/// }
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[must_use = "the compiled Markdown output and warnings should be used"]
 pub fn compile_collecting_warnings(
     path: impl AsRef<Path>,
@@ -209,12 +327,32 @@ fn clean_output(s: &str) -> String {
 /// Convenience wrapper around [`compile`] for callers who have a path as `&str`.
 ///
 /// Warnings (e.g. empty `@include`) are printed to stderr.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// let md = mds::compile_file("template.mds")?;
+/// println!("{md}");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[must_use = "the compiled Markdown output should be used"]
 pub fn compile_file(path: &str) -> Result<String, MdsError> {
     compile(Path::new(path), None)
 }
 
 /// Load runtime variables from a JSON file.
+///
+/// The file must contain a JSON object; each key becomes a variable name.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use std::path::Path;
+///
+/// let vars = mds::load_vars_file(Path::new("vars.json"))?;
+/// let md = mds::compile(Path::new("template.mds"), Some(vars))?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[must_use = "the loaded variables should be used"]
 pub fn load_vars_file(path: &Path) -> Result<HashMap<String, Value>, MdsError> {
     let content = std::fs::read_to_string(path).map_err(|e| MdsError::Io {
