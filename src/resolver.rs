@@ -399,9 +399,7 @@ impl ResolvedModule {
         if !self.has_prompt_export() {
             return None;
         }
-        self.prompt_body
-            .as_ref()
-            .map(|body| Value::String(body.clone()))
+        self.prompt_body.clone().map(Value::String)
     }
 }
 
@@ -441,32 +439,30 @@ fn validate_import_path(path: &str) -> Result<(), MdsError> {
 fn validate_file_type(path: &Path, source: &str) -> Result<(), MdsError> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-    match ext {
-        "mds" => Ok(()),
-        "md" => {
-            // Check for `type: mds` in frontmatter by parsing YAML properly
-            if let Some(after_prefix) = source
-                .strip_prefix("---\n")
-                .or_else(|| source.strip_prefix("---\r\n"))
-            {
-                if let Some(end) = after_prefix.find("\n---") {
-                    let fm = &after_prefix[..end];
-                    if let Ok(map) = serde_yaml::from_str::<HashMap<String, serde_yaml::Value>>(fm)
-                    {
-                        if map.get("type").and_then(|v| v.as_str()) == Some("mds") {
-                            return Ok(());
-                        }
+    if ext == "mds" {
+        return Ok(());
+    }
+
+    // For .md files, accept when frontmatter contains `type: mds`.
+    if ext == "md" {
+        if let Some(after_prefix) = source
+            .strip_prefix("---\n")
+            .or_else(|| source.strip_prefix("---\r\n"))
+        {
+            if let Some(end) = after_prefix.find("\n---") {
+                let fm = &after_prefix[..end];
+                if let Ok(map) = serde_yaml::from_str::<HashMap<String, serde_yaml::Value>>(fm) {
+                    if map.get("type").and_then(|v| v.as_str()) == Some("mds") {
+                        return Ok(());
                     }
                 }
             }
-            Err(MdsError::NotMdsFile {
-                path: path.display().to_string(),
-            })
         }
-        _ => Err(MdsError::NotMdsFile {
-            path: path.display().to_string(),
-        }),
     }
+
+    Err(MdsError::NotMdsFile {
+        path: path.display().to_string(),
+    })
 }
 
 /// Format a cycle chain like "a.mds → b.mds → a.mds" from the resolving stack.

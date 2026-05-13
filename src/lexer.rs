@@ -89,24 +89,7 @@ pub fn tokenize(source: &str, file: &str) -> Result<Vec<Token>, MdsError> {
 
         // Check for code fences (``` or more backticks)
         if is_line_start_chars(&chars, pos) && source[bp..].starts_with("```") {
-            // Count the number of leading backticks on this line
-            let mut backtick_count = 0;
-            let mut scan = pos;
-            while scan < chars.len() && chars[scan] == '`' {
-                backtick_count += 1;
-                scan += 1;
-            }
-            // Determine whether what follows is only whitespace/newline (a closing fence candidate)
-            let rest_is_close = {
-                let mut s = scan;
-                while s < chars.len() && chars[s] != '\n' && chars[s] != '\r' {
-                    if chars[s] != ' ' && chars[s] != '\t' {
-                        break;
-                    }
-                    s += 1;
-                }
-                s >= chars.len() || chars[s] == '\n' || chars[s] == '\r'
-            };
+            let (backtick_count, rest_is_close) = scan_fence(&chars, pos);
 
             if code_fence_backticks == 0 {
                 // Opening fence — record the backtick count
@@ -142,23 +125,7 @@ pub fn tokenize(source: &str, file: &str) -> Result<Vec<Token>, MdsError> {
             while pos < chars.len() {
                 // Check for a potential closing code fence
                 if is_line_start_chars(&chars, pos) && source[byte_pos(pos)..].starts_with("```") {
-                    // Count backticks
-                    let mut bc = 0;
-                    let mut sc = pos;
-                    while sc < chars.len() && chars[sc] == '`' {
-                        bc += 1;
-                        sc += 1;
-                    }
-                    let is_close = {
-                        let mut s = sc;
-                        while s < chars.len() && chars[s] != '\n' && chars[s] != '\r' {
-                            if chars[s] != ' ' && chars[s] != '\t' {
-                                break;
-                            }
-                            s += 1;
-                        }
-                        s >= chars.len() || chars[s] == '\n' || chars[s] == '\r'
-                    };
+                    let (bc, is_close) = scan_fence(&chars, pos);
                     if is_close && bc >= code_fence_backticks {
                         break;
                     }
@@ -267,6 +234,31 @@ pub fn tokenize(source: &str, file: &str) -> Result<Vec<Token>, MdsError> {
 /// using the chars array for safe multi-byte character handling.
 fn is_line_start_chars(chars: &[char], pos: usize) -> bool {
     pos == 0 || chars[pos - 1] == '\n'
+}
+
+/// Count consecutive backticks starting at `pos` and determine whether the
+/// rest of the line (after the backticks) contains only optional whitespace.
+///
+/// Returns `(count, is_close_candidate)` where `is_close_candidate` is true
+/// when nothing follows the backticks except spaces/tabs before EOL or EOF.
+fn scan_fence(chars: &[char], pos: usize) -> (usize, bool) {
+    let mut count = 0;
+    let mut scan = pos;
+    while scan < chars.len() && chars[scan] == '`' {
+        count += 1;
+        scan += 1;
+    }
+    // Check whether the remainder of the line is only whitespace
+    let is_close = loop {
+        if scan >= chars.len() || chars[scan] == '\n' || chars[scan] == '\r' {
+            break true;
+        }
+        if chars[scan] != ' ' && chars[scan] != '\t' {
+            break false;
+        }
+        scan += 1;
+    };
+    (count, is_close)
 }
 
 /// Advance `pos` past a line ending (`\n` or `\r\n`), if present.

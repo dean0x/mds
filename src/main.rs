@@ -26,12 +26,12 @@ fn auto_detect_mds_file() -> std::result::Result<PathBuf, miette::Error> {
         })
         .collect();
 
-    match entries.len() {
-        0 => Err(miette::miette!(
+    match entries.as_slice() {
+        [] => Err(miette::miette!(
             "no .mds files found in current directory\n  \
              hint: run 'mds init' to create a starter template"
         )),
-        1 => Ok(entries.into_iter().next().expect("matched len == 1")),
+        [single] => Ok(single.clone()),
         _ => {
             let mut names: Vec<String> = entries
                 .iter()

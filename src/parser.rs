@@ -214,18 +214,10 @@ impl Parser<'_> {
 
         let then_body = self.parse_body(&["@else:", "@end"])?;
 
-        let else_body = if self.pos < self.tokens.len() {
-            if let Token::Directive(d, _) = &self.tokens[self.pos] {
-                if d.trim() == "@else:" {
-                    self.pos += 1; // skip @else:
-                    let body = self.parse_body(&["@end"])?;
-                    Some(body)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+        let else_body = if matches!(self.peek(), Some(Token::Directive(d, _)) if d.trim() == "@else:")
+        {
+            self.pos += 1; // skip @else:
+            Some(self.parse_body(&["@end"])?)
         } else {
             None
         };
@@ -654,15 +646,12 @@ fn is_directive_token(directive: &str, keyword: &str) -> bool {
 }
 
 pub(crate) fn is_valid_identifier(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
     let mut chars = s.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_alphabetic() && first != '_' {
+    let Some(first) = chars.next() else {
         return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Strip a leading newline from the body text nodes.
