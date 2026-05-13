@@ -74,6 +74,7 @@ impl ModuleCache {
         &mut self,
         path: &Path,
         runtime_vars: &HashMap<String, Value>,
+        warnings: &mut Vec<String>,
     ) -> Result<ResolvedModule, MdsError> {
         let canonical = path
             .canonicalize()
@@ -144,7 +145,8 @@ impl ModuleCache {
         self.resolving.insert(canonical.clone());
         self.resolving_stack.push(canonical.clone());
 
-        let resolved = self.process_module(&source, &file_str, &base_dir, is_md, runtime_vars);
+        let resolved =
+            self.process_module(&source, &file_str, &base_dir, is_md, runtime_vars, warnings);
 
         // Unmark regardless of success or failure
         self.resolving.remove(&canonical);
@@ -165,12 +167,13 @@ impl ModuleCache {
         source: &str,
         base_dir: &Path,
         runtime_vars: &HashMap<String, Value>,
+        warnings: &mut Vec<String>,
     ) -> Result<ResolvedModule, MdsError> {
         // Set root_dir on first use so path-traversal checks work for imports
         if self.root_dir.is_none() {
             self.root_dir = Some(base_dir.to_path_buf());
         }
-        self.process_module(source, "<source>", base_dir, false, runtime_vars)
+        self.process_module(source, "<source>", base_dir, false, runtime_vars, warnings)
     }
 
     /// Common module processing: tokenize, parse, build scope, evaluate.
@@ -181,6 +184,7 @@ impl ModuleCache {
         base_dir: &Path,
         is_md: bool,
         runtime_vars: &HashMap<String, Value>,
+        warnings: &mut Vec<String>,
     ) -> Result<ResolvedModule, MdsError> {
         // Tokenize and parse
         let tokens = tokenize(source, file_str)?;
@@ -228,7 +232,7 @@ impl ModuleCache {
                     scope.set_function(&def.name, func);
                 }
                 Node::Import(import) => {
-                    self.resolve_import(import, base_dir, runtime_vars, &mut scope)?;
+                    self.resolve_import(import, base_dir, runtime_vars, &mut scope, warnings)?;
                 }
                 Node::Export(export) => {
                     has_explicit_exports = true;
@@ -245,7 +249,8 @@ impl ModuleCache {
                             // symbol into the current file's scope".
                             validate_import_path(import_path)?;
                             let resolved_path = resolve_path(base_dir, import_path);
-                            let source_module = self.resolve(&resolved_path, runtime_vars)?;
+                            let source_module =
+                                self.resolve(&resolved_path, runtime_vars, warnings)?;
                             if let Some(func) = source_module.get_export(name) {
                                 functions.insert(name.clone(), func);
                             }
@@ -256,7 +261,8 @@ impl ModuleCache {
                             // available to importers but NOT in the current file's scope.
                             validate_import_path(import_path)?;
                             let resolved_path = resolve_path(base_dir, import_path);
-                            let source_module = self.resolve(&resolved_path, runtime_vars)?;
+                            let source_module =
+                                self.resolve(&resolved_path, runtime_vars, warnings)?;
                             for (name, func) in source_module.get_all_exports() {
                                 if functions.contains_key(&name) {
                                     return Err(MdsError::name_collision(name));
@@ -284,7 +290,7 @@ impl ModuleCache {
         validator::validate(&module.body, &scope, file_str, source)?;
 
         // Evaluate the body to get prompt text
-        let prompt_body = evaluate(&module.body, &mut scope)?;
+        let prompt_body = evaluate(&module.body, &mut scope, warnings)?;
         let prompt_body = if prompt_body.trim().is_empty() {
             None
         } else {
@@ -305,19 +311,20 @@ impl ModuleCache {
         base_dir: &Path,
         runtime_vars: &HashMap<String, Value>,
         scope: &mut Scope,
+        warnings: &mut Vec<String>,
     ) -> Result<(), MdsError> {
         match import {
             ImportDirective::Alias { path, alias } => {
                 validate_import_path(path)?;
                 let import_path = resolve_path(base_dir, path);
-                let resolved = self.resolve(&import_path, runtime_vars)?;
+                let resolved = self.resolve(&import_path, runtime_vars, warnings)?;
                 let ns = module_to_namespace(&resolved);
                 scope.set_namespace(alias, ns);
             }
             ImportDirective::Merge { path } => {
                 validate_import_path(path)?;
                 let import_path = resolve_path(base_dir, path);
-                let resolved = self.resolve(&import_path, runtime_vars)?;
+                let resolved = self.resolve(&import_path, runtime_vars, warnings)?;
                 // Per spec: only functions and the prompt body are imported via merge.
                 // Frontmatter variables from the imported module are NOT brought into scope.
                 for (name, func) in resolved.get_all_exports() {
@@ -333,7 +340,7 @@ impl ModuleCache {
             ImportDirective::Selective { names, path } => {
                 validate_import_path(path)?;
                 let import_path = resolve_path(base_dir, path);
-                let resolved = self.resolve(&import_path, runtime_vars)?;
+                let resolved = self.resolve(&import_path, runtime_vars, warnings)?;
                 for name in names {
                     if name == "prompt" {
                         if let Some(val) = resolved.get_prompt_value() {

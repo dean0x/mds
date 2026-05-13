@@ -9,15 +9,22 @@ use crate::value::Value;
 const MAX_CALL_DEPTH: usize = 128;
 
 /// Evaluate a module body into a final rendered string.
-pub fn evaluate(nodes: &[Node], scope: &mut Scope) -> Result<String, MdsError> {
+///
+/// Warnings (e.g. empty `@include`) are appended to `warnings`.
+pub fn evaluate(
+    nodes: &[Node],
+    scope: &mut Scope,
+    warnings: &mut Vec<String>,
+) -> Result<String, MdsError> {
     let mut call_stack: HashSet<String> = HashSet::new();
-    evaluate_nodes(nodes, scope, &mut call_stack)
+    evaluate_nodes(nodes, scope, &mut call_stack, warnings)
 }
 
 fn evaluate_nodes(
     nodes: &[Node],
     scope: &mut Scope,
     call_stack: &mut HashSet<String>,
+    warnings: &mut Vec<String>,
 ) -> Result<String, MdsError> {
     let mut output = String::new();
 
@@ -26,13 +33,13 @@ fn evaluate_nodes(
             Node::Text(t) => output.push_str(&t.text),
             Node::EscapedBrace => output.push('{'),
             Node::Interpolation(interp) => {
-                output.push_str(&evaluate_expr(&interp.expr, scope, call_stack)?);
+                output.push_str(&evaluate_expr(&interp.expr, scope, call_stack, warnings)?);
             }
             Node::If(block) => {
-                output.push_str(&evaluate_if(block, scope, call_stack)?);
+                output.push_str(&evaluate_if(block, scope, call_stack, warnings)?);
             }
             Node::For(block) => {
-                output.push_str(&evaluate_for(block, scope, call_stack)?);
+                output.push_str(&evaluate_for(block, scope, call_stack, warnings)?);
             }
             Node::Define(block) => {
                 scope.set_function(&block.name, FunctionDef::from(block));
@@ -41,7 +48,7 @@ fn evaluate_nodes(
                 // Handled by resolver, skip during evaluation
             }
             Node::Include(inc) => {
-                output.push_str(&evaluate_include(inc, scope)?);
+                output.push_str(&evaluate_include(inc, scope, warnings)?);
             }
         }
     }
@@ -53,6 +60,7 @@ fn evaluate_expr(
     expr: &Expr,
     scope: &mut Scope,
     call_stack: &mut HashSet<String>,
+    warnings: &mut Vec<String>,
 ) -> Result<String, MdsError> {
     match expr {
         Expr::Var(name) => {
@@ -62,16 +70,16 @@ fn evaluate_expr(
             Ok(value.to_string())
         }
         Expr::Call { name, args } => {
-            let resolved_args = resolve_args(args, scope, call_stack)?;
-            call_function(name, &resolved_args, scope, call_stack)
+            let resolved_args = resolve_args(args, scope, call_stack, warnings)?;
+            call_function(name, &resolved_args, scope, call_stack, warnings)
         }
         Expr::QualifiedCall {
             namespace,
             name,
             args,
         } => {
-            let resolved_args = resolve_args(args, scope, call_stack)?;
-            call_qualified_function(namespace, name, &resolved_args, scope, call_stack)
+            let resolved_args = resolve_args(args, scope, call_stack, warnings)?;
+            call_qualified_function(namespace, name, &resolved_args, scope, call_stack, warnings)
         }
     }
 }
@@ -80,6 +88,7 @@ fn resolve_args(
     args: &[Arg],
     scope: &mut Scope,
     call_stack: &mut HashSet<String>,
+    warnings: &mut Vec<String>,
 ) -> Result<Vec<Value>, MdsError> {
     args.iter()
         .map(|arg| match arg {
@@ -92,8 +101,8 @@ fn resolve_args(
                 name,
                 args: inner_args,
             } => {
-                let resolved = resolve_args(inner_args, scope, call_stack)?;
-                let result = call_function(name, &resolved, scope, call_stack)?;
+                let resolved = resolve_args(inner_args, scope, call_stack, warnings)?;
+                let result = call_function(name, &resolved, scope, call_stack, warnings)?;
                 Ok(Value::String(result))
             }
         })
@@ -106,6 +115,7 @@ fn invoke_function(
     args: &[Value],
     scope: &mut Scope,
     call_stack: &mut HashSet<String>,
+    warnings: &mut Vec<String>,
 ) -> Result<String, MdsError> {
     if call_stack.contains(call_key) {
         return Err(MdsError::recursion(call_key));
@@ -137,7 +147,7 @@ fn invoke_function(
         scope.set_var(param, value.clone());
     }
     call_stack.insert(call_key.to_string());
-    let result = evaluate_nodes(&func.body, scope, call_stack);
+    let result = evaluate_nodes(&func.body, scope, call_stack, warnings);
     call_stack.remove(call_key);
     scope.pop();
     result
@@ -148,12 +158,13 @@ fn call_function(
     args: &[Value],
     scope: &mut Scope,
     call_stack: &mut HashSet<String>,
+    warnings: &mut Vec<String>,
 ) -> Result<String, MdsError> {
     let func = scope
         .get_function(name)
         .ok_or_else(|| MdsError::undefined_fn(name))?
         .clone();
-    invoke_function(&func, name, args, scope, call_stack)
+    invoke_function(&func, name, args, scope, call_stack, warnings)
 }
 
 fn call_qualified_function(
@@ -162,6 +173,7 @@ fn call_qualified_function(
     args: &[Value],
     scope: &mut Scope,
     call_stack: &mut HashSet<String>,
+    warnings: &mut Vec<String>,
 ) -> Result<String, MdsError> {
     let qualified_name = format!("{namespace}.{name}");
 
@@ -175,22 +187,23 @@ fn call_qualified_function(
         .ok_or_else(|| MdsError::undefined_fn(&qualified_name))?
         .clone();
 
-    invoke_function(&func, &qualified_name, args, scope, call_stack)
+    invoke_function(&func, &qualified_name, args, scope, call_stack, warnings)
 }
 
 fn evaluate_if(
     block: &IfBlock,
     scope: &mut Scope,
     call_stack: &mut HashSet<String>,
+    warnings: &mut Vec<String>,
 ) -> Result<String, MdsError> {
     let value = scope
         .get_var(&block.condition)
         .ok_or_else(|| MdsError::undefined_var(&block.condition))?;
 
     if value.is_truthy() {
-        evaluate_nodes(&block.then_body, scope, call_stack)
+        evaluate_nodes(&block.then_body, scope, call_stack, warnings)
     } else if let Some(else_body) = &block.else_body {
-        evaluate_nodes(else_body, scope, call_stack)
+        evaluate_nodes(else_body, scope, call_stack, warnings)
     } else {
         Ok(String::new())
     }
@@ -200,6 +213,7 @@ fn evaluate_for(
     block: &ForBlock,
     scope: &mut Scope,
     call_stack: &mut HashSet<String>,
+    warnings: &mut Vec<String>,
 ) -> Result<String, MdsError> {
     let iterable = scope
         .get_var(&block.iterable)
@@ -217,7 +231,7 @@ fn evaluate_for(
     for item in items {
         scope.push();
         scope.set_var(&block.var, item);
-        let rendered = evaluate_nodes(&block.body, scope, call_stack)?;
+        let rendered = evaluate_nodes(&block.body, scope, call_stack, warnings)?;
         output.push_str(&rendered);
         scope.pop();
     }
@@ -225,14 +239,24 @@ fn evaluate_for(
     Ok(output)
 }
 
-fn evaluate_include(inc: &IncludeDirective, scope: &Scope) -> Result<String, MdsError> {
+fn evaluate_include(
+    inc: &IncludeDirective,
+    scope: &Scope,
+    warnings: &mut Vec<String>,
+) -> Result<String, MdsError> {
     let ns = scope
         .get_namespace(&inc.alias)
         .ok_or_else(|| MdsError::undefined_var(&inc.alias))?;
 
     match &ns.prompt_body {
         Some(body) => Ok(body.clone()),
-        None => Ok(String::new()),
+        None => {
+            warnings.push(format!(
+                "warning: @include of '{}' produced empty output — module has no body text",
+                inc.alias
+            ));
+            Ok(String::new())
+        }
     }
 }
 
@@ -251,7 +275,11 @@ mod tests {
     fn evaluate_text() {
         let nodes = vec![text("Hello world!")];
         let mut scope = Scope::new();
-        assert_eq!(evaluate(&nodes, &mut scope).unwrap(), "Hello world!");
+        let mut warnings = vec![];
+        assert_eq!(
+            evaluate(&nodes, &mut scope, &mut warnings).unwrap(),
+            "Hello world!"
+        );
     }
 
     #[test]
@@ -266,8 +294,12 @@ mod tests {
             text("!"),
         ];
         let mut scope = Scope::new();
+        let mut warnings = vec![];
         scope.set_var("name", Value::String("Alice".to_string()));
-        assert_eq!(evaluate(&nodes, &mut scope).unwrap(), "Hello Alice!");
+        assert_eq!(
+            evaluate(&nodes, &mut scope, &mut warnings).unwrap(),
+            "Hello Alice!"
+        );
     }
 
     #[test]
@@ -278,7 +310,8 @@ mod tests {
             len: 7,
         })];
         let mut scope = Scope::new();
-        assert!(evaluate(&nodes, &mut scope).is_err());
+        let mut warnings = vec![];
+        assert!(evaluate(&nodes, &mut scope, &mut warnings).is_err());
     }
 
     #[test]
@@ -290,8 +323,9 @@ mod tests {
             offset: 0,
         })];
         let mut scope = Scope::new();
+        let mut warnings = vec![];
         scope.set_var("flag", Value::Boolean(true));
-        assert_eq!(evaluate(&nodes, &mut scope).unwrap(), "yes");
+        assert_eq!(evaluate(&nodes, &mut scope, &mut warnings).unwrap(), "yes");
     }
 
     #[test]
@@ -303,8 +337,9 @@ mod tests {
             offset: 0,
         })];
         let mut scope = Scope::new();
+        let mut warnings = vec![];
         scope.set_var("flag", Value::Boolean(false));
-        assert_eq!(evaluate(&nodes, &mut scope).unwrap(), "no");
+        assert_eq!(evaluate(&nodes, &mut scope, &mut warnings).unwrap(), "no");
     }
 
     #[test]
@@ -324,6 +359,7 @@ mod tests {
             offset: 0,
         })];
         let mut scope = Scope::new();
+        let mut warnings = vec![];
         scope.set_var(
             "items",
             Value::Array(vec![
@@ -331,7 +367,10 @@ mod tests {
                 Value::String("banana".into()),
             ]),
         );
-        assert_eq!(evaluate(&nodes, &mut scope).unwrap(), "- apple\n- banana\n");
+        assert_eq!(
+            evaluate(&nodes, &mut scope, &mut warnings).unwrap(),
+            "- apple\n- banana\n"
+        );
     }
 
     #[test]
@@ -360,7 +399,11 @@ mod tests {
             }),
         ];
         let mut scope = Scope::new();
-        assert_eq!(evaluate(&nodes, &mut scope).unwrap(), "Hello Bob!");
+        let mut warnings = vec![];
+        assert_eq!(
+            evaluate(&nodes, &mut scope, &mut warnings).unwrap(),
+            "Hello Bob!"
+        );
     }
 
     #[test]
@@ -371,8 +414,9 @@ mod tests {
             text("name} for interpolation"),
         ];
         let mut scope = Scope::new();
+        let mut warnings = vec![];
         assert_eq!(
-            evaluate(&nodes, &mut scope).unwrap(),
+            evaluate(&nodes, &mut scope, &mut warnings).unwrap(),
             "Use {name} for interpolation"
         );
     }

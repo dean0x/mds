@@ -1056,6 +1056,44 @@ fn include_empty_body_no_crash() {
     );
 }
 
+#[test]
+fn include_empty_body_emits_warning() {
+    // Per spec 4.8: @include of a module with no body text should emit a warning
+    // to stderr (when not in quiet mode).
+    let output = mds_bin()
+        .args(["build", fixture("include_empty_body.mds").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "build should succeed even when include is empty"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("warning") && stderr.contains("fns"),
+        "expected warning about empty @include on stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn include_empty_body_no_warning_in_quiet_mode() {
+    // When -q/--quiet is set, the warning should be suppressed.
+    let output = mds_bin()
+        .args([
+            "build",
+            fixture("include_empty_body.mds").to_str().unwrap(),
+            "--quiet",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "quiet build should succeed");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.is_empty(),
+        "quiet flag should suppress the empty-include warning, got: {stderr}"
+    );
+}
+
 // ── Error Format Verification ────────────────────────────────────────────────
 
 #[test]

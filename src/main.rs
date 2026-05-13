@@ -102,21 +102,31 @@ fn run(cli: Cli) -> Result<(), miette::Error> {
             }
 
             if input != Path::new("-") && input.is_dir() {
-                eprintln!("error: expected a file, got a directory: {}", input.display());
+                eprintln!(
+                    "error: expected a file, got a directory: {}",
+                    input.display()
+                );
                 process::exit(1);
             }
 
-            let compiled = if input == Path::new("-") {
+            let (compiled, warnings) = if input == Path::new("-") {
                 // Read from stdin
                 let source = std::io::read_to_string(std::io::stdin())
                     .map_err(|e| miette::miette!("cannot read stdin: {e}"))?;
                 let cwd = std::env::current_dir()
                     .map_err(|e| miette::miette!("cannot determine current directory: {e}"))?;
-                mds::compile_str_with(&source, Some(&cwd), runtime_vars)
+                mds::compile_str_collecting_warnings(&source, Some(&cwd), runtime_vars)
                     .map_err(miette::Error::from)?
             } else {
-                mds::compile(&input, runtime_vars).map_err(miette::Error::from)?
+                mds::compile_collecting_warnings(&input, runtime_vars)
+                    .map_err(miette::Error::from)?
             };
+
+            if !quiet {
+                for w in &warnings {
+                    eprintln!("{w}");
+                }
+            }
 
             if let Some(output_path) = output {
                 std::fs::write(&output_path, &compiled)
@@ -142,7 +152,10 @@ fn run(cli: Cli) -> Result<(), miette::Error> {
             }
 
             if input != Path::new("-") && input.is_dir() {
-                eprintln!("error: expected a file, got a directory: {}", input.display());
+                eprintln!(
+                    "error: expected a file, got a directory: {}",
+                    input.display()
+                );
                 process::exit(1);
             }
 
