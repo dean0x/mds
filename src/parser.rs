@@ -635,8 +635,7 @@ fn is_directive_token(directive: &str, keyword: &str) -> bool {
     directive == keyword
         || directive
             .strip_prefix(keyword)
-            .map(|rest| matches!(rest.chars().next(), Some(' ' | '\t' | '{')))
-            .unwrap_or(false)
+            .is_some_and(|rest| matches!(rest.chars().next(), Some(' ' | '\t' | '{')))
 }
 
 pub(crate) fn is_valid_identifier(s: &str) -> bool {
@@ -651,15 +650,12 @@ pub(crate) fn is_valid_identifier(s: &str) -> bool {
 /// Strip a leading newline from the body text nodes.
 fn strip_leading_newline(mut nodes: Vec<Node>) -> Vec<Node> {
     if let Some(Node::Text(t)) = nodes.first_mut() {
-        let strip = if t.text.starts_with("\r\n") {
-            2
-        } else if t.text.starts_with('\n') {
-            1
-        } else {
-            0
-        };
-        if strip > 0 {
-            t.text.drain(..strip);
+        if let Some(stripped) = t
+            .text
+            .strip_prefix("\r\n")
+            .or_else(|| t.text.strip_prefix('\n'))
+        {
+            t.text = stripped.to_string();
         }
         if t.text.is_empty() {
             nodes.remove(0);
