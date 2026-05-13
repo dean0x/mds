@@ -70,8 +70,11 @@ impl Scope {
     }
 
     /// Pop the innermost scope frame.
+    ///
+    /// # Panics
+    /// Panics if called when only the global scope frame remains.
     pub fn pop(&mut self) {
-        debug_assert!(self.frames.len() > 1, "cannot pop the global scope frame");
+        assert!(self.frames.len() > 1, "cannot pop the global scope frame");
         self.frames.pop();
     }
 
