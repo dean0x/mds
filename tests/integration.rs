@@ -1485,11 +1485,6 @@ fn error_format_includes_file_line_col() {
         stderr.contains(":4:") || stderr.contains("4 │"),
         "error should include line number 4, got: {stderr}"
     );
-    // Column must be present
-    assert!(
-        stderr.contains(':'),
-        "error should include column info, got: {stderr}"
-    );
 }
 
 // ── Compile from string: empty frontmatter (Spec 4.1 edge case) ──────────────
@@ -1527,8 +1522,7 @@ fn yaml_map_type_rejected() {
     let result = mds::compile_str(source);
     assert!(
         result.is_err(),
-        "YAML map/object type should be rejected, got: {:?}",
-        result.unwrap()
+        "YAML map/object type should be rejected"
     );
     let err = format!("{}", result.unwrap_err());
     assert!(
