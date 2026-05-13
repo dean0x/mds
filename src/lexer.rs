@@ -58,8 +58,10 @@ pub fn tokenize(source: &str, file: &str) -> Result<Vec<Token>, MdsError> {
                     end_pos >= chars.len() || chars[end_pos] == '\n' || chars[end_pos] == '\r';
                 if at_end {
                     // Strip \r for Windows line endings (\r\n) in frontmatter
-                    let content: String =
-                        chars[fm_start..pos].iter().filter(|&&c| c != '\r').collect();
+                    let content: String = chars[fm_start..pos]
+                        .iter()
+                        .filter(|&&c| c != '\r')
+                        .collect();
                     let fm_byte_offset = byte_pos(fm_start);
                     tokens.push(Token::FrontmatterContent(content, fm_byte_offset));
                     tokens.push(Token::FrontmatterFence(byte_pos(pos)));
