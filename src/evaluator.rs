@@ -149,7 +149,7 @@ fn invoke_function(
     call_stack.insert(call_key.to_string());
     let result = evaluate_nodes(&func.body, scope, call_stack, warnings);
     call_stack.remove(call_key);
-    scope.pop();
+    scope.pop()?;
     result
 }
 
@@ -233,7 +233,7 @@ fn evaluate_for(
         scope.set_var(&block.var, item);
         let rendered = evaluate_nodes(&block.body, scope, call_stack, warnings)?;
         output.push_str(&rendered);
-        scope.pop();
+        scope.pop()?;
     }
 
     Ok(output)

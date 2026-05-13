@@ -71,11 +71,15 @@ impl Scope {
 
     /// Pop the innermost scope frame.
     ///
-    /// # Panics
-    /// Panics if called when only the global scope frame remains.
-    pub fn pop(&mut self) {
-        assert!(self.frames.len() > 1, "cannot pop the global scope frame");
+    /// Returns an error if called when only the global scope frame remains.
+    pub fn pop(&mut self) -> Result<(), crate::error::MdsError> {
+        if self.frames.len() <= 1 {
+            return Err(crate::error::MdsError::syntax(
+                "cannot pop the global scope frame",
+            ));
+        }
         self.frames.pop();
+        Ok(())
     }
 
     /// Set a variable in the current (innermost) frame.
@@ -165,7 +169,7 @@ mod tests {
         scope.push();
         scope.set_var("x", Value::Number(2.0));
         assert_eq!(scope.get_var("x"), Some(&Value::Number(2.0)));
-        scope.pop();
+        scope.pop().unwrap();
         assert_eq!(scope.get_var("x"), Some(&Value::Number(1.0)));
     }
 

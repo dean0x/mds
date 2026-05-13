@@ -1622,3 +1622,189 @@ fn default_public_when_no_exports() {
         "default-public module should allow importing any symbol, got: {result}"
     );
 }
+
+// ── New edge-case tests ───────────────────────────────────────────────────────
+
+// 1. Zero-parameter function
+#[test]
+fn zero_parameter_function() {
+    // @define separator(): produces a fixed separator string with no params
+    let source = "@define separator():\n---\n@end\n{separator()}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("---"),
+        "zero-parameter function should produce its body, got: {result}"
+    );
+}
+
+// 2. Empty function body
+#[test]
+fn empty_function_body() {
+    // @define empty(): @end — calling it should succeed and produce empty string
+    let source = "@define empty():\n@end\nBefore{empty()}After\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("BeforeAfter"),
+        "empty function body should produce empty string, got: {result}"
+    );
+}
+
+// 3. Multiple --set with same key: last wins
+#[test]
+fn set_flag_duplicate_key_last_wins() {
+    // Passing --set name=First --set name=Second should use "Second" (last wins).
+    let output = mds_bin()
+        .args([
+            "build",
+            fixture("simple.mds").to_str().unwrap(),
+            "--set",
+            "name=First",
+            "--set",
+            "name=Second",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "build with duplicate --set should succeed"
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("Hello Second!"),
+        "last --set value should win when key repeated, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Hello First!"),
+        "first --set value should be overridden by second, got: {stdout}"
+    );
+}
+
+// 4. Deeply nested conditionals (3+ levels)
+#[test]
+fn deeply_nested_conditionals() {
+    let source = "---\na: true\nb: true\nc: true\n---\n\
+        @if a:\n\
+        @if b:\n\
+        @if c:\n\
+        deep\n\
+        @end\n\
+        @end\n\
+        @end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("deep"),
+        "3-level nested @if should reach innermost body, got: {result}"
+    );
+}
+
+// 5. Function returning result of another function call
+#[test]
+fn function_returning_inner_call() {
+    let source = "\
+        @define inner():\n\
+        inner-result\n\
+        @end\n\
+        @define outer():\n\
+        {inner()}\n\
+        @end\n\
+        {outer()}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("inner-result"),
+        "outer() should return result of inner(), got: {result}"
+    );
+}
+
+// 6. Loop with single-element array
+#[test]
+fn loop_single_element_array() {
+    let source = "---\nitems: [only]\n---\n@for item in items:\n- {item}\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("- only"),
+        "single-element array loop should produce one item, got: {result}"
+    );
+}
+
+// 7. Escaped brace inside function body
+#[test]
+fn escaped_brace_inside_function_body() {
+    // \{ in MDS source renders as a literal {, so \{literal} produces {literal}
+    let source = "@define show():\n\\{literal}\n@end\n{show()}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("{literal}"),
+        "escaped brace inside function body should render as literal brace, got: {result}"
+    );
+}
+
+// 8. Import non-existent file: clear error message
+#[test]
+fn import_nonexistent_file_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let consumer = dir.path().join("consumer.mds");
+
+    std::fs::write(
+        &consumer,
+        "@import { greet } from \"./does_not_exist.mds\"\n{greet(\"Alice\")}\n",
+    )
+    .unwrap();
+
+    let result = mds::compile(&consumer, None);
+    assert!(
+        result.is_err(),
+        "importing a non-existent file should return an error"
+    );
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("not found") || err.contains("does_not_exist") || err.contains("No such"),
+        "error should mention the missing file, got: {err}"
+    );
+}
+
+// 9. Selective import of non-exported name
+#[test]
+fn selective_import_of_non_exported_name() {
+    // Module has explicit @export, so only exported names are visible.
+    let dir = tempfile::tempdir().unwrap();
+    let provider = dir.path().join("provider.mds");
+    let consumer = dir.path().join("consumer.mds");
+
+    std::fs::write(
+        &provider,
+        "@define exported(name):\nExported: {name}\n@end\n\
+         @define hidden(name):\nHidden: {name}\n@end\n\
+         @export exported\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &consumer,
+        "@import { hidden } from \"./provider.mds\"\n{hidden(\"Alice\")}\n",
+    )
+    .unwrap();
+
+    let result = mds::compile(&consumer, None);
+    assert!(
+        result.is_err(),
+        "selective import of a non-exported name should fail"
+    );
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("hidden") || err.contains("not exported") || err.contains("export"),
+        "error should mention the non-exported symbol, got: {err}"
+    );
+}
+
+// 10. Variable interpolation in function argument
+#[test]
+fn variable_interpolation_in_function_argument() {
+    // {greet(name)} where name is a frontmatter variable
+    let source = "---\nname: Alice\n---\n@define greet(who):\nHello {who}!\n@end\n{greet(name)}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("Hello Alice!"),
+        "variable passed as function argument should be resolved, got: {result}"
+    );
+}
