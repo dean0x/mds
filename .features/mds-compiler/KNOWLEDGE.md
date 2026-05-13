@@ -70,7 +70,7 @@ Code blocks are tokenized as opaque `CodeContent` — no interpolation or direct
 
 The `Module` struct holds an optional `Frontmatter` and a `Vec<Node>`. `Node` is an enum with variants for every construct: `Text(TextNode)`, `Interpolation`, `EscapedBrace`, `If`, `For`, `Define`, `Import`, `Export`, `Include`.
 
-`TextNode` is a struct (`{ text: String }`) with no offset field — offsets are not tracked for raw text. Expressions inside `{...}` are further typed as `Expr::Var`, `Expr::Call`, or `Expr::QualifiedCall`.
+`TextNode` is a struct (`{ text: String }`) with no offset field — offsets are not tracked for raw text. `EscapedBrace` is a unit variant with no fields. Expressions inside `{...}` are further typed as `Expr::Var`, `Expr::Call`, or `Expr::QualifiedCall`.
 
 **`Arg` enum** has three variants — this is the complete set:
 
@@ -100,7 +100,9 @@ Lookup always walks from innermost to outermost frame, enabling block-scoped sha
 
 These fields implement lexical scope: a function defined in module A that uses `{ns.fn()}` or `{sibling_fn()}` will work correctly when called from module B, which may not have those names in its scope.
 
-Helper methods `get_all_namespaces()`, `get_all_functions()`, `get_all_vars()` snapshot the current scope for closure capture at definition time.
+**`FunctionDef::from(&DefineBlock)`** creates a `FunctionDef` with all three captured fields as empty `HashMap`s. The resolver fills them in after construction by calling `scope.get_all_namespaces()`, `get_all_functions()`, and `get_all_vars()`. Never assume captures are populated immediately after `FunctionDef::from`.
+
+Helper methods `get_all_namespaces()`, `get_all_functions()`, `get_all_vars()` snapshot the current scope for closure capture at definition time. All three iterate **outer frame to inner frame**, so when the same key appears in multiple frames, the inner (more recently defined) value wins — preserving correct shadowing semantics in the captured snapshot.
 
 ### Value System (`src/value.rs`)
 
@@ -124,20 +126,22 @@ The parser converts a token stream to a `Module` AST. Key hardening:
 
 `parse_args_inner` tracks open parentheses (`paren_depth`) so that commas inside nested calls are not treated as argument separators at the outer level. Quote-escaped commas inside string arguments are similarly skipped.
 
+Note: `parse_single_arg` (without `_inner` suffix) exists only under `#[cfg(test)]` as a test shim. In production code only `parse_single_arg_inner(s, 0)` is called directly (or via `parse_args`).
+
 ### Validator (`src/validator.rs`)
 
 Validates the AST against the current scope **before** evaluation. Catches: undefined variables in `{interpolation}` and `@if` conditions, undefined iterables in `@for`, undefined namespaces in `@include`, undefined functions and arity mismatches in calls, and undefined variable arguments to functions.
 
 **`@for` body validation**: The validator clones the outer scope, injects the loop variable as `Value::Null`, then recurses via top-level `validate()`. Undefined-variable references inside the loop body are caught at validate time.
 
-**`@define` body validation**: The validator clones the outer scope, injects all params as `Value::Null`, then recurses via top-level `validate()`. Both `@for` and `@define` body recursion now delegate to the exported `validate()` function directly (previously an internal `validate_body` helper) — this ensures consistent error reporting.
+**`@define` body validation**: The validator clones the outer scope, injects all params as `Value::Null`, then recurses via top-level `validate()`. Both `@for` and `@define` body recursion delegate to the exported `validate()` function directly (no internal `validate_body` helper) — this ensures consistent error reporting.
 
 **`validate_var_args`** is extended to cover all three `Arg` variants:
 - `Arg::StringLiteral` — no validation needed
 - `Arg::Var` — variable existence check against scope
 - `Arg::Call { name, args }` — function existence check, arity check against `func.params.len()`, then recursion into `inner_args` via `validate_var_args`
 
-This means nested calls like `{outer(inner("arg"))}` are fully validated: both `outer` and `inner` must exist with correct arity before evaluation.
+This means nested calls like `{outer(inner("arg"))}` are fully validated: both `outer` and `inner` must exist with correct arity before evaluation. For `Arg::Call` arity errors, the span length is `name.len()` (not the full expression length).
 
 The `arity_at` constructor provides source-span-aware arity errors from the validator, in addition to the existing `undefined_var_at`, `undefined_fn_at`, `name_collision_at`, etc.
 
@@ -178,13 +182,15 @@ The resolver is the orchestrator. `ModuleCache` drives the full pipeline for eac
 
 **Re-export semantics** (`@export name from "path"`, `@export * from "path"`): The source module is resolved and its exports are added to the current module's `functions` map. They are NOT added to the current file's runtime scope — they are only available to modules that import the current module.
 
-**Closure capture**: When a `@define` node is processed, the resolver captures the current scope state into `FunctionDef.captured_*` fields before adding the function to scope. This means a function sees the scope as it existed at its definition point, not at its call point.
+**Closure capture**: When a `@define` node is processed, the resolver calls `FunctionDef::from(def)` (which creates empty captures), then immediately fills `func.captured_namespaces`, `func.captured_functions`, and `func.captured_vars` from the current scope state. This means a function sees the scope as it existed at its definition point, not at its call point.
 
 ### Evaluator (`src/evaluator.rs`)
 
 The evaluator walks the AST and produces the final rendered string. Its public entry point is `evaluate(nodes, scope, warnings)` — the `warnings: &mut Vec<String>` parameter is threaded through all internal helpers including `evaluate_include`. Nothing in the evaluator calls `eprintln!` directly; all diagnostics go into the warnings vec.
 
 The evaluator carries a `call_stack: HashSet<String>` for recursion detection (error on self or mutual recursion) and enforces `MAX_CALL_DEPTH = 128` for deep chains.
+
+**`Node::Define` in the evaluator**: When the evaluator encounters a `Node::Define`, it calls `scope.set_function(&block.name, FunctionDef::from(block))`. This re-registers the function in the runtime scope with empty captures — the evaluator does not restore closure captures here. Closure restoration only happens inside `invoke_function` when the function is actually called. This means `@define` blocks must appear before any call sites in the source, and the resolver's pre-evaluation scope setup is what makes cross-module closure capture work.
 
 `invoke_function` restores the function's captured closure scope (namespaces, functions, vars) before binding parameters, so params shadow captured vars correctly. After evaluation the pushed frame is popped.
 
@@ -274,6 +280,8 @@ MdsError::import_error(message)
 MdsError::export_error(message)
 ```
 
+Several `MdsError` variants (`TypeError`, `Recursion`, `ImportError`, `ExportError`) carry optional `span` and `src` fields in their struct definition but do not yet have public `_at` constructor methods. They are currently always constructed without span info. If you need span-aware versions of these, add `_at` constructor methods following the pattern in `error.rs`.
+
 Always prefer `_at` variants inside the validator and evaluator where source offsets are available from the AST nodes.
 
 ### Adding a New Value Type
@@ -301,7 +309,7 @@ Currently blocked by design: `Value::from_yaml` and `Value::from_json` both retu
 - **Creating `ModuleCache` per-module instead of per-compile** — the cache is the only thing preventing re-parsing the same file dozens of times. Each `compile()` / `compile_str_with()` call creates exactly one cache.
 - **Using bare `MdsError::syntax(msg)` when source context is available** — always prefer `syntax_at` when you have an offset and source string.
 - **Adding object/map support without updating all Value methods** — `from_yaml`, `from_json`, `Display`, `is_truthy`, `type_name`, and `as_array` must all be consistent.
-- **Forgetting to capture closure scope in new definition-like directives** — any directive that defines a callable entity should call `scope.get_all_namespaces()`, `get_all_functions()`, and `get_all_vars()` at definition time so the callable works correctly when invoked from other modules.
+- **Forgetting to capture closure scope in new definition-like directives** — any directive that defines a callable entity should call `scope.get_all_namespaces()`, `get_all_functions()`, and `get_all_vars()` at definition time so the callable works correctly when invoked from other modules. Remember that `FunctionDef::from` always produces empty captures — the resolver must fill them.
 - **Adding functions to `process_module`'s scope without also capturing current scope into the FunctionDef** — if you add a function to scope after other functions are already captured, the previously captured siblings won't see the new function.
 - **Adding a new `Arg` variant without updating all three match sites** — parser (`parse_single_arg_inner`), evaluator (`resolve_args`), and validator (`validate_var_args`) all pattern-match exhaustively on `Arg`. Adding a variant without updating all three will produce a compile error, which is by design.
 - **Passing `resolve_args` without `call_stack` or `warnings`** — nested `Arg::Call` evaluation requires the call stack for recursion detection and warnings for diagnostics. Any future refactor that removes these from `resolve_args` will silently allow unbounded recursion through argument nesting or lose warning context.
@@ -319,12 +327,13 @@ Currently blocked by design: `Value::from_yaml` and `Value::from_json` both retu
 - **Selective import of `prompt` binds as a variable, not a function** — `@import { prompt } from "path"` sets `prompt` as a `Value::String` via `scope.set_var`, not `scope.set_function`.
 - **`compile_str` takes no arguments** — the zero-argument form `compile_str(source)` is a convenience wrapper. Use `compile_str_with(source, base_dir, runtime_vars)` when you need import resolution relative to a specific directory or runtime variable overrides.
 - **Closure capture is eager and shallow** — `get_all_vars()` / `get_all_functions()` / `get_all_namespaces()` snapshot the scope at definition time. Functions defined after the closure capture are not visible to the captured function. Within `process_module`, `@define` nodes are processed in top-to-bottom AST order, so later-defined functions are not visible to earlier ones.
+- **`get_all_*` iteration order matters for shadowing** — all three `get_all_*` methods iterate outer→inner frames, so when a key exists in multiple frames the inner frame wins. The resulting `HashMap` thus correctly reflects inner-scope shadowing. This is the correct behavior for snapshot captures.
 - **`compile_str` / `resolve_source` uses a virtual path `<source>`** — in-memory sources cannot be canonicalized. Repeated calls to `compile_str` re-parse every time; there is no caching for in-memory sources.
 - **Project root is set on first resolve** — `root_dir` is set lazily. If `resolve_source` is called first, `root_dir` is the provided `base_dir`, not a git-root-discovered path.
 - **Cycle detection reconstructs the path from `resolving_stack`** — when circular import is detected, the error builds the chain by finding the repeated path in the stack and joining from that point with `→`. The stack is insertion-ordered, reflecting the actual import sequence.
-- **`TextNode` has no offset** — raw text nodes (`Node::Text(TextNode)`) do not carry a byte offset. Only structured nodes (`Interpolation`, `IfBlock`, `ForBlock`, `IncludeDirective`) have offsets for error reporting.
+- **`TextNode` has no offset** — raw text nodes (`Node::Text(TextNode)`) do not carry a byte offset. Only structured nodes (`Interpolation`, `IfBlock`, `ForBlock`, `IncludeDirective`) have offsets for error reporting. `EscapedBrace` is also a unit variant with no offset.
 - **`enter_block()` must be paired with `self.depth -= 1`** — the helper only increments; callers are responsible for decrementing after the block body is parsed. Failing to decrement will cause subsequent blocks to see an inflated depth and may reject valid inputs.
-- **`parse_single_arg` (no `_inner` suffix) exists only in `#[cfg(test)]`** — the public-facing name is the test shim. In production code, call `parse_single_arg_inner(s, 0)` directly (or use `parse_args`).
+- **Evaluator's `Node::Define` arm does not restore closures** — the evaluator re-registers a function via `FunctionDef::from(block)` with empty captures. Closure capture only happens in the resolver and is only restored inside `invoke_function`. This design means the resolver's pre-evaluation scope pass is load-bearing for cross-module function calls.
 
 ## Key Files
 
@@ -335,16 +344,16 @@ Currently blocked by design: `Value::from_yaml` and `Value::from_json` both retu
 - `src/resolver.rs` — orchestrator: drives the full pipeline, module cache, import resolution, closure capture, security guards; threads `&mut Vec<String>` warnings through to evaluate
 - `src/evaluator.rs` — AST walker that produces the rendered string; `resolve_args` handles `Arg::Call` via recursive evaluation with shared `call_stack` and `warnings`; `evaluate_include` pushes to warnings vec, never calls `eprintln!`
 - `src/validator.rs` — pre-evaluation semantic checks; `validate_var_args` recursively validates nested `Arg::Call` arguments
-- `src/scope.rs` — scope chain with frames for variables, functions, and namespaces; closure capture helpers
+- `src/scope.rs` — scope chain with frames for variables, functions, and namespaces; closure capture helpers; `get_all_*` iterate outer→inner for correct shadowing semantics
 - `src/value.rs` — runtime value enum with YAML/JSON converters and display rules
-- `src/error.rs` — `MdsError` enum with miette diagnostics; builder methods for span-aware errors
+- `src/error.rs` — `MdsError` enum with miette diagnostics; builder methods for span-aware errors; several variants have optional span fields without public `_at` constructors yet
 - `tests/integration.rs` — end-to-end tests covering all features, error paths, CLI integration (stdin, file output, vars file, quiet flag), edge cases (nested loops, loop shadowing, falsy values, mutual recursion, escape sequences in blocks/functions), and error format verification
 
 ## Related
 
 - `src/resolver.rs` — canonical reference for the module system, import semantics, and security guards
 - `src/evaluator.rs` — canonical reference for directive execution order, closure restore, call-depth guards, nested arg evaluation, and warning collection
-- `src/scope.rs` — canonical reference for closure capture API (`get_all_*` methods)
+- `src/scope.rs` — canonical reference for closure capture API (`get_all_*` methods) and shadowing semantics
 - `src/ast.rs` — canonical reference for `Arg` variants; any new argument form starts here
 - `src/lib.rs` — canonical reference for the two-tier warning API (`compile` vs `compile_collecting_warnings`)
 - `tests/integration.rs` — covers all directive combinations including nested function calls, CLI stdin/quiet mode, and edge cases; read before adding new directives to understand existing fixture patterns
