@@ -201,7 +201,7 @@ mod tests {
             Value::from("hello".to_owned()),
             Value::String("hello".to_owned())
         );
-        assert_eq!(Value::from(3.14_f64), Value::Number(3.14));
+        assert_eq!(Value::from(2.5_f64), Value::Number(2.5));
         assert_eq!(Value::from(42_i64), Value::Number(42.0));
         assert_eq!(Value::from(7_i32), Value::Number(7.0));
         assert_eq!(Value::from(true), Value::Boolean(true));
@@ -221,7 +221,7 @@ mod tests {
     fn display() {
         assert_eq!(Value::String("hello".into()).to_string(), "hello");
         assert_eq!(Value::Number(42.0).to_string(), "42");
-        assert_eq!(Value::Number(3.14).to_string(), "3.14");
+        assert_eq!(Value::Number(2.5).to_string(), "2.5");
         assert_eq!(Value::Boolean(true).to_string(), "true");
         assert_eq!(Value::Null.to_string(), "");
     }

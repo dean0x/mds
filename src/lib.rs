@@ -206,37 +206,6 @@ fn clean_output(s: &str) -> String {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn clean_output_collapses_excess_newlines() {
-        assert_eq!(clean_output("a\n\n\n\nb"), "a\n\nb\n");
-    }
-
-    #[test]
-    fn clean_output_trims_leading_newlines() {
-        assert_eq!(clean_output("\n\n\nhello"), "hello\n");
-    }
-
-    #[test]
-    fn clean_output_trims_trailing_whitespace() {
-        assert_eq!(clean_output("hello\n\n  \n"), "hello\n");
-    }
-
-    #[test]
-    fn clean_output_empty_input() {
-        assert_eq!(clean_output(""), "");
-        assert_eq!(clean_output("\n\n\n"), "");
-    }
-
-    #[test]
-    fn clean_output_preserves_single_blank_line() {
-        assert_eq!(clean_output("a\n\nb"), "a\n\nb\n");
-    }
-}
-
 /// Compile an MDS file by path string to a final Markdown string.
 ///
 /// Convenience wrapper around [`compile`] for callers who have a path as `&str`
@@ -281,4 +250,35 @@ pub fn load_vars_file(path: &Path) -> Result<HashMap<String, Value>, MdsError> {
     }
 
     Ok(vars)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_output_collapses_excess_newlines() {
+        assert_eq!(clean_output("a\n\n\n\nb"), "a\n\nb\n");
+    }
+
+    #[test]
+    fn clean_output_trims_leading_newlines() {
+        assert_eq!(clean_output("\n\n\nhello"), "hello\n");
+    }
+
+    #[test]
+    fn clean_output_trims_trailing_whitespace() {
+        assert_eq!(clean_output("hello\n\n  \n"), "hello\n");
+    }
+
+    #[test]
+    fn clean_output_empty_input() {
+        assert_eq!(clean_output(""), "");
+        assert_eq!(clean_output("\n\n\n"), "");
+    }
+
+    #[test]
+    fn clean_output_preserves_single_blank_line() {
+        assert_eq!(clean_output("a\n\nb"), "a\n\nb\n");
+    }
 }

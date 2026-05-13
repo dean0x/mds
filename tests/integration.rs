@@ -14,28 +14,28 @@ fn mds_bin() -> std::process::Command {
 
 #[test]
 fn simple_variable_interpolation() {
-    let result = mds::compile(&fixture("simple.mds"), None).unwrap();
+    let result = mds::compile(fixture("simple.mds"), None).unwrap();
     assert!(result.contains("Hello Alice!"));
     assert!(result.contains("You have 3 items."));
 }
 
 #[test]
 fn conditional_truthy() {
-    let result = mds::compile(&fixture("conditional.mds"), None).unwrap();
+    let result = mds::compile(fixture("conditional.mds"), None).unwrap();
     assert!(result.contains("Thanks for being premium!"));
     assert!(!result.contains("Upgrade for premium features."));
 }
 
 #[test]
 fn conditional_falsy() {
-    let result = mds::compile(&fixture("conditional_false.mds"), None).unwrap();
+    let result = mds::compile(fixture("conditional_false.mds"), None).unwrap();
     assert!(!result.contains("Thanks for being premium!"));
     assert!(result.contains("Upgrade for premium features."));
 }
 
 #[test]
 fn loop_over_array() {
-    let result = mds::compile(&fixture("loop.mds"), None).unwrap();
+    let result = mds::compile(fixture("loop.mds"), None).unwrap();
     assert!(result.contains("- apple"));
     assert!(result.contains("- banana"));
     assert!(result.contains("- cherry"));
@@ -43,20 +43,20 @@ fn loop_over_array() {
 
 #[test]
 fn function_definition_and_call() {
-    let result = mds::compile(&fixture("function.mds"), None).unwrap();
+    let result = mds::compile(fixture("function.mds"), None).unwrap();
     assert!(result.contains("Hello Alice!"));
     assert!(result.contains("Hello Bob!"));
 }
 
 #[test]
 fn escaped_braces() {
-    let result = mds::compile(&fixture("escaped.mds"), None).unwrap();
+    let result = mds::compile(fixture("escaped.mds"), None).unwrap();
     assert!(result.contains("{name}"));
 }
 
 #[test]
 fn code_block_passthrough() {
-    let result = mds::compile(&fixture("code_block.mds"), None).unwrap();
+    let result = mds::compile(fixture("code_block.mds"), None).unwrap();
     // Inside code block: no interpolation should occur
     assert!(result.contains("{not_a_var}"));
     assert!(result.contains("{world}"));
@@ -67,40 +67,40 @@ fn code_block_passthrough() {
 
 #[test]
 fn import_alias() {
-    let result = mds::compile(&fixture("import_alias.mds"), None).unwrap();
+    let result = mds::compile(fixture("import_alias.mds"), None).unwrap();
     assert!(result.contains("Hello Alice!"));
     assert!(result.contains("Goodbye Alice!"));
 }
 
 #[test]
 fn import_merge() {
-    let result = mds::compile(&fixture("import_merge.mds"), None).unwrap();
+    let result = mds::compile(fixture("import_merge.mds"), None).unwrap();
     assert!(result.contains("Hello Bob!"));
     assert!(result.contains("Goodbye Bob!"));
 }
 
 #[test]
 fn import_selective() {
-    let result = mds::compile(&fixture("import_selective.mds"), None).unwrap();
+    let result = mds::compile(fixture("import_selective.mds"), None).unwrap();
     assert!(result.contains("Hello Charlie!"));
 }
 
 #[test]
 fn include_directive() {
-    let result = mds::compile(&fixture("include_test.mds"), None).unwrap();
+    let result = mds::compile(fixture("include_test.mds"), None).unwrap();
     assert!(result.contains("Hello Alice!"));
     assert!(result.contains("Thank you for using our service."));
 }
 
 #[test]
 fn reexport() {
-    let result = mds::compile(&fixture("reexport_consumer.mds"), None).unwrap();
+    let result = mds::compile(fixture("reexport_consumer.mds"), None).unwrap();
     assert!(result.contains("Hello Dave!"));
 }
 
 #[test]
 fn wildcard_reexport_barrel() {
-    let result = mds::compile(&fixture("barrel_consumer.mds"), None).unwrap();
+    let result = mds::compile(fixture("barrel_consumer.mds"), None).unwrap();
     assert!(result.contains("Hello Alice!"));
     assert!(result.contains("- search"));
     assert!(result.contains("- code"));
@@ -109,7 +109,7 @@ fn wildcard_reexport_barrel() {
 
 #[test]
 fn circular_import_error() {
-    let result = mds::compile(&fixture("circular_a.mds"), None);
+    let result = mds::compile(fixture("circular_a.mds"), None);
     assert!(result.is_err());
     let err = format!("{}", result.unwrap_err());
     assert!(
@@ -124,7 +124,7 @@ fn circular_import_error() {
 
 #[test]
 fn undefined_variable_error() {
-    let result = mds::compile(&fixture("undefined_var.mds"), None);
+    let result = mds::compile(fixture("undefined_var.mds"), None);
     assert!(result.is_err());
     let err = format!("{}", result.unwrap_err());
     assert!(err.contains("username"));
@@ -132,7 +132,7 @@ fn undefined_variable_error() {
 
 #[test]
 fn arity_mismatch_error() {
-    let result = mds::compile(&fixture("arity_error.mds"), None);
+    let result = mds::compile(fixture("arity_error.mds"), None);
     assert!(result.is_err());
     let err = format!("{}", result.unwrap_err());
     assert!(err.contains("arity") || err.contains("expected 1"));
@@ -145,13 +145,13 @@ fn runtime_vars_override() {
         "name".to_string(),
         mds::value::Value::String("Override".to_string()),
     );
-    let result = mds::compile(&fixture("simple.mds"), Some(vars)).unwrap();
+    let result = mds::compile(fixture("simple.mds"), Some(vars)).unwrap();
     assert!(result.contains("Hello Override!"));
 }
 
 #[test]
 fn complete_example_welcome() {
-    let result = mds::compile(&fixture("welcome.mds"), None).unwrap();
+    let result = mds::compile(fixture("welcome.mds"), None).unwrap();
     assert!(result.contains("Hello Alice!"));
     assert!(result.contains("- apple"));
     assert!(result.contains("- banana"));
@@ -162,7 +162,7 @@ fn complete_example_welcome() {
 
 #[test]
 fn file_not_found_error() {
-    let result = mds::compile(&PathBuf::from("nonexistent.mds"), None);
+    let result = mds::compile(PathBuf::from("nonexistent.mds"), None);
     assert!(result.is_err());
 }
 
@@ -198,25 +198,25 @@ fn vars_file_loading() {
 
 #[test]
 fn check_valid_file() {
-    let result = mds::check(&fixture("simple.mds"), None);
+    let result = mds::check(fixture("simple.mds"), None);
     assert!(result.is_ok());
 }
 
 #[test]
 fn check_invalid_file() {
-    let result = mds::check(&fixture("undefined_var.mds"), None);
+    let result = mds::check(fixture("undefined_var.mds"), None);
     assert!(result.is_err());
 }
 
 #[test]
 fn function_calls_function() {
-    let result = mds::compile(&fixture("fn_calls_fn.mds"), None).unwrap();
+    let result = mds::compile(fixture("fn_calls_fn.mds"), None).unwrap();
     assert!(result.contains("[Alice]"));
 }
 
 #[test]
 fn recursion_detected() {
-    let result = mds::compile(&fixture("recursive.mds"), None);
+    let result = mds::compile(fixture("recursive.mds"), None);
     assert!(result.is_err());
     let err = format!("{}", result.unwrap_err());
     assert!(err.contains("recursion"));
@@ -224,7 +224,7 @@ fn recursion_detected() {
 
 #[test]
 fn nested_conditionals() {
-    let result = mds::compile(&fixture("nested_if.mds"), None).unwrap();
+    let result = mds::compile(fixture("nested_if.mds"), None).unwrap();
     assert!(result.contains("outer true"));
     assert!(result.contains("inner false"));
     assert!(!result.contains("inner true"));
@@ -233,7 +233,7 @@ fn nested_conditionals() {
 
 #[test]
 fn absolute_import_path_rejected() {
-    let result = mds::compile(&fixture("absolute_import.mds"), None);
+    let result = mds::compile(fixture("absolute_import.mds"), None);
     assert!(result.is_err());
     let err = format!("{}", result.unwrap_err());
     assert!(err.contains("relative") || err.contains("import"));
@@ -241,7 +241,7 @@ fn absolute_import_path_rejected() {
 
 #[test]
 fn unicode_content() {
-    let result = mds::compile(&fixture("unicode.mds"), None).unwrap();
+    let result = mds::compile(fixture("unicode.mds"), None).unwrap();
     assert!(result.contains("Greetings Rene!"));
     assert!(result.contains("Hello"));
     // Code block content should not be interpolated
@@ -257,7 +257,7 @@ fn for_iterate_non_array_error() {
         "items".to_string(),
         mds::value::Value::String("not_an_array".to_string()),
     );
-    let result = mds::compile(&fixture("loop.mds"), Some(vars));
+    let result = mds::compile(fixture("loop.mds"), Some(vars));
     assert!(result.is_err());
     let err = format!("{}", result.unwrap_err());
     assert!(err.contains("expected array") || err.contains("type error") || err.contains("string"));
@@ -268,7 +268,7 @@ fn empty_array_loop() {
     // Iterating over an empty array should produce no output for the loop body
     let mut vars = HashMap::new();
     vars.insert("items".to_string(), mds::value::Value::Array(vec![]));
-    let result = mds::compile(&fixture("loop.mds"), Some(vars)).unwrap();
+    let result = mds::compile(fixture("loop.mds"), Some(vars)).unwrap();
     assert!(!result.contains("- apple"));
     assert!(!result.contains("- banana"));
 }
@@ -312,7 +312,7 @@ fn undefined_namespace_in_qualified_call() {
 
 #[test]
 fn name_collision_on_merge_import() {
-    let result = mds::compile(&fixture("collision_consumer.mds"), None);
+    let result = mds::compile(fixture("collision_consumer.mds"), None);
     assert!(result.is_err());
     let err = format!("{}", result.unwrap_err());
     assert!(
@@ -326,7 +326,7 @@ fn merge_import_does_not_leak_vars() {
     // Per spec: merge imports bring in functions only, NOT frontmatter variables.
     // Two merge-imported modules that both define the same variable should NOT cause
     // a name collision — because variables are not imported at all.
-    let result = mds::compile(&fixture("var_collision_consumer.mds"), None);
+    let result = mds::compile(fixture("var_collision_consumer.mds"), None);
     assert!(
         result.is_ok(),
         "merge import should not leak variables (no collision expected), got: {:?}",
@@ -336,7 +336,7 @@ fn merge_import_does_not_leak_vars() {
 
 #[test]
 fn type_key_available_in_mds_files() {
-    let result = mds::compile(&fixture("type_variable.mds"), None).unwrap();
+    let result = mds::compile(fixture("type_variable.mds"), None).unwrap();
     assert!(
         result.contains("assistant"),
         "expected 'type' variable to be available in .mds files, got: {result}"
@@ -361,7 +361,7 @@ fn undefined_function_error_message_says_function() {
 
 #[test]
 fn for_body_undefined_var_errors_at_validate_time() {
-    let result = mds::compile(&fixture("for_body_undef.mds"), None);
+    let result = mds::compile(fixture("for_body_undef.mds"), None);
     assert!(
         result.is_err(),
         "expected error for undefined var in @for body"
@@ -378,7 +378,7 @@ fn cross_module_function_preserves_lexical_scope() {
     // A function defined in module A that uses an alias import (u -> utils.mds)
     // must resolve that alias from its *definition* site (lexical scope) even when
     // called from module B, which has no knowledge of 'u'.
-    let result = mds::compile(&fixture("lexical_scope_consumer.mds"), None).unwrap();
+    let result = mds::compile(fixture("lexical_scope_consumer.mds"), None).unwrap();
     assert!(
         result.contains("Hello Alice!"),
         "expected 'Hello Alice!' in output (lexical scope), got: {result}"
@@ -443,7 +443,7 @@ fn import_depth_limit() {
         };
         std::fs::write(dir.path().join(&name), content).unwrap();
     }
-    let result = mds::compile(&dir.path().join("mod_0.mds"), None);
+    let result = mds::compile(dir.path().join("mod_0.mds"), None);
     assert!(result.is_err(), "Deep import chain should be rejected");
     let err = format!("{}", result.unwrap_err());
     assert!(
@@ -478,7 +478,7 @@ fn cross_module_frontmatter_var_in_function() {
     // A function defined in module A that references module A's frontmatter variable
     // must resolve that variable from its *definition* site (lexical scope) even when
     // called from module B, which has no knowledge of that variable.
-    let result = mds::compile(&fixture("fm_var_consumer.mds"), None).unwrap();
+    let result = mds::compile(fixture("fm_var_consumer.mds"), None).unwrap();
     assert!(
         result.contains("Hello from module A"),
         "expected frontmatter variable to be accessible in cross-module function call, got: {result}"
@@ -488,7 +488,7 @@ fn cross_module_frontmatter_var_in_function() {
 #[test]
 fn export_nonexistent_symbol_errors() {
     // @export phantom where 'phantom' is never defined should be a compile error.
-    let result = mds::compile(&fixture("export_phantom.mds"), None);
+    let result = mds::compile(fixture("export_phantom.mds"), None);
     assert!(
         result.is_err(),
         "expected error when exporting undefined symbol"
@@ -569,7 +569,7 @@ fn duplicate_define_params_errors() {
 
 #[test]
 fn selective_import_prompt_body() {
-    let result = mds::compile(&fixture("prompt_consumer.mds"), None).unwrap();
+    let result = mds::compile(fixture("prompt_consumer.mds"), None).unwrap();
     assert!(
         result.contains("This is the module body text."),
         "selective import of 'prompt' should bring in the module's body text, got: {result}"
@@ -885,7 +885,7 @@ fn build_quiet_flag() {
 #[test]
 fn md_file_with_type_mds_compiles() {
     // Per spec section 9.2: a .md file with type: mds in frontmatter should compile
-    let result = mds::compile(&fixture("type_mds_md_file.md"), None).unwrap();
+    let result = mds::compile(fixture("type_mds_md_file.md"), None).unwrap();
     assert!(
         result.contains("Hello World!"),
         "md file with type:mds should compile, got: {result}"
@@ -894,7 +894,7 @@ fn md_file_with_type_mds_compiles() {
 
 #[test]
 fn nested_loops() {
-    let result = mds::compile(&fixture("nested_loops.mds"), None).unwrap();
+    let result = mds::compile(fixture("nested_loops.mds"), None).unwrap();
     assert!(result.contains("row1-col1"), "nested loops: row1-col1");
     assert!(result.contains("row1-col2"), "nested loops: row1-col2");
     assert!(result.contains("row2-col1"), "nested loops: row2-col1");
@@ -903,7 +903,7 @@ fn nested_loops() {
 
 #[test]
 fn function_called_in_loop() {
-    let result = mds::compile(&fixture("fn_in_loop.mds"), None).unwrap();
+    let result = mds::compile(fixture("fn_in_loop.mds"), None).unwrap();
     assert!(result.contains("Hello Alice!"), "fn in loop: Alice");
     assert!(result.contains("Hello Bob!"), "fn in loop: Bob");
     assert!(result.contains("Hello Charlie!"), "fn in loop: Charlie");
@@ -911,7 +911,7 @@ fn function_called_in_loop() {
 
 #[test]
 fn loop_var_shadows_outer() {
-    let result = mds::compile(&fixture("loop_var_shadow.mds"), None).unwrap();
+    let result = mds::compile(fixture("loop_var_shadow.mds"), None).unwrap();
     // Before loop, outer value
     assert!(
         result.contains("Before: outer_value"),
@@ -929,7 +929,7 @@ fn loop_var_shadows_outer() {
 
 #[test]
 fn function_param_shadows_outer() {
-    let result = mds::compile(&fixture("fn_param_shadow.mds"), None).unwrap();
+    let result = mds::compile(fixture("fn_param_shadow.mds"), None).unwrap();
     assert!(
         result.contains("Before: outer"),
         "before fn call: outer name"
@@ -946,7 +946,7 @@ fn function_param_shadows_outer() {
 
 #[test]
 fn selective_import_nonexistent_errors() {
-    let result = mds::compile(&fixture("selective_import_nonexistent.mds"), None);
+    let result = mds::compile(fixture("selective_import_nonexistent.mds"), None);
     assert!(
         result.is_err(),
         "selective import of nonexistent symbol should error"
@@ -960,7 +960,7 @@ fn selective_import_nonexistent_errors() {
 
 #[test]
 fn nested_function_calls_in_interpolation() {
-    let result = mds::compile(&fixture("nested_fn_calls.mds"), None).unwrap();
+    let result = mds::compile(fixture("nested_fn_calls.mds"), None).unwrap();
     // outer(inner("arg")) => outer("arg!") => "[arg!]"
     assert!(
         result.contains("[arg!]"),
@@ -970,7 +970,7 @@ fn nested_function_calls_in_interpolation() {
 
 #[test]
 fn empty_frontmatter() {
-    let result = mds::compile(&fixture("empty_frontmatter.mds"), None).unwrap();
+    let result = mds::compile(fixture("empty_frontmatter.mds"), None).unwrap();
     assert!(
         result.contains("Hello World!"),
         "empty frontmatter file should compile, got: {result}"
@@ -979,7 +979,7 @@ fn empty_frontmatter() {
 
 #[test]
 fn no_frontmatter_with_directives() {
-    let result = mds::compile(&fixture("no_frontmatter_with_define.mds"), None).unwrap();
+    let result = mds::compile(fixture("no_frontmatter_with_define.mds"), None).unwrap();
     assert!(
         result.contains("Hello World!"),
         "file with @define but no frontmatter should compile, got: {result}"
@@ -988,7 +988,7 @@ fn no_frontmatter_with_directives() {
 
 #[test]
 fn multiple_escaped_braces() {
-    let result = mds::compile(&fixture("multiple_escaped_braces.mds"), None).unwrap();
+    let result = mds::compile(fixture("multiple_escaped_braces.mds"), None).unwrap();
     // \{a\} → literal '{' + 'a\}' as text, \{b\} → literal '{' + 'b\}' as text
     // Per spec: only \{ is an escape sequence, \} is plain text
     assert!(
@@ -1001,7 +1001,7 @@ fn multiple_escaped_braces() {
 
 #[test]
 fn if_falsy_zero() {
-    let result = mds::compile(&fixture("if_falsy_zero.mds"), None).unwrap();
+    let result = mds::compile(fixture("if_falsy_zero.mds"), None).unwrap();
     assert!(
         result.contains("falsy"),
         "zero should be falsy, got: {result}"
@@ -1014,7 +1014,7 @@ fn if_falsy_zero() {
 
 #[test]
 fn if_falsy_null() {
-    let result = mds::compile(&fixture("if_falsy_null.mds"), None).unwrap();
+    let result = mds::compile(fixture("if_falsy_null.mds"), None).unwrap();
     assert!(
         result.contains("falsy"),
         "null should be falsy, got: {result}"
@@ -1023,7 +1023,7 @@ fn if_falsy_null() {
 
 #[test]
 fn if_falsy_empty_string() {
-    let result = mds::compile(&fixture("if_falsy_empty_string.mds"), None).unwrap();
+    let result = mds::compile(fixture("if_falsy_empty_string.mds"), None).unwrap();
     assert!(
         result.contains("falsy"),
         "empty string should be falsy, got: {result}"
@@ -1032,7 +1032,7 @@ fn if_falsy_empty_string() {
 
 #[test]
 fn if_falsy_empty_array() {
-    let result = mds::compile(&fixture("if_falsy_empty_array.mds"), None).unwrap();
+    let result = mds::compile(fixture("if_falsy_empty_array.mds"), None).unwrap();
     assert!(
         result.contains("falsy"),
         "empty array should be falsy, got: {result}"
@@ -1043,7 +1043,7 @@ fn if_falsy_empty_array() {
 
 #[test]
 fn mutual_recursion_detected() {
-    let result = mds::compile(&fixture("mutual_recursion.mds"), None);
+    let result = mds::compile(fixture("mutual_recursion.mds"), None);
     assert!(result.is_err(), "mutual recursion should be detected");
     let err = format!("{}", result.unwrap_err());
     assert!(
@@ -1057,7 +1057,7 @@ fn mutual_recursion_detected() {
 #[test]
 fn alias_import_no_unqualified_access() {
     // 'greet' was imported under alias 'g', so bare {greet(name)} must fail.
-    let result = mds::compile(&fixture("alias_no_unqualified.mds"), None);
+    let result = mds::compile(fixture("alias_no_unqualified.mds"), None);
     assert!(
         result.is_err(),
         "unqualified access after alias import should fail"
@@ -1074,7 +1074,7 @@ fn alias_import_no_unqualified_access() {
 #[test]
 fn export_from_no_local_scope() {
     // @export hello from "./greetings.mds" re-exports without local availability.
-    let result = mds::compile(&fixture("export_from_no_local.mds"), None);
+    let result = mds::compile(fixture("export_from_no_local.mds"), None);
     assert!(
         result.is_err(),
         "@export from should not make symbol available locally"
@@ -1093,7 +1093,7 @@ fn escaped_braces_in_function_body() {
     // Per spec and existing tests (multiple_escaped_braces): only \{ is an escape
     // sequence producing a literal '{'. The closing \} is plain text, rendered as \}.
     // So \{curly braces\} → "{curly braces\}" in output.
-    let result = mds::compile(&fixture("escaped_brace_in_fn.mds"), None).unwrap();
+    let result = mds::compile(fixture("escaped_brace_in_fn.mds"), None).unwrap();
     assert!(
         result.contains("{curly braces"),
         "escaped brace in function body should produce literal brace, got: {result}"
@@ -1111,7 +1111,7 @@ fn escaped_braces_in_blocks() {
     // Per spec and existing tests (multiple_escaped_braces): only \{ is an escape
     // sequence producing a literal '{'. The closing \} is plain text, rendered as \}.
     // So \{variable\} => "{variable\}" and \{item\} => "{item\}".
-    let result = mds::compile(&fixture("escaped_brace_in_blocks.mds"), None).unwrap();
+    let result = mds::compile(fixture("escaped_brace_in_blocks.mds"), None).unwrap();
     assert!(
         result.contains("{variable"),
         "escaped brace in @if body should produce literal brace, got: {result}"
@@ -1132,7 +1132,7 @@ fn escaped_braces_in_blocks() {
 fn duplicate_define_errors() {
     // NOTE: This test documents expected behavior (Spec: no duplicate function names).
     // If the compiler does not yet enforce this, this test will fail until the fix lands.
-    let result = mds::compile(&fixture("duplicate_define.mds"), None);
+    let result = mds::compile(fixture("duplicate_define.mds"), None);
     assert!(
         result.is_err(),
         "duplicate @define for same function name should be an error"
@@ -1150,7 +1150,7 @@ fn duplicate_define_errors() {
 fn include_empty_body_no_crash() {
     // @include of a module with only function definitions (no body text) should
     // produce an empty string for the include, not crash.
-    let result = mds::compile(&fixture("include_empty_body.mds"), None).unwrap();
+    let result = mds::compile(fixture("include_empty_body.mds"), None).unwrap();
     assert!(
         result.contains("Before"),
         "output should contain 'Before', got: {result}"
@@ -1262,7 +1262,7 @@ fn compile_file_returns_error_for_nonexistent_path() {
 
 #[test]
 fn circular_import_error_has_help_text() {
-    let result = mds::compile(&fixture("circular_a.mds"), None);
+    let result = mds::compile(fixture("circular_a.mds"), None);
     assert!(result.is_err(), "circular import should fail");
     let err = result.unwrap_err();
     let formatted = format!("{err:?}");
