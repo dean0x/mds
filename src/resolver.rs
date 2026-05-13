@@ -480,7 +480,7 @@ fn build_cycle_string(resolving_stack: &[PathBuf], repeated: &Path) -> String {
     let start = resolving_stack
         .iter()
         .position(|p| p == repeated)
-        .expect("repeated path must be in resolving_stack");
+        .unwrap_or(0);
     let mut parts: Vec<String> = resolving_stack[start..]
         .iter()
         .map(|p| path_display_name(p))
