@@ -506,4 +506,55 @@ mod tests {
             "Use {name} for interpolation"
         );
     }
+
+    // ── prefer_first_error: double-fault error-preservation behaviour ─────────
+
+    fn make_err(msg: &str) -> MdsError {
+        MdsError::syntax(msg.to_string())
+    }
+
+    #[test]
+    fn prefer_first_error_both_ok_returns_value() {
+        let result: Result<&str, MdsError> = prefer_first_error(Ok("hello"), Ok(()));
+        assert_eq!(result.unwrap(), "hello");
+    }
+
+    #[test]
+    fn prefer_first_error_first_err_wins_over_ok_second() {
+        // When the render (first) fails and secondary is Ok, the render error surfaces.
+        let result: Result<&str, MdsError> =
+            prefer_first_error(Err(make_err("render error")), Ok(()));
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("render error"),
+            "first error should be returned; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn prefer_first_error_first_err_wins_over_second_err() {
+        // Double-fault: both render and secondary fail. Render error takes precedence
+        // because it carries the actionable source-span diagnostic for the user.
+        let result: Result<&str, MdsError> = prefer_first_error(
+            Err(make_err("render error")),
+            Err(make_err("lifo error")),
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("render error"),
+            "render (first) error should win over lifo error in double-fault; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn prefer_first_error_ok_first_surfaces_second_err() {
+        // When render succeeds but the secondary (LIFO/pop) fails, the secondary error surfaces.
+        let result: Result<&str, MdsError> =
+            prefer_first_error(Ok("value"), Err(make_err("lifo error")));
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("lifo error"),
+            "secondary error should be returned when first is Ok; got: {msg}"
+        );
+    }
 }

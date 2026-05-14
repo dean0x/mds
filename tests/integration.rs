@@ -3104,3 +3104,71 @@ fn check_str_collecting_warnings_errors_on_invalid_source() {
         "check_str_collecting_warnings should return Err for undefined variable"
     );
 }
+
+// ── Security: mds.json output_dir path traversal ──────────────────────────────
+
+#[test]
+fn build_mds_json_output_dir_path_traversal_rejected() {
+    // mds.json with `output_dir` containing `..` components must be rejected
+    // by resolve_output_path to prevent writing files outside the project root.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("hello.mds");
+    std::fs::write(&src, "Hello!\n").unwrap();
+    std::fs::write(
+        dir.path().join("mds.json"),
+        r#"{"build": {"output_dir": "../escaped"}}"#,
+    )
+    .unwrap();
+
+    let output = mds_bin()
+        .arg("build")
+        .arg(&src)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "build with output_dir containing '..' must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("..") || stderr.contains("output_dir"),
+        "error should mention the traversal or output_dir, got: {stderr}"
+    );
+}
+
+// ── Security: mds.json config size limit ─────────────────────────────────────
+
+#[test]
+fn config_size_limit_rejects_oversized_mds_json() {
+    // mds.json files larger than MAX_CONFIG_SIZE (1 MB) must be rejected to
+    // prevent runaway memory use when walking up the directory tree.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("hello.mds");
+    std::fs::write(&src, "Hello!\n").unwrap();
+
+    // Build a JSON file just over 1 MB by padding the output_dir value.
+    let padding = "x".repeat(1024 * 1024);
+    let huge_config = format!(r#"{{"build": {{"output_dir": "{}"}}}}"#, padding);
+    std::fs::write(dir.path().join("mds.json"), &huge_config).unwrap();
+
+    let output = mds_bin()
+        .arg("build")
+        .arg(&src)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "build with oversized mds.json must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("too large") || stderr.contains("1 MB") || stderr.contains("mds.json"),
+        "error should mention config size limit, got: {stderr}"
+    );
+}

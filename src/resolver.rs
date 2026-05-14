@@ -519,8 +519,11 @@ struct CollectedDefs {
 struct ModuleCtx<'a> {
     /// Canonical display path of the source file (e.g. the path shown in error messages).
     file_str: &'a str,
+    /// Raw file content used for source-span diagnostics (offset → line/column lookup).
     source: &'a str,
+    /// Directory that contains the source file; used to resolve relative `@import` paths.
     base_dir: &'a Path,
+    /// Variables injected at call-time (e.g. via `--set` or the public API `compile` call).
     runtime_vars: &'a HashMap<String, Value>,
 }
 
