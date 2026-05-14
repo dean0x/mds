@@ -197,8 +197,15 @@ fn invoke_function(
         popped.as_deref() == Some(call_key),
         "call_stack LIFO invariant violated: expected '{call_key}' on top, got {popped:?}"
     );
-    scope.pop()?;
-    result
+    let pop_result = scope.pop();
+    // On double-fault (render error AND pop error), preserve the render
+    // error — pop failures are compiler bugs, but the render error carries
+    // the actionable source-span diagnostic for the user.
+    match (result, pop_result) {
+        (Err(render_err), _) => Err(render_err),
+        (Ok(_), Err(pop_err)) => Err(pop_err),
+        (Ok(s), Ok(())) => Ok(s),
+    }
 }
 
 fn call_function(

@@ -3076,7 +3076,7 @@ fn check_collecting_warnings_returns_warnings_for_empty_include() {
     let ((), warnings) = mds::check_collecting_warnings(&path, None)
         .expect("check_collecting_warnings should succeed on a valid file");
     assert!(
-        warnings.iter().any(|w| w.contains("empty output") || w.contains("fns")),
+        warnings.iter().any(|w| w.contains("empty output")),
         "expected at least one warning about empty @include, got: {warnings:?}"
     );
 }

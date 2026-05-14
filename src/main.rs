@@ -30,6 +30,9 @@ struct BuildConfig {
 ///
 /// The `config_dir` is the directory that *contains* `mds.json` — used to
 /// resolve relative `output_dir` values.
+/// Maximum allowed size for `mds.json` (1 MB) to prevent runaway memory use.
+const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
+
 fn load_config(
     start: &Path,
 ) -> std::result::Result<Option<(MdsConfig, PathBuf)>, miette::Error> {
@@ -48,8 +51,7 @@ fn load_config(
     for _ in 0..256 {
         let candidate = current.join("mds.json");
         if candidate.is_file() {
-            // Guard against maliciously large mds.json files (1 MB cap).
-            const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
+            // Guard against maliciously large mds.json files.
             let file_size = std::fs::metadata(&candidate)
                 .map(|m| m.len())
                 .unwrap_or(0);
@@ -119,17 +121,16 @@ fn resolve_output_path(
         None => {}
     }
 
+    // Derive the output filename from the input path (needed for steps 3-6).
+    // Treat stdin ("-") as None so we fall back to "output.md" instead of "-.md".
+    let input_path = input.as_deref().filter(|p| *p != Path::new("-"));
+
     // 3. Stdin input with no explicit output destination → stdout.
     //    But if --out-dir is set, fall through so the user's explicit CLI flag
     //    is honored (using "output.md" as the derived filename).
-    let is_stdin = matches!(input.as_deref(), Some(p) if p == Path::new("-"));
-    if is_stdin && out_dir.is_none() {
+    if input_path.is_none() && out_dir.is_none() {
         return Ok(None);
     }
-
-    // Derive the output filename from the input path (needed for steps 4-6).
-    // Treat stdin ("-") as None so we fall back to "output.md" instead of "-.md".
-    let input_path = input.as_deref().filter(|p| *p != Path::new("-"));
 
     // 4. `--out-dir <dir>`
     if let Some(dir) = out_dir {
