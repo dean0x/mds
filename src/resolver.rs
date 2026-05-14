@@ -60,13 +60,15 @@ impl ModuleCache {
         Self::default()
     }
 
-    /// Resolve a module from file path. Handles caching and cycle detection.
-    pub fn resolve(
+    /// Validate the path, read the file, and return `(source, canonical_path, is_md)`.
+    ///
+    /// Performs all security checks (symlink, depth, root_dir, size) and reads
+    /// the file content. `&mut self` is required to initialise `self.root_dir` on
+    /// the first call and to check `self.resolving` / `self.resolving_stack`.
+    fn validate_and_read_file(
         &mut self,
         path: &Path,
-        runtime_vars: &HashMap<String, Value>,
-        warnings: &mut Vec<String>,
-    ) -> Result<ResolvedModule, MdsError> {
+    ) -> Result<(String, PathBuf, bool), MdsError> {
         // Detect symlinks without a TOCTOU window by comparing the canonical path to
         // the path constructed from (canonical parent dir) + (original filename).
         //
@@ -110,17 +112,6 @@ impl ModuleCache {
             self.root_dir = Some(find_project_root(entry_dir));
         }
 
-        // Check cache
-        if let Some(cached) = self.modules.get(&canonical) {
-            return Ok(cached.clone());
-        }
-
-        // Check for circular imports
-        if self.resolving.contains(&canonical) {
-            let cycle = build_cycle_string(&self.resolving_stack, &canonical);
-            return Err(MdsError::circular_import(cycle));
-        }
-
         // Guard against excessively deep import chains
         if self.resolving.len() >= MAX_IMPORT_DEPTH {
             return Err(MdsError::import_error(format!(
@@ -154,12 +145,35 @@ impl ModuleCache {
             MdsError::io(format!("invalid UTF-8 in {}: {e}", canonical.display()))
         })?;
 
+        let is_md = canonical.extension().and_then(|e| e.to_str()) == Some("md");
+        Ok((source, canonical, is_md))
+    }
+
+    /// Resolve a module from file path. Handles caching and cycle detection.
+    pub fn resolve(
+        &mut self,
+        path: &Path,
+        runtime_vars: &HashMap<String, Value>,
+        warnings: &mut Vec<String>,
+    ) -> Result<ResolvedModule, MdsError> {
+        let (source, canonical, is_md) = self.validate_and_read_file(path)?;
+
+        // Check cache (after canonicalization, before cycle/depth checks that need &mut self)
+        if let Some(cached) = self.modules.get(&canonical) {
+            return Ok(cached.clone());
+        }
+
+        // Check for circular imports
+        if self.resolving.contains(&canonical) {
+            let cycle = build_cycle_string(&self.resolving_stack, &canonical);
+            return Err(MdsError::circular_import(cycle));
+        }
+
         // Validate file type (uses already-read source for .md frontmatter check)
         validate_file_type(&canonical, &source)?;
 
         let file_str = canonical.display().to_string();
         let base_dir = canonical.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let is_md = canonical.extension().and_then(|e| e.to_str()) == Some("md");
 
         // Mark as resolving before recursing into process_module
         self.resolving.insert(canonical.clone());
@@ -204,6 +218,8 @@ impl ModuleCache {
     }
 
     /// Common module processing: tokenize, parse, build scope, evaluate.
+    ///
+    /// Orchestrates the full pipeline in ~25 lines; detailed logic lives in helpers.
     fn process_module(
         &mut self,
         source: &str,
@@ -217,38 +233,55 @@ impl ModuleCache {
         let tokens = tokenize(source, file_str)?;
         let module = parse_with_ctx(&tokens, file_str, source)?;
 
-        // Build scope from frontmatter
-        let mut scope = Scope::new();
+        // Build scope from frontmatter + runtime vars
+        let mut scope = build_scope_from_frontmatter(module.frontmatter.as_ref(), is_md, runtime_vars)?;
 
-        if let Some(ref fm) = module.frontmatter {
-            let yaml_vars = parse_frontmatter(&fm.raw)?;
-            for (key, value) in yaml_vars {
-                if key == "type" && is_md {
-                    // Skip the 'type' meta-field for .md files (it's a file-type marker)
-                    continue;
-                }
-                scope.set_var(&key, value);
-            }
-        }
+        // Walk the AST: collect @define functions (with closure capture), process imports/exports
+        let ctx = ModuleCtx { file_str, source, base_dir, runtime_vars };
+        let (functions, has_explicit_exports, explicit_exports) = self
+            .collect_definitions_and_imports(&module.body, &mut scope, &ctx, warnings)?;
 
-        // Apply runtime vars (override frontmatter)
-        for (key, value) in runtime_vars {
-            scope.set_var(key, value.clone());
-        }
+        // Validate that all named exports refer to defined functions or "prompt"
+        validate_exports(&explicit_exports, &functions)?;
 
-        // Collect function definitions and process imports
-        let mut functions = HashMap::new();
+        // Validate semantic correctness before evaluation
+        validator::validate(&module.body, &scope, file_str, source)?;
+
+        // Evaluate the body to get prompt text
+        let prompt_body = evaluate(&module.body, &mut scope, warnings)?;
+        let prompt_body = (!prompt_body.trim().is_empty()).then_some(prompt_body);
+
+        Ok(ResolvedModule {
+            functions,
+            prompt_body,
+            has_explicit_exports,
+            explicit_exports,
+        })
+    }
+
+    /// Walk the AST body and collect `@define` functions (with closure capture),
+    /// process `@import` directives, and record `@export` / `@export...from` entries.
+    ///
+    /// Returns `(functions, has_explicit_exports, explicit_exports)`.
+    fn collect_definitions_and_imports(
+        &mut self,
+        body: &[Node],
+        scope: &mut Scope,
+        ctx: &ModuleCtx<'_>,
+        warnings: &mut Vec<String>,
+    ) -> Result<CollectedDefs, MdsError> {
+        let mut functions: HashMap<String, FunctionDef> = HashMap::new();
         let mut has_explicit_exports = false;
-        let mut explicit_exports = HashSet::new();
+        let mut explicit_exports: HashSet<String> = HashSet::new();
 
-        for node in &module.body {
+        for node in body {
             match node {
                 Node::Define(def) => {
                     if functions.contains_key(&def.name) {
                         return Err(MdsError::name_collision_at(
                             &def.name,
-                            file_str,
-                            source,
+                            ctx.file_str,
+                            ctx.source,
                             def.offset,
                             def.name.len(),
                         ));
@@ -267,11 +300,11 @@ impl ModuleCache {
                 Node::Import(import) => {
                     self.resolve_import(
                         import,
-                        base_dir,
-                        runtime_vars,
-                        &mut scope,
+                        ctx.base_dir,
+                        ctx.runtime_vars,
+                        scope,
                         warnings,
-                        (source, file_str),
+                        (ctx.source, ctx.file_str),
                     )?;
                 }
                 Node::Export(export) => {
@@ -288,9 +321,9 @@ impl ModuleCache {
                             // re-export only. Per spec: "@export from does not bring the
                             // symbol into the current file's scope".
                             validate_import_path(import_path)?;
-                            let resolved_path = resolve_path(base_dir, import_path);
+                            let resolved_path = resolve_path(ctx.base_dir, import_path);
                             let source_module =
-                                self.resolve(&resolved_path, runtime_vars, warnings)?;
+                                self.resolve(&resolved_path, ctx.runtime_vars, warnings)?;
                             let func =
                                 source_module.get_export(name).ok_or_else(|| {
                                     MdsError::export_error(format!(
@@ -304,9 +337,9 @@ impl ModuleCache {
                             // Re-export all exports from the target module. These are
                             // available to importers but NOT in the current file's scope.
                             validate_import_path(import_path)?;
-                            let resolved_path = resolve_path(base_dir, import_path);
+                            let resolved_path = resolve_path(ctx.base_dir, import_path);
                             let source_module =
-                                self.resolve(&resolved_path, runtime_vars, warnings)?;
+                                self.resolve(&resolved_path, ctx.runtime_vars, warnings)?;
                             for (name, func) in source_module.get_all_exports() {
                                 if functions.contains_key(&name) {
                                     return Err(MdsError::name_collision(name));
@@ -321,28 +354,7 @@ impl ModuleCache {
             }
         }
 
-        // Validate that all named exports refer to defined functions or "prompt"
-        for name in &explicit_exports {
-            if name != "prompt" && !functions.contains_key(name) {
-                return Err(MdsError::export_error(format!(
-                    "cannot export '{name}': not defined in this module"
-                )));
-            }
-        }
-
-        // Validate semantic correctness before evaluation
-        validator::validate(&module.body, &scope, file_str, source)?;
-
-        // Evaluate the body to get prompt text
-        let prompt_body = evaluate(&module.body, &mut scope, warnings)?;
-        let prompt_body = (!prompt_body.trim().is_empty()).then_some(prompt_body);
-
-        Ok(ResolvedModule {
-            functions,
-            prompt_body,
-            has_explicit_exports,
-            explicit_exports,
-        })
+        Ok((functions, has_explicit_exports, explicit_exports))
     }
 
     fn resolve_import(
@@ -477,6 +489,63 @@ impl ResolvedModule {
             prompt_body: self.prompt_body.clone(),
         }
     }
+}
+
+/// Collected output of the AST definition/import walk in `collect_definitions_and_imports`.
+type CollectedDefs = (HashMap<String, FunctionDef>, bool, HashSet<String>);
+
+/// Bundle of borrowed per-module context threaded through the AST walk helpers.
+struct ModuleCtx<'a> {
+    file_str: &'a str,
+    source: &'a str,
+    base_dir: &'a Path,
+    runtime_vars: &'a HashMap<String, Value>,
+}
+
+/// Build a scope from optional frontmatter and runtime variable overrides.
+///
+/// Parses frontmatter YAML (if present), populates scope with variables,
+/// then applies runtime_vars to override any frontmatter keys.
+/// The `type` key is skipped for `.md` files (it is a file-type marker, not a template var).
+fn build_scope_from_frontmatter(
+    frontmatter: Option<&crate::ast::Frontmatter>,
+    is_md: bool,
+    runtime_vars: &HashMap<String, Value>,
+) -> Result<Scope, MdsError> {
+    let mut scope = Scope::new();
+
+    if let Some(fm) = frontmatter {
+        let yaml_vars = parse_frontmatter(&fm.raw)?;
+        for (key, value) in yaml_vars {
+            if key == "type" && is_md {
+                // Skip the 'type' meta-field for .md files (it's a file-type marker)
+                continue;
+            }
+            scope.set_var(&key, value);
+        }
+    }
+
+    // Apply runtime vars (override frontmatter)
+    for (key, value) in runtime_vars {
+        scope.set_var(key, value.clone());
+    }
+
+    Ok(scope)
+}
+
+/// Validate that all named exports refer to defined functions or the special `"prompt"` export.
+fn validate_exports(
+    explicit_exports: &HashSet<String>,
+    functions: &HashMap<String, FunctionDef>,
+) -> Result<(), MdsError> {
+    for name in explicit_exports {
+        if name != "prompt" && !functions.contains_key(name) {
+            return Err(MdsError::export_error(format!(
+                "cannot export '{name}': not defined in this module"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve a relative path against a base directory.

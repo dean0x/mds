@@ -23,221 +23,348 @@ pub enum Token {
 
 /// Tokenize MDS source text into tokens.
 pub fn tokenize(source: &str, file: &str) -> Result<Vec<Token>, MdsError> {
-    let mut tokens = Vec::new();
-    let chars: Vec<char> = source.chars().collect();
-    // Build a mapping from char index to byte offset for correct str slicing.
-    let byte_offsets: Vec<usize> = source
-        .char_indices()
-        .map(|(byte_idx, _)| byte_idx)
-        .collect();
-    let mut pos = 0;
-    let mut code_fence_backticks: usize = 0;
+    Lexer::new(source, file).run()
+}
 
-    // Helper closure: get byte offset for a char position.
-    let byte_pos = |char_pos: usize| -> usize {
-        if char_pos >= byte_offsets.len() {
-            source.len()
-        } else {
-            byte_offsets[char_pos]
+/// Stateful lexer that converts MDS source text into a flat token stream.
+///
+/// `run()` is the only public entry point. Each `scan_*` method advances
+/// `self.pos` past the content it consumes and pushes tokens to `self.tokens`.
+struct Lexer<'a> {
+    source: &'a str,
+    file: &'a str,
+    chars: Vec<char>,
+    byte_offsets: Vec<usize>,
+    pos: usize,
+    tokens: Vec<Token>,
+    /// Non-zero when inside a fenced code block; holds the opening backtick count.
+    code_fence_backticks: usize,
+}
+
+impl<'a> Lexer<'a> {
+    fn new(source: &'a str, file: &'a str) -> Self {
+        let chars: Vec<char> = source.chars().collect();
+        // Build a mapping from char index to byte offset for correct str slicing.
+        let byte_offsets: Vec<usize> = source
+            .char_indices()
+            .map(|(byte_idx, _)| byte_idx)
+            .collect();
+        Self {
+            source,
+            file,
+            chars,
+            byte_offsets,
+            pos: 0,
+            tokens: Vec::new(),
+            code_fence_backticks: 0,
         }
-    };
+    }
 
-    // Check for frontmatter at the very start
-    if source.starts_with("---\n") || source.starts_with("---\r\n") {
-        tokens.push(Token::FrontmatterFence(0));
-        pos = skip_newline(&chars, 3);
+    /// Convert a char-index position to a byte offset into `self.source`.
+    fn byte_pos(&self, char_pos: usize) -> usize {
+        if char_pos >= self.byte_offsets.len() {
+            self.source.len()
+        } else {
+            self.byte_offsets[char_pos]
+        }
+    }
 
-        // Find closing ---
-        let fm_start = pos;
+    /// Return true when `self.pos` is at the start of a line.
+    fn is_line_start(&self) -> bool {
+        self.pos == 0 || self.chars[self.pos - 1] == '\n'
+    }
+
+    /// Scan a frontmatter block starting at position 0.
+    ///
+    /// Precondition: the source starts with `---\n` or `---\r\n`.
+    /// Advances `self.pos` past the closing `---` fence (including its newline).
+    fn scan_frontmatter(&mut self) -> Result<(), MdsError> {
+        self.tokens.push(Token::FrontmatterFence(0));
+        self.pos = skip_newline(&self.chars, 3);
+
+        let fm_start = self.pos;
         let mut found_close = false;
-        while pos < chars.len() {
-            // Check if current position starts a line with ---
-            if is_line_start_chars(&chars, pos) && source[byte_pos(pos)..].starts_with("---") {
-                let end_pos = pos + 3;
-                let at_end =
-                    end_pos >= chars.len() || chars[end_pos] == '\n' || chars[end_pos] == '\r';
+
+        while self.pos < self.chars.len() {
+            let bp = self.byte_pos(self.pos);
+            if is_line_start_chars(&self.chars, self.pos)
+                && self.source[bp..].starts_with("---")
+            {
+                let end_pos = self.pos + 3;
+                let at_end = end_pos >= self.chars.len()
+                    || self.chars[end_pos] == '\n'
+                    || self.chars[end_pos] == '\r';
                 if at_end {
                     // Strip \r for Windows line endings (\r\n) in frontmatter
-                    let content: String = chars[fm_start..pos]
+                    let content: String = self.chars[fm_start..self.pos]
                         .iter()
                         .filter(|&&c| c != '\r')
                         .collect();
-                    let fm_byte_offset = byte_pos(fm_start);
-                    tokens.push(Token::FrontmatterContent(content, fm_byte_offset));
-                    tokens.push(Token::FrontmatterFence(byte_pos(pos)));
-                    pos = skip_newline(&chars, end_pos);
+                    let fm_byte_offset = self.byte_pos(fm_start);
+                    self.tokens
+                        .push(Token::FrontmatterContent(content, fm_byte_offset));
+                    self.tokens
+                        .push(Token::FrontmatterFence(self.byte_pos(self.pos)));
+                    self.pos = skip_newline(&self.chars, end_pos);
                     found_close = true;
                     break;
                 }
             }
-            pos += 1;
+            self.pos += 1;
         }
+
         if !found_close {
             return Err(MdsError::syntax_at(
                 "unclosed frontmatter (missing closing ---)",
-                file,
-                source,
+                self.file,
+                self.source,
                 0,
                 3,
             ));
         }
+        Ok(())
     }
 
-    // Process rest of the file
-    while pos < chars.len() {
-        let bp = byte_pos(pos);
+    /// Scan a code fence (opening or closing ` ``` `).
+    ///
+    /// Returns `true` if a fence was processed and the caller should `continue`
+    /// the main dispatch loop. Returns `false` if this position is inside a code
+    /// block with fewer backticks than needed — the caller falls through to
+    /// `scan_code_content`.
+    fn scan_code_fence(&mut self) -> bool {
+        let bp = self.byte_pos(self.pos);
+        let (backtick_count, rest_is_close) = scan_fence(&self.chars, self.pos);
 
-        // Check for code fences (``` or more backticks)
-        if is_line_start_chars(&chars, pos) && source[bp..].starts_with("```") {
-            let (backtick_count, rest_is_close) = scan_fence(&chars, pos);
+        if self.code_fence_backticks == 0 {
+            // Opening fence — record the backtick count
+            let fence_start = bp;
+            self.pos += backtick_count;
+            let mut fence = "`".repeat(backtick_count);
+            // consume any remaining language tag characters
+            while self.pos < self.chars.len()
+                && self.chars[self.pos] != '\n'
+                && self.chars[self.pos] != '\r'
+            {
+                fence.push(self.chars[self.pos]);
+                self.pos += 1;
+            }
+            self.pos = skip_newline(&self.chars, self.pos);
+            self.code_fence_backticks = backtick_count;
+            self.tokens.push(Token::CodeFence(fence, fence_start));
+            true
+        } else if rest_is_close && backtick_count >= self.code_fence_backticks {
+            // Closing fence — must have >= opening backtick count, no non-space suffix
+            let fence_start = bp;
+            self.pos += backtick_count;
+            let fence = "`".repeat(backtick_count);
+            self.pos = skip_newline(&self.chars, self.pos);
+            self.code_fence_backticks = 0;
+            self.tokens.push(Token::CodeFence(fence, fence_start));
+            true
+        } else {
+            // Fewer backticks inside block — falls through to CodeContent
+            false
+        }
+    }
 
-            if code_fence_backticks == 0 {
-                // Opening fence — record the backtick count
-                let fence_start = byte_pos(pos);
-                pos += backtick_count;
-                let mut fence = "`".repeat(backtick_count);
-                // consume any remaining language tag characters
-                while pos < chars.len() && chars[pos] != '\n' && chars[pos] != '\r' {
-                    fence.push(chars[pos]);
-                    pos += 1;
+    /// Scan raw content inside a code block (no interpolation).
+    ///
+    /// Precondition: `self.code_fence_backticks > 0`.
+    /// Advances `self.pos` up to (but not past) the closing fence.
+    fn scan_code_content(&mut self) {
+        let start = self.byte_pos(self.pos);
+        let mut content = String::new();
+        while self.pos < self.chars.len() {
+            let bp = self.byte_pos(self.pos);
+            if is_line_start_chars(&self.chars, self.pos)
+                && self.source[bp..].starts_with("```")
+            {
+                let (bc, is_close) = scan_fence(&self.chars, self.pos);
+                if is_close && bc >= self.code_fence_backticks {
+                    break;
                 }
-                pos = skip_newline(&chars, pos);
-                code_fence_backticks = backtick_count;
-                tokens.push(Token::CodeFence(fence, fence_start));
-                continue;
-            } else if rest_is_close && backtick_count >= code_fence_backticks {
-                // Closing fence — must have >= the opening backtick count and no non-space suffix
-                let fence_start = byte_pos(pos);
-                pos += backtick_count;
-                let fence = "`".repeat(backtick_count);
-                pos = skip_newline(&chars, pos);
-                code_fence_backticks = 0;
-                tokens.push(Token::CodeFence(fence, fence_start));
-                continue;
             }
-            // else: falls through to CodeContent handling below (fewer backticks inside block)
+            content.push(self.chars[self.pos]);
+            self.pos += 1;
         }
-
-        if code_fence_backticks > 0 {
-            // Inside code block: no interpolation, just raw content
-            let start = byte_pos(pos);
-            let mut content = String::new();
-            while pos < chars.len() {
-                // Check for a potential closing code fence
-                if is_line_start_chars(&chars, pos) && source[byte_pos(pos)..].starts_with("```") {
-                    let (bc, is_close) = scan_fence(&chars, pos);
-                    if is_close && bc >= code_fence_backticks {
-                        break;
-                    }
-                }
-                content.push(chars[pos]);
-                pos += 1;
-            }
-            if !content.is_empty() {
-                tokens.push(Token::CodeContent(content, start));
-            }
-            continue;
+        if !content.is_empty() {
+            self.tokens.push(Token::CodeContent(content, start));
         }
+    }
 
-        // Check for @ directives at line start
-        if is_line_start_chars(&chars, pos) && chars[pos] == '@' {
-            let start = byte_pos(pos);
-            let mut line = String::new();
-            while pos < chars.len() && chars[pos] != '\n' {
-                line.push(chars[pos]);
-                pos += 1;
-            }
-            // consume newline
-            if pos < chars.len() && chars[pos] == '\n' {
-                pos += 1;
-            }
-            // Strip trailing \r for Windows line endings
-            let line = line.trim_end_matches('\r').to_string();
-            tokens.push(Token::Directive(line, start));
-            continue;
+    /// Scan an `@` directive at line start.
+    ///
+    /// Precondition: `self.is_line_start()` and `self.chars[self.pos] == '@'`.
+    /// Advances `self.pos` past the directive line including its newline.
+    fn scan_directive(&mut self) {
+        let start = self.byte_pos(self.pos);
+        let mut line = String::new();
+        while self.pos < self.chars.len() && self.chars[self.pos] != '\n' {
+            line.push(self.chars[self.pos]);
+            self.pos += 1;
         }
-
-        // Check for escaped open brace: `\{` → literal `{`
-        if pos + 1 < chars.len() && chars[pos] == '\\' && chars[pos + 1] == '{' {
-            tokens.push(Token::EscapedBrace(byte_pos(pos)));
-            pos += 2;
-            continue;
+        // consume newline
+        if self.pos < self.chars.len() && self.chars[self.pos] == '\n' {
+            self.pos += 1;
         }
+        // Strip trailing \r for Windows line endings
+        let line = line.trim_end_matches('\r').to_string();
+        self.tokens.push(Token::Directive(line, start));
+    }
 
-        // Check for escaped close brace: `\}` → literal `}` (symmetric with `\{`)
-        if pos + 1 < chars.len() && chars[pos] == '\\' && chars[pos + 1] == '}' {
-            tokens.push(Token::Text("}".to_string(), byte_pos(pos)));
-            pos += 2;
-            continue;
+    /// Scan a `\{` or `\}` escape sequence.
+    ///
+    /// Returns `true` and advances `self.pos` by 2 if an escape was found;
+    /// returns `false` otherwise (caller continues to next check).
+    fn scan_escape(&mut self) -> bool {
+        if self.pos + 1 >= self.chars.len() || self.chars[self.pos] != '\\' {
+            return false;
         }
+        let next = self.chars[self.pos + 1];
+        if next == '{' {
+            self.tokens.push(Token::EscapedBrace(self.byte_pos(self.pos)));
+            self.pos += 2;
+            true
+        } else if next == '}' {
+            self.tokens
+                .push(Token::Text("}".to_string(), self.byte_pos(self.pos)));
+            self.pos += 2;
+            true
+        } else {
+            false
+        }
+    }
 
-        // Check for interpolation
-        if chars[pos] == '{' {
-            let start = byte_pos(pos);
-            pos += 1; // skip {
-            let mut depth = 1;
-            let mut content = String::new();
-            while pos < chars.len() && depth > 0 {
-                if chars[pos] == '{' {
+    /// Scan a `{...}` interpolation with brace depth tracking.
+    ///
+    /// Precondition: `self.chars[self.pos] == '{'`.
+    /// Advances `self.pos` past the closing `}`.
+    fn scan_interpolation(&mut self) -> Result<(), MdsError> {
+        let start = self.byte_pos(self.pos);
+        self.pos += 1; // skip opening {
+        let mut depth = 1usize;
+        let mut content = String::new();
+        while self.pos < self.chars.len() && depth > 0 {
+            match self.chars[self.pos] {
+                '{' => {
                     depth += 1;
-                    content.push(chars[pos]);
-                } else if chars[pos] == '}' {
+                    content.push('{');
+                }
+                '}' => {
                     depth -= 1;
                     if depth > 0 {
-                        content.push(chars[pos]);
+                        content.push('}');
                     }
-                } else {
-                    content.push(chars[pos]);
                 }
-                pos += 1;
+                c => {
+                    content.push(c);
+                }
             }
-            if depth != 0 {
-                return Err(MdsError::syntax_at(
-                    "unclosed interpolation brace",
-                    file,
-                    source,
-                    start,
-                    1,
-                ));
-            }
-            tokens.push(Token::Interpolation(content.trim().to_string(), start));
-            continue;
+            self.pos += 1;
         }
+        if depth != 0 {
+            return Err(MdsError::syntax_at(
+                "unclosed interpolation brace",
+                self.file,
+                self.source,
+                start,
+                1,
+            ));
+        }
+        self.tokens
+            .push(Token::Interpolation(content.trim().to_string(), start));
+        Ok(())
+    }
 
-        // Regular text
-        let start = byte_pos(pos);
+    /// Scan regular text, stopping at any special character that begins another token.
+    ///
+    /// Advances `self.pos` past the accumulated text content.
+    fn scan_text(&mut self) {
+        let start = self.byte_pos(self.pos);
         let mut text = String::new();
-        while pos < chars.len() {
-            // Stop at interpolation, escaped braces, directive start, or code fence
-            if chars[pos] == '{' {
+        while self.pos < self.chars.len() {
+            let c = self.chars[self.pos];
+            // Stop at interpolation
+            if c == '{' {
                 break;
             }
-            if pos + 1 < chars.len() && chars[pos] == '\\' && chars[pos + 1] == '{' {
-                break;
+            // Stop at escape sequences
+            if c == '\\' && self.pos + 1 < self.chars.len() {
+                let next = self.chars[self.pos + 1];
+                if next == '{' || next == '}' {
+                    break;
+                }
             }
-            if pos + 1 < chars.len() && chars[pos] == '\\' && chars[pos + 1] == '}' {
-                break;
+            // Stop at directive or code fence at line start
+            if self.is_line_start() {
+                if c == '@' {
+                    break;
+                }
+                let bp = self.byte_pos(self.pos);
+                if self.source[bp..].starts_with("```") {
+                    break;
+                }
             }
-            if is_line_start_chars(&chars, pos) && chars[pos] == '@' {
-                break;
-            }
-            if is_line_start_chars(&chars, pos) && source[byte_pos(pos)..].starts_with("```") {
-                break;
-            }
-            text.push(chars[pos]);
-            pos += 1;
+            text.push(c);
+            self.pos += 1;
         }
         if !text.is_empty() {
-            tokens.push(Token::Text(text, start));
+            self.tokens.push(Token::Text(text, start));
         }
     }
 
-    // Check for unclosed code block
-    if code_fence_backticks > 0 {
-        return Err(MdsError::syntax("unclosed code fence"));
-    }
+    /// Main dispatch loop — drives the lexer to completion and returns all tokens.
+    fn run(mut self) -> Result<Vec<Token>, MdsError> {
+        // Check for frontmatter at the very start
+        if self.source.starts_with("---\n") || self.source.starts_with("---\r\n") {
+            self.scan_frontmatter()?;
+        }
 
-    Ok(tokens)
+        while self.pos < self.chars.len() {
+            let at_line_start = self.is_line_start();
+            let bp = self.byte_pos(self.pos);
+
+            // Code fence (opening or closing).
+            // `scan_code_fence` returns true when it consumed the fence; false means
+            // we are inside a block with fewer backticks and fall through to CodeContent.
+            if at_line_start && self.source[bp..].starts_with("```") && self.scan_code_fence() {
+                continue;
+            }
+
+            // Inside a code block: raw content only
+            if self.code_fence_backticks > 0 {
+                self.scan_code_content();
+                continue;
+            }
+
+            // @ directive at line start
+            if at_line_start && self.chars[self.pos] == '@' {
+                self.scan_directive();
+                continue;
+            }
+
+            // Escape sequences: `\{` and `\}`
+            if self.scan_escape() {
+                continue;
+            }
+
+            // Interpolation `{...}`
+            if self.chars[self.pos] == '{' {
+                self.scan_interpolation()?;
+                continue;
+            }
+
+            // Regular text
+            self.scan_text();
+        }
+
+        // Check for unclosed code block
+        if self.code_fence_backticks > 0 {
+            return Err(MdsError::syntax("unclosed code fence"));
+        }
+
+        Ok(self.tokens)
+    }
 }
 
 /// Check if the given char position is at the start of a line,
