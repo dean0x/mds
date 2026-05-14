@@ -149,6 +149,20 @@ fn resolve_args(
         .collect()
 }
 
+/// On multi-fault, prefer the first error over the second.
+///
+/// Used for double-fault scenarios (render error AND an internal pop/LIFO error):
+/// the render error carries the actionable source-span diagnostic for the user,
+/// while pop/LIFO failures are compiler bugs that surface as secondary errors.
+#[inline]
+fn prefer_first_error<T>(first: Result<T, MdsError>, second: Result<(), MdsError>) -> Result<T, MdsError> {
+    match (first, second) {
+        (Err(first_err), _) => Err(first_err),
+        (Ok(_), Err(second_err)) => Err(second_err),
+        (Ok(val), Ok(())) => Ok(val),
+    }
+}
+
 fn invoke_function(
     func: &FunctionDef,
     call_key: &str,
@@ -190,22 +204,21 @@ fn invoke_function(
     let result = evaluate_nodes(&func.body, scope, ctx);
     // Safety-critical LIFO invariant: call_stack tracks recursion detection.
     // A mismatched pop would silently corrupt recursion state and allow
-    // stack overflows. Enforce in release mode — cost is negligible at
-    // MAX_CALL_DEPTH = 128.
+    // stack overflows. Return a structured error rather than panicking so
+    // callers get a proper diagnostic instead of an opaque abort.
     let popped = ctx.call_stack.pop();
-    assert!(
-        popped.as_deref() == Some(call_key),
-        "call_stack LIFO invariant violated: expected '{call_key}' on top, got {popped:?}"
-    );
+    let lifo_result: Result<(), MdsError> = if popped.as_deref() == Some(call_key) {
+        Ok(())
+    } else {
+        Err(MdsError::syntax(format!(
+            "internal error: call_stack LIFO violated: expected '{call_key}', got {popped:?}"
+        )))
+    };
     let pop_result = scope.pop();
-    // On double-fault (render error AND pop error), preserve the render
-    // error — pop failures are compiler bugs, but the render error carries
-    // the actionable source-span diagnostic for the user.
-    match (result, pop_result) {
-        (Err(render_err), _) => Err(render_err),
-        (Ok(_), Err(pop_err)) => Err(pop_err),
-        (Ok(s), Ok(())) => Ok(s),
-    }
+    // On multi-fault, preserve the render error — it carries the actionable
+    // source-span diagnostic for the user. LIFO/pop failures are compiler
+    // bugs and surface as secondary errors.
+    prefer_first_error(result, lifo_result.and(pop_result))
 }
 
 fn call_function(
@@ -297,14 +310,7 @@ fn evaluate_for(
         scope.set_var(&block.var, item);
         let rendered = evaluate_nodes(&block.body, scope, ctx);
         let pop_result = scope.pop();
-        // On double-fault (render error AND pop error), preserve the render
-        // error — pop failures are compiler bugs, but the render error carries
-        // the actionable source-span diagnostic for the user.
-        match (rendered, pop_result) {
-            (Err(render_err), _) => return Err(render_err),
-            (Ok(_), Err(pop_err)) => return Err(pop_err),
-            (Ok(s), Ok(())) => output.push_str(&s),
-        }
+        output.push_str(&prefer_first_error(rendered, pop_result)?);
     }
 
     Ok(output)

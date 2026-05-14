@@ -22,6 +22,9 @@ struct BuildConfig {
     output_dir: Option<String>,
 }
 
+/// Maximum allowed size for `mds.json` (1 MB) to prevent runaway memory use.
+const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
+
 /// Walk up from `start` looking for `mds.json`.
 ///
 /// Returns `Ok(Some((config, config_dir)))` when found, `Ok(None)` when no
@@ -30,9 +33,6 @@ struct BuildConfig {
 ///
 /// The `config_dir` is the directory that *contains* `mds.json` — used to
 /// resolve relative `output_dir` values.
-/// Maximum allowed size for `mds.json` (1 MB) to prevent runaway memory use.
-const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
-
 fn load_config(
     start: &Path,
 ) -> std::result::Result<Option<(MdsConfig, PathBuf)>, miette::Error> {
@@ -100,6 +100,23 @@ fn derive_output_filename(input: &Path) -> OsString {
     name
 }
 
+/// Create `dir` (if absent) and return `dir/<derived-name>.md`.
+///
+/// `input_path` drives the filename: if `Some`, the stem is reused (e.g. `foo.mds` → `foo.md`);
+/// if `None` (stdin), the fallback name `output.md` is used.
+fn prepare_output_dir(
+    dir: &Path,
+    input_path: Option<&Path>,
+) -> std::result::Result<PathBuf, miette::Error> {
+    let filename = input_path
+        .map(derive_output_filename)
+        .unwrap_or_else(|| OsString::from("output.md"));
+    std::fs::create_dir_all(dir).map_err(|e| {
+        miette::miette!("cannot create output directory {}: {e}", dir.display())
+    })?;
+    Ok(dir.join(filename))
+}
+
 /// Resolve the output path according to the precedence chain:
 ///
 /// 1. `-o -`                         → stdout (returns `None`)
@@ -134,13 +151,7 @@ fn resolve_output_path(
 
     // 4. `--out-dir <dir>`
     if let Some(dir) = out_dir {
-        let filename = input_path
-            .map(derive_output_filename)
-            .unwrap_or_else(|| OsString::from("output.md"));
-        std::fs::create_dir_all(dir).map_err(|e| {
-            miette::miette!("cannot create output directory {}: {e}", dir.display())
-        })?;
-        return Ok(Some(dir.join(filename)));
+        return Ok(Some(prepare_output_dir(dir, input_path)?));
     }
 
     // 5. `mds.json` output_dir
@@ -159,13 +170,7 @@ fn resolve_output_path(
                 ));
             }
             let dir = config_dir.join(output_dir);
-            let filename = input_path
-                .map(derive_output_filename)
-                .unwrap_or_else(|| OsString::from("output.md"));
-            std::fs::create_dir_all(&dir).map_err(|e| {
-                miette::miette!("cannot create output directory {}: {e}", dir.display())
-            })?;
-            return Ok(Some(dir.join(filename)));
+            return Ok(Some(prepare_output_dir(&dir, input_path)?));
         }
     }
 
