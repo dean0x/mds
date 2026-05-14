@@ -1,7 +1,7 @@
 ---
 feature: mds-compiler
 name: MDS Compiler
-description: "Use when working on the MDS compilation pipeline, adding directives, modifying scope/variable handling, extending the module system, or debugging output rendering. Keywords: lexer, parser, evaluator, resolver, validator, scope, frontmatter, interpolation, directive, import, export, include, define, for, if, closure, lexical scope, prompt export, nested function calls, arg parsing, warnings, quiet mode, stdin, auto-detect, compile_file, reexport."
+description: "Use when working on the MDS compilation pipeline, adding directives, modifying scope/variable handling, extending the module system, debugging output rendering, or modifying CLI output behavior (file output, project config). Keywords: lexer, parser, evaluator, resolver, validator, scope, frontmatter, interpolation, directive, import, export, include, define, for, if, closure, lexical scope, prompt export, nested function calls, arg parsing, warnings, quiet mode, stdin, auto-detect, compile_file, reexport, EvalContext, CapturedScope, IndexSet, Arc, exit_code, mds.json, output_dir, out_dir, default output, file output, MdsConfig, BuildConfig, load_config, resolve_output_path, derive_output_filename."
 category: architecture
 directories: [src/, tests/]
 referencedFiles:
@@ -15,6 +15,7 @@ referencedFiles:
   - src/scope.rs
   - src/value.rs
   - src/error.rs
+  - src/main.rs
 created: 2026-05-12
 updated: 2026-05-14
 ---
@@ -56,13 +57,15 @@ All compile/check functions funnel through `ModuleCache::resolve` / `ModuleCache
 
 The CLI `build` and `check` commands both accept `-` as the input path to read from stdin, resolved against the current working directory for import paths. When the `input` argument is omitted entirely, both commands call `auto_detect_mds_file()` to scan the CWD for a single `.mds` file. If zero or multiple `.mds` files are found, a diagnostic error with hints is returned.
 
-External dependencies are minimal: `clap` for CLI parsing, `serde_json` and `serde_yaml` for frontmatter and runtime vars, `miette`/`thiserror` for rich diagnostic errors, `tempfile` in tests.
+External dependencies are minimal: `clap` for CLI parsing, `serde_json` and `serde_yaml` for frontmatter and runtime vars, `miette`/`thiserror` for rich diagnostic errors, `indexmap` for the cycle-detection `IndexSet`, `tempfile` in tests.
 
 ## Component Architecture
 
 ### Token Model (`src/lexer.rs`)
 
-The lexer converts raw source text into a flat `Vec<Token>`. Token variants cover the complete surface syntax:
+The lexer converts raw source text into a flat `Vec<Token>` via the public `tokenize(source, file)` function. Internally, this creates a `Lexer<'a>` struct and calls `.run()`. The `Lexer` struct encapsulates all mutable scanning state (`pos`, `tokens`, `code_fence_backticks`) and the pre-computed `chars: Vec<char>` and `byte_offsets: Vec<usize>` arrays. The monolithic loop has been decomposed into focused `scan_*` methods: `scan_frontmatter`, `scan_code_fence`, `scan_code_content`, `scan_directive`, `scan_escape`, `scan_interpolation`, `scan_text`. The public API (`tokenize`) is unchanged.
+
+Token variants cover the complete surface syntax:
 
 - `Text(String, usize)` — raw passthrough text with byte offset
 - `Interpolation(String, usize)` — inner content of `{...}` without braces
@@ -95,21 +98,36 @@ All non-text AST nodes carry a byte `offset` into the original source. This is t
 
 `Scope` is a stack of `Frame` structs (innermost last). Each frame holds:
 - `vars: HashMap<String, Value>` — variable bindings
-- `functions: HashMap<String, FunctionDef>` — `@define` functions
+- `functions: HashMap<String, Arc<FunctionDef>>` — `@define` functions stored as `Arc` for O(1) clone
 - `namespaces: HashMap<String, NamespaceScope>` — aliased imports (`@import "x" as ns`)
 
 Lookup always walks from innermost to outermost frame, enabling block-scoped shadowing. `push()`/`pop()` are called around `@for` iterations and function calls. `pop()` returns `Result<(), MdsError>` — it returns an error if called when only the global scope frame remains, surfacing mismatched push/pop as a compiler-bug diagnostic rather than a panic. All callers use `scope.pop()?`.
 
-`FunctionDef` carries three closure capture fields populated at definition time:
-- `captured_namespaces: HashMap<String, NamespaceScope>` — alias imports visible at definition site
-- `captured_functions: HashMap<String, FunctionDef>` — sibling functions at definition site
-- `captured_vars: HashMap<String, Value>` — frontmatter and other vars at definition site
+**`CapturedScope` struct** bundles the three closure capture fields that were previously separate fields on `FunctionDef`:
 
-These fields implement lexical scope: a function defined in module A that uses `{ns.fn()}` or `{sibling_fn()}` will work correctly when called from module B, which may not have those names in its scope.
+```rust
+// CapturedScope replaces three separate captured_* fields on FunctionDef.
+// functions is owned (not Arc) to avoid reference cycles between captured functions.
+pub struct CapturedScope {
+    pub namespaces: HashMap<String, NamespaceScope>,
+    pub functions: HashMap<String, FunctionDef>,  // owned, not Arc
+    pub vars: HashMap<String, Value>,
+}
 
-**`FunctionDef::from(&DefineBlock)`** creates a `FunctionDef` with all three captured fields as empty `HashMap`s. The resolver fills them in after construction by calling `scope.get_all_namespaces()`, `get_all_functions()`, and `get_all_vars()`. Never assume captures are populated immediately after `FunctionDef::from`.
+pub struct FunctionDef {
+    pub params: Vec<String>,
+    pub body: Vec<Node>,
+    pub captured: CapturedScope,  // single field, not captured_namespaces/captured_functions/captured_vars
+}
+```
 
-Helper methods `get_all_namespaces()`, `get_all_functions()`, `get_all_vars()` snapshot the current scope for closure capture at definition time. All three iterate **outer frame to inner frame**, so when the same key appears in multiple frames, the inner (more recently defined) value wins — preserving correct shadowing semantics in the captured snapshot.
+Key consequence: code that previously wrote `func.captured_namespaces = ...` now writes `func.captured.namespaces = ...`.
+
+`FunctionDef::from(&DefineBlock)` creates a `FunctionDef` with `captured: CapturedScope::default()` (all empty maps). The resolver fills `captured.namespaces`, `captured.functions`, and `captured.vars` after construction. Never assume captures are populated immediately after `FunctionDef::from`.
+
+**`Arc` in scope and modules**: `Frame::functions` and `NamespaceScope::functions` store `Arc<FunctionDef>`. `Scope::set_function` takes `Arc<FunctionDef>`; `get_function` returns `Option<&Arc<FunctionDef>>`. `CapturedScope::functions` stores owned `FunctionDef` (not `Arc`) to break potential reference cycles.
+
+Helper methods `get_all_namespaces()`, `get_all_functions()`, `get_all_vars()` snapshot the current scope for closure capture at definition time. All three iterate **outer frame to inner frame**, so when the same key appears in multiple frames, the inner (more recently defined) value wins. `get_all_functions()` returns `HashMap<String, Arc<FunctionDef>>` — callers that need owned captures must convert via `.map(|(k, v)| (k, (*v).clone()))`. All three delegate to the private `collect_all<T: Clone>(get: impl Fn(&Frame) -> &HashMap<String, T>)` method — to add a new `get_all_X()` for a new `Frame` field, add the field to `Frame` and call `self.collect_all(|f| &f.x)`.
 
 ### Value System (`src/value.rs`)
 
@@ -119,7 +137,7 @@ The `Value` enum has five variants: `String`, `Number(f64)`, `Boolean`, `Array(V
 
 Both `from_yaml` and `from_json` converters exist, with identical rejection of object/map types. `from_yaml` also handles `serde_yml::Value::Tagged` by unwrapping the tag and recursing.
 
-The `Value` enum implements `From` for common Rust types: `&str`, `String`, `f64`, `i64`, `i32`, `bool`, and `Vec<T: Into<Value>>`. Use these conversions in test setup and programmatic API code rather than constructing enum variants directly. The generic `Vec<T>` impl means `vec![1_i32, 2, 3].into()` produces `Value::Array`.
+The `Value` enum implements `From` for common Rust types: `&str`, `String`, `f64`, `i64`, `i32`, `bool`, and `Vec<T: Into<Value>>`. Use these conversions in test setup and programmatic API code rather than constructing enum variants directly.
 
 ### Parser (`src/parser.rs`)
 
@@ -158,7 +176,7 @@ The `arity_at` constructor provides source-span-aware arity errors from the vali
 
 ### Resolver (`src/resolver.rs`)
 
-The resolver is the orchestrator. `ModuleCache` drives the full pipeline for each file and caches `ResolvedModule` by canonical path, preventing repeated work and providing cycle detection.
+The resolver is the orchestrator. `ModuleCache` drives the full pipeline for each file and caches `Arc<ResolvedModule>` by canonical path, preventing repeated work and providing cycle detection.
 
 **Project root detection**: `find_project_root` walks up from the entry file's directory looking for `.git` or `.mdsroot` markers. The found root is stored in `ModuleCache::root_dir` on first resolve. All subsequently resolved paths must `starts_with(root_dir)` — this is the path traversal boundary.
 
@@ -169,32 +187,42 @@ The resolver is the orchestrator. `ModuleCache` drives the full pipeline for eac
 4. `MAX_IMPORT_DEPTH = 64` — rejects chains deeper than 64 levels
 5. `MAX_FILE_SIZE = 10MB` — rejects files over 10MB
 
-**Cycle detection** uses two parallel data structures:
-- `resolving: HashSet<PathBuf>` — O(1) membership test
-- `resolving_stack: Vec<PathBuf>` — insertion-ordered list for cycle path reconstruction (e.g., `a.mds → b.mds → a.mds`)
+**Cycle detection** uses `IndexSet<PathBuf>` (`indexmap` crate) — this single data structure replaces the previous `HashSet<PathBuf> + Vec<PathBuf>` pair (`resolving` + `resolving_stack`). `IndexSet` provides O(1) membership test (like `HashSet`) plus insertion-ordered iteration (like `Vec`), so it serves both purposes. `shift_remove` preserves insertion order of remaining elements when unmarking.
 
-`build_cycle_string` reconstructs the cycle path by finding the repeated path in `resolving_stack` using `.position(...).unwrap_or(0)`. The `.unwrap_or(0)` is a safe fallback: if for any reason the path is not found (which should not happen in normal operation), the cycle string starts from the beginning of the stack rather than panicking. A private `path_display_name` helper extracts the filename portion of each path for display in cycle strings, falling back to the full path or `"?"`.
+`build_cycle_string` reconstructs the cycle path by finding the repeated path in the `IndexSet`'s ordered sequence using `.position(...).unwrap_or(0)`. The `.unwrap_or(0)` is a safe fallback. A private `path_display_name` helper extracts the filename portion of each path for display in cycle strings.
 
-**`attach_import_span`**: When an import attempt fails, the private helper `attach_import_span` re-wraps certain span-less errors with the `@import` directive's source location. It handles two cases: `MdsError::FileNotFound { span: None, .. }` → `file_not_found_at(...)`, and `MdsError::CircularImport { cycle, span: None, .. }` → `circular_import_at(...)`. All other error variants pass through unchanged so cascading errors (e.g. a syntax error inside a circularly-imported file) still report their own source location.
+**`process_module` decomposition**: The previous monolithic `process_module` function has been split into focused helpers:
+- `build_scope_from_frontmatter(frontmatter, is_md, runtime_vars)` — free function; parses YAML, populates scope, applies runtime var overrides; skips `type` key for `.md` files
+- `collect_definitions_and_imports(body, scope, ctx, warnings)` — `ModuleCache` method; walks AST to register `@define` functions with closure capture, process `@import` and `@export` directives; returns `CollectedDefs`
+- `validate_exports(explicit_exports, functions)` — free function; checks every named export refers to a defined function or `"prompt"`
+- `validate_and_read_file(path)` — `ModuleCache` method; performs all security checks and reads file content
+- `attach_import_span(err, path, file_str, source, offset)` — free function; re-annotates `FileNotFound` and `CircularImport` errors (with no existing span) from recursive `resolve()` calls to point to the `@import` directive in the parent file; all other error variants are returned unchanged, preserving their own source locations so cascading errors (e.g. a circular import discovered inside the imported file) still report their correct origin
 
-**`process_module`** is the inner workhorse: it tokenizes, parses, builds scope from frontmatter + runtime vars, walks the AST to register functions (capturing closure scope) and resolve imports, validates, and evaluates. The result is a `ResolvedModule`. Warnings are threaded through as `&mut Vec<String>` from the public API all the way into `evaluate`.
+`process_module` itself is now a ~25-line orchestrator that calls these helpers in sequence.
+
+**`ModuleCtx` struct** bundles the borrowed per-module context threaded through AST walk helpers (`file_str`, `source`, `base_dir`, `runtime_vars`), reducing parameter lists.
+
+**`CollectedDefs` type alias**: `type CollectedDefs = (HashMap<String, Arc<FunctionDef>>, bool, HashSet<String>)` — the return type of `collect_definitions_and_imports`.
+
+**`Arc<ResolvedModule>`**: `ModuleCache::modules` stores `Arc<ResolvedModule>`. Both `resolve()` and `resolve_source()` return `Arc<ResolvedModule>`. Cache hits clone the `Arc` (O(1)); misses wrap the new `ResolvedModule` in `Arc::new(resolved)` then insert and return a clone.
 
 **`ResolvedModule`** fields:
-- `functions: HashMap<String, FunctionDef>` — all `@define`d functions (including re-exports)
+- `functions: HashMap<String, Arc<FunctionDef>>` — all `@define`d functions (including re-exports); stored as `Arc` for O(1) clone
 - `prompt_body: Option<String>` — rendered body text, or None if empty
 - `has_explicit_exports: bool` — true once any `@export` appears
 - `explicit_exports: HashSet<String>` — the explicitly listed export names
 
 **`ResolvedModule` methods**:
-- `get_export(name)` → `Option<FunctionDef>` — returns `None` if the module has explicit exports and `name` is not in the list; otherwise clones from `functions`
-- `get_all_exports()` → `Vec<(String, FunctionDef)>` — returns all exported (name, func) pairs, filtered by `explicit_exports` when present
+- `get_export(name)` → `Option<Arc<FunctionDef>>` — returns `None` if the module has explicit exports and `name` is not in the list; otherwise clones `Arc` from `functions`
+- `get_all_exports()` → `Vec<(String, Arc<FunctionDef>)>` — returns all exported (name, Arc) pairs, filtered by `explicit_exports` when present
 - `get_prompt_value()` — returns `prompt_body` as `Value::String` if it is an available export; `None` otherwise
+- `to_namespace()` — converts to `NamespaceScope`; respects export visibility for both `functions` and `prompt_body`
 
 **`prompt` as an export**: Any module with a non-empty body implicitly exports it as `prompt`, unless the module has explicit exports and `"prompt"` is not listed. Importers can bring in the body text:
 - `@import { prompt } from "./module.mds"` → binds body text to `prompt` variable
 - Merge import of a module with a body → `prompt` variable brought into scope
 
-**Export validation**: After collecting all `@export` directives, the resolver checks every named export either refers to a defined function or is the string `"prompt"`. Exporting an unknown name is a compile error. For re-exports (`@export name from "path"`), the source module is resolved first and `get_export(name)` is called — if `None`, an export error is returned immediately with a message mentioning the symbol and source path.
+**Export validation**: After collecting all `@export` directives, the resolver checks every named export either refers to a defined function or is the string `"prompt"`. Exporting an unknown name is a compile error. For re-exports (`@export name from "path"`), the source module is resolved first and `get_export(name)` is called — if `None`, an export error is returned immediately.
 
 **Import semantics**:
 - **Alias** (`@import "path" as ns`): resolved module becomes a `NamespaceScope` under `ns`; functions accessed as `{ns.fn(arg)}`
@@ -203,32 +231,44 @@ The resolver is the orchestrator. `ModuleCache` drives the full pipeline for eac
 
 **Re-export semantics** (`@export name from "path"`, `@export * from "path"`): The source module is resolved and its exports are added to the current module's `functions` map. They are NOT added to the current file's runtime scope — they are only available to modules that import the current module. If a named re-export target does not exist in the source module's exports, the error is raised at the re-export site (not at the consumer), with a message of the form `"cannot re-export '{name}': not exported from \"{path}\""`.
 
-**Closure capture**: When a `@define` node is processed, the resolver calls `FunctionDef::from(def)` (which creates empty captures), then immediately fills `func.captured_namespaces`, `func.captured_functions`, and `func.captured_vars` from the current scope state. This means a function sees the scope as it existed at its definition point, not at its call point.
+**Closure capture**: When a `@define` node is processed, the resolver calls `FunctionDef::from(def)` (which creates empty captures), then immediately fills `func.captured.namespaces`, `func.captured.functions`, and `func.captured.vars` from the current scope state. `captured.functions` is populated by converting `Arc<FunctionDef>` → owned `FunctionDef` (via `(*v).clone()`) to avoid reference cycles.
 
 ### Evaluator (`src/evaluator.rs`)
 
 The evaluator walks the AST and produces the final rendered string. Its public entry point is `evaluate(nodes, scope, warnings)` — the `warnings: &mut Vec<String>` parameter is threaded through all internal helpers including `evaluate_include`. Nothing in the evaluator calls `eprintln!` directly; all diagnostics go into the warnings vec.
 
-The evaluator carries a `call_stack: HashSet<String>` for recursion detection (error on self or mutual recursion) and enforces `MAX_CALL_DEPTH = 128` for deep chains.
+**`EvalContext` struct** bundles three mutable state fields that were previously threaded individually through every function signature:
 
-Five additional resource limits guard against runaway compilation:
+```rust
+pub(crate) struct EvalContext<'a> {
+    call_stack: Vec<String>,          // recursion detection (was HashSet<String>)
+    total_iterations: usize,          // cumulative @for iterations
+    warnings: &'a mut Vec<String>,    // non-fatal diagnostics
+}
+```
+
+`evaluate()` allocates an `EvalContext` and passes `&mut ctx` to `evaluate_nodes`. All internal functions that previously took `call_stack`, `total_iterations`, and `warnings` as separate parameters now take `ctx: &mut EvalContext`. The `warnings` field in `EvalContext` is the same `&mut Vec<String>` passed by the public `evaluate()` entry point — not a copy.
+
+`call_stack` is now `Vec<String>` (not `HashSet<String>`). Recursion detection uses `ctx.call_stack.iter().any(|s| s == call_key)` — O(n) scan at MAX_CALL_DEPTH=128, which is acceptable. The LIFO property is verified with `debug_assert!` after each call returns.
+
+Five resource limits guard against runaway compilation:
+- `MAX_CALL_DEPTH = 128` — prevents stack overflow from deeply nested function calls
 - `MAX_LOOP_ITERATIONS = 100,000` — enforced per `@for` loop; raising this by one over the limit triggers a `ResourceLimit` error at evaluation time
-- `MAX_TOTAL_ITERATIONS = 1,000,000` — cumulative across all loops in one compilation pass; nested loops that individually fit within the per-loop limit can still be rejected here
+- `MAX_TOTAL_ITERATIONS = 1,000,000` — cumulative across all loops in one compilation pass; nested loops that individually fit within the per-loop limit can still be rejected here; tracked via `ctx.total_iterations`
 - `MAX_OUTPUT_SIZE = 50 MB` — checked after each node renders; returning `ResourceLimit` the moment the buffer exceeds this size rather than at the end
-- `MAX_VALUE_DEPTH = 64` — enforced inside `Value::from_yaml` / `Value::from_json` via depth-tracking inner helpers, rejecting deeply nested YAML/JSON trees before they enter the pipeline
 - `MAX_WARNINGS = 1,000` — once the warnings vec reaches this size, `evaluate_include` silently skips further pushes; prevents unbounded vec growth from templates with many empty `@include` directives
 
-All four limits return `MdsError::ResourceLimit` (no source span). If you add a warning-emitting path or a new iterable node, thread `total_iterations: &mut usize` through the call chain so the cumulative limit is respected.
+All limits return `MdsError::ResourceLimit` (no source span). If you add a warning-emitting path or a new iterable node, pass `ctx` through so `total_iterations` and `warnings` are respected.
 
-**`Node::Define` in the evaluator**: The evaluator's `Node::Define` arm is a deliberate no-op — the implementation contains only `// Handled by resolver with full lexical capture`. All function registration (including closure capture into `captured_namespaces`, `captured_functions`, `captured_vars`) happens in the resolver's pre-evaluation AST walk. The evaluator skips `@define` nodes entirely, relying on the scope the resolver built. The resolver's pre-evaluation pass is therefore load-bearing for all function calls, including cross-module ones.
+**`Node::Define` in the evaluator**: The evaluator's `Node::Define` arm is a deliberate no-op — the implementation contains only `// Handled by resolver with full lexical capture`. All function registration (including closure capture into `captured.namespaces`, `captured.functions`, `captured.vars`) happens in the resolver's pre-evaluation AST walk. The evaluator skips `@define` nodes entirely, relying on the scope the resolver built. The resolver's pre-evaluation pass is therefore load-bearing for all function calls, including cross-module ones.
 
-`invoke_function` restores the function's captured closure scope (namespaces, functions, vars) before binding parameters, so params shadow captured vars correctly. After evaluation the pushed frame is popped.
+`invoke_function` restores the function's captured closure scope from `func.captured` before binding parameters, so params shadow captured vars correctly. It accesses `func.captured.namespaces`, `func.captured.functions` (wrapped in `Arc::new(f.clone())` for scope insertion), and `func.captured.vars`. After evaluation the pushed frame is popped.
 
-**`resolve_args` signature**: `resolve_args(args: &[Arg], scope: &mut Scope, call_stack: &mut HashSet<String>, total_iterations: &mut usize, warnings: &mut Vec<String>, depth: usize) -> Result<Vec<Value>, MdsError>`. The `call_stack` and `warnings` parameters are threaded so `Arg::Call` can invoke `call_function` during argument resolution. `depth` tracks argument expression nesting and is checked against `MAX_CALL_DEPTH` to prevent unbounded recursion through argument nesting alone. `total_iterations` is passed so any `@for` loops that execute inside argument-evaluated functions contribute to the cumulative iteration limit. This is the key wiring that makes nested calls work at evaluation time.
+**`resolve_args` signature**: `resolve_args(args: &[Arg], scope: &mut Scope, ctx: &mut EvalContext, depth: usize) -> Result<Vec<Value>, MdsError>`. The `ctx` parameter carries `call_stack` and `warnings` so `Arg::Call` can invoke `call_function` during argument resolution. `depth` tracks argument expression nesting and is checked against `MAX_CALL_DEPTH` to prevent unbounded recursion through argument nesting alone.
 
 The `Arg::Call` arm in `resolve_args` recursively calls `resolve_args` for inner args, then `call_function` for the nested invocation, wrapping the `String` result in `Value::String`. This means the result of a nested call is always a `String` value regardless of what the inner function produces.
 
-`@include alias` looks up the aliased module's `prompt_body` from the namespace and injects it inline. If the included module has no body text, `evaluate_include` pushes a warning message to `warnings` (not `eprintln!`) and returns an empty string.
+`@include alias` looks up the aliased module's `prompt_body` from the namespace and injects it inline. If the included module has no body text, `evaluate_include` pushes a warning message to `ctx.warnings` (not `eprintln!`) and returns an empty string.
 
 `@import` and `@export` nodes are no-ops in the evaluator (handled entirely by the resolver).
 
@@ -240,19 +280,20 @@ The data flow is:
 source text
   → lexer::tokenize()  → Vec<Token>
   → parser::parse()    → Module (AST)
-  → resolver: scope built from frontmatter + runtime_vars
-  → resolver: imports resolved recursively (ModuleCache)
-    → closure scope captured into FunctionDef.captured_*
+  → resolver: scope built from frontmatter + runtime_vars  (build_scope_from_frontmatter)
+  → resolver: imports resolved recursively (ModuleCache)   (collect_definitions_and_imports)
+    → closure scope captured into FunctionDef.captured.*
+  → resolver: export names validated                       (validate_exports)
   → validator::validate()  (uses scope snapshot)
-  → evaluator::evaluate(&mut warnings)  → String (raw prompt body)
+  → evaluator::evaluate(&mut warnings) via EvalContext     → String (raw prompt body)
   → lib::clean_output()    → final Markdown string
 ```
 
-**Warning propagation**: the `warnings: &mut Vec<String>` vector is allocated in the public API function and passed all the way through `ModuleCache::resolve` → `process_module` → `evaluate` → `evaluate_nodes` → `evaluate_include`. After the pipeline completes, the calling code decides whether to print them (via `emit_warnings`) or return them to the caller (via `compile_collecting_warnings`).
+**Warning propagation**: the `warnings: &mut Vec<String>` vector is allocated in the public API function and passed all the way through `ModuleCache::resolve` → `process_module` → `evaluate` → inside evaluator as `ctx.warnings`. After the pipeline completes, the calling code decides whether to print them (via `emit_warnings`) or return them to the caller (via `compile_collecting_warnings`).
 
-Runtime variables override frontmatter: in `process_module`, frontmatter vars are loaded first, then runtime vars overwrite any key that appears in both. This means `--vars` JSON and `--set KEY=VAL` always win over template defaults.
+Runtime variables override frontmatter: in `build_scope_from_frontmatter`, frontmatter vars are loaded first, then runtime vars overwrite any key that appears in both. This means `--vars` JSON and `--set KEY=VAL` always win over template defaults.
 
-The `ModuleCache` is created per top-level compile call (not shared across calls). Each entry in `modules` is a `ResolvedModule` clone — the resolver owns the cache and clones out of it on cache hits.
+The `ModuleCache` is created per top-level compile call (not shared across calls). Each entry in `modules` is an `Arc<ResolvedModule>` — cache hits clone the Arc (O(1)) rather than cloning the full struct.
 
 ## Integration Patterns
 
@@ -262,8 +303,8 @@ The `ModuleCache` is created per top-level compile call (not shared across calls
 2. Lex: directives are already captured as `Token::Directive` — no lexer change required unless new syntax (e.g., new brace-form)
 3. Parse: add a branch in `Parser::parse_directive()` matching the `@name` prefix; validate identifier names with `is_valid_identifier()`
 4. Validate: add a match arm in `validate_node()` — validate what the resolver can't catch
-5. Resolve: if the directive requires file I/O (import-like), handle it in `process_module`'s AST walk
-6. Evaluate: add a match arm in `evaluate_nodes()` — if the directive can emit warnings, accept and forward `warnings: &mut Vec<String>`; `Import`/`Export` stay as no-ops there
+5. Resolve: if the directive requires file I/O (import-like), handle it in `collect_definitions_and_imports`; if it only builds scope, handle it in `build_scope_from_frontmatter` or a new helper
+6. Evaluate: add a match arm in `evaluate_nodes()` — if the directive can emit warnings, accept and forward via `ctx.warnings`; `Import`/`Export` stay as no-ops there
 7. Add integration test fixture in `tests/fixtures/` and a test in `tests/integration.rs`
 
 ### Adding a New Arg Variant
@@ -279,6 +320,8 @@ Failing to update any one of these produces an incomplete `match` compilation er
 
 Any code that needs to emit a non-fatal diagnostic must accept `warnings: &mut Vec<String>` and push to it. Never call `eprintln!` from evaluator, resolver, or library code. The CLI controls whether to print warnings based on the `--quiet` flag.
 
+Inside the evaluator, warnings are accessed via `ctx.warnings`. When writing new evaluator helpers, accept `ctx: &mut EvalContext` rather than separate parameters for `call_stack`, `total_iterations`, and `warnings`.
+
 The two-tier API pattern in `lib.rs`:
 - `compile(path, vars)` — internal convenience that calls `compile_collecting_warnings` then `emit_warnings`
 - `compile_collecting_warnings(path, vars)` — returns `(String, Vec<String>)` — use this when the caller needs to gate warning output (e.g., the CLI's quiet mode)
@@ -287,13 +330,12 @@ The two-tier API pattern in `lib.rs`:
 
 ### Error Reporting Pattern
 
-All errors are `MdsError` variants (thiserror + miette). The key improvement in recent changes: `CircularImport`, `Recursion`, and `TypeError` variants now carry `help(...)` diagnostic attributes, so `miette` renders actionable hints alongside the error message automatically. No code change needed at call sites — the hint is embedded in the variant definition.
+All errors are `MdsError` variants (thiserror + miette). `CircularImport`, `Recursion`, and `TypeError` variants carry `help(...)` diagnostic attributes, so `miette` renders actionable hints alongside the error message automatically.
 
 For errors with source location, use the `_at` constructor variants:
 
 ```rust
 // Use _at variants to attach a miette SourceSpan — provides file + line in error output.
-// `file` = canonical path string, `source` = full source text, `offset`/`len` = byte range.
 MdsError::syntax_at(message, file, source, offset, len)
 MdsError::undefined_var_at(name, file, source, offset, len)
 MdsError::undefined_fn_at(name, file, source, offset, len)
@@ -307,24 +349,27 @@ MdsError::export_error_at(message, file, source, offset, len)
 MdsError::circular_import_at(cycle, file, source, offset, len)
 
 // Use bare variants only when source context is unavailable.
-MdsError::syntax(message)
-MdsError::undefined_var(name)
-MdsError::undefined_fn(name)
-MdsError::name_collision(name)
-MdsError::file_not_found(path)
-MdsError::arity(name, expected, got)
-MdsError::type_error(got)
-MdsError::recursion(name)
-MdsError::import_error(message)
-MdsError::export_error(message)
-MdsError::circular_import(cycle)
+MdsError::file_not_found(path)  // etc.
 ```
 
-All major error variants now have `_at` constructor methods. Always prefer `_at` variants inside the validator and evaluator where source offsets are available from the AST nodes. The validator uses `type_error_at` for `@for` iterable type errors; the resolver uses `circular_import_at` and `file_not_found_at` via `attach_import_span`.
+Always prefer `_at` variants inside the validator and evaluator where source offsets are available from the AST nodes.
+
+### CLI Exit Codes
+
+The `exit_code(err: &miette::Error) -> i32` function in `src/main.rs` maps errors to structured exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Logical/syntax error (undefined variable, arity mismatch, recursion, etc.) |
+| 2 | I/O or filesystem error (`MdsError::Io`, `FileNotFound`, `NotMdsFile`) |
+| 3 | Resource limit exceeded (`MdsError::ResourceLimit`) |
+
+`exit_code` downcasts via `err.downcast_ref::<MdsError>()`. Errors created with `miette::miette!()` in `main.rs` do NOT downcast to `MdsError` and fall through to exit code 1. Both `Build` and `Check` commands call `process::exit(exit_code(&e))` on failure. When adding new error categories, update `exit_code` first.
 
 ### Adding a New Value Type
 
-Currently blocked by design: `Value::from_yaml` and `Value::from_json` both return `Err` for object/map types. Any new value variant must be added to both converters, to `Value::Display`, `Value::is_truthy`, `Value::type_name`, and `Value::as_array` (if relevant). Tests for display edge cases (especially large numbers) exist in `src/value.rs`. When writing tests for numeric values, avoid `3.14` (clippy `approx_constant` lint) — use values like `2.5` instead.
+Currently blocked by design: `Value::from_yaml` and `Value::from_json` both return `Err` for object/map types. Any new value variant must be added to both converters, to `Value::Display`, `Value::is_truthy`, `Value::type_name`, and `Value::as_array` (if relevant). When writing tests for numeric values, avoid `3.14` (clippy `approx_constant` lint) — use values like `2.5` instead.
 
 ### CLI Auto-Detection
 
@@ -335,93 +380,147 @@ The `auto_detect_mds_file()` function in `src/main.rs` scans the current working
 
 Both `Build` and `Check` commands use `input: Option<PathBuf>`. When `None`, they call `auto_detect_mds_file()`. `Build` additionally prints `"Building {path}"` to stderr (unless `--quiet`) when auto-detecting, so users know which file was selected.
 
+### CLI Output Destination (`mds build`)
+
+`mds build` writes to a file by default — it no longer prints to stdout unless explicitly requested. The output path is determined by `resolve_output_path()` using a 6-step precedence chain:
+
+| Priority | Condition | Result |
+|---|---|---|
+| 1 | `-o -` | stdout (`None`) |
+| 2 | `-o <path>` | that exact path |
+| 3 | stdin (`-`) with no `-o` or `--out-dir` | stdout (`None`) |
+| 4 | `--out-dir <dir>` | `<dir>/<stem>.md` (directory created if needed) |
+| 5 | `mds.json` with `build.output_dir` | `<config_dir>/<output_dir>/<stem>.md` (dir created) |
+| 6 | Default | `<source_dir>/<stem>.md` next to the source file |
+
+`-o` and `--out-dir` are mutually exclusive (enforced by clap `conflicts_with`). The `Build` struct holds `output: Option<String>` (not `Option<PathBuf>`) so the literal string `"-"` can be detected before path resolution.
+
+**`derive_output_filename(input: &Path) -> OsString`** extracts the file stem and appends `.md`. `foo.mds` → `foo.md`, `foo.bar.mds` → `foo.bar.md`, `README` (no extension) → `README.md`, any other extension → stem + `.md`. For stdin (`-` input), the stem would be `-` so `resolve_output_path` filters it out and uses `"output.md"` as the fallback name.
+
+When `output_path` is `Some(path)`, the build handler creates any missing parent directories with `fs::create_dir_all` and then calls `fs::write`. On success, it prints `"Compiled to {path}"` to stderr (unless `--quiet`). When `output_path` is `None`, it calls `print!("{compiled}")` to stdout without a trailing newline.
+
+### Project Config (`mds.json`)
+
+`load_config(start: &Path) -> Result<Option<(MdsConfig, PathBuf)>, miette::Error>` walks up the directory tree from the input file's parent, looking for `mds.json`. The walk is capped at 256 iterations. On finding the file, it deserializes with `serde_json` and returns both the config and the **directory that contains `mds.json`** — the config directory is stored alongside the config because `output_dir` values in `mds.json` are resolved relative to that directory, not the input file's directory.
+
+The config structures are:
+
+```rust
+// Both structs derive Default so missing keys are silently ignored.
+#[derive(Debug, Default, Deserialize)]
+struct MdsConfig {
+    #[serde(default)]
+    build: BuildConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BuildConfig {
+    output_dir: Option<String>,  // relative path from mds.json's directory
+}
+```
+
+Key behaviors:
+- `{}` (empty JSON object) is valid — all fields are `Option` or have `#[serde(default)]`; falls back to default output (file next to source)
+- Invalid JSON produces a hard error immediately before compilation
+- Discovery walks upward, so `mds.json` in a parent directory applies to all files in subdirectories
+- `output_dir` is resolved relative to the `mds.json` location, not the source file location
+- CLI flags (`-o`, `--out-dir`) always override `mds.json` (steps 1-4 in the precedence chain take priority)
+
 ## Constraints
 
 - **Import paths must be relative** — `validate_import_path` rejects non-relative paths (must start with `./` or `../`) and null bytes. Runs before any filesystem access.
-- **Symlinks rejected** — `ModuleCache::resolve` detects symlinks in the final path component by comparing `canonical_parent.join(raw_filename)` vs the fully-resolved path. If they differ, returns `ImportError` before reading the file. Runs before the `root_dir` and file-read steps.
+- **Symlinks rejected** — `ModuleCache::validate_and_read_file` detects symlinks in the final path component by comparing `canonical_parent.join(raw_filename)` vs the fully-resolved path. If they differ, returns `ImportError` before reading the file.
 - **Path traversal prevention** — resolved import paths must remain within the project root (detected via `.git`/`.mdsroot` walk-up from entry file directory).
-- **MAX_IMPORT_DEPTH = 64** — prevents stack overflow from deep chains (separate from circular import detection).
+- **MAX_IMPORT_DEPTH = 64** — prevents stack overflow from deep chains (separate from circular import detection); tracked via `IndexSet::len()` on the single `resolving` field.
 - **MAX_FILE_SIZE = 10MB** — checked before reading; prevents memory exhaustion from large inputs.
-- **MAX_CALL_DEPTH = 128** — prevents stack overflow from deeply nested function calls.
+- **MAX_CALL_DEPTH = 128** — prevents stack overflow from deeply nested function calls; tracked via `ctx.call_stack.len()`.
 - **MAX_NESTING_DEPTH = 256** — shared constant used for two distinct limits: parser-level block nesting (`@if`/`@for`/`@define`) via `enter_block()`, and argument-level nested call depth via `parse_args_inner`.
-- **MAX_LOOP_ITERATIONS = 100,000** — per-loop hard cap in the evaluator; `@for` over an array larger than this fails with `ResourceLimit`.
-- **MAX_TOTAL_ITERATIONS = 1,000,000** — cumulative cap across all loops in one compilation; nested loops can trigger this even when each is under the per-loop cap.
-- **MAX_OUTPUT_SIZE = 50 MB** — evaluator checks output buffer size after each node; exceeding it returns `ResourceLimit` immediately.
+- **MAX_LOOP_ITERATIONS = 100,000** — per-loop hard cap in the evaluator.
+- **MAX_TOTAL_ITERATIONS = 1,000,000** — cumulative cap across all loops in one compilation; tracked via `ctx.total_iterations`.
+- **MAX_OUTPUT_SIZE = 50 MB** — evaluator checks output buffer size after each node.
 - **MAX_VALUE_DEPTH = 64** — `Value::from_yaml` / `Value::from_json` reject YAML sequences or JSON arrays nested deeper than 64 levels.
 - **Object types unsupported** — YAML mappings and JSON objects are rejected at the value conversion layer.
 - **`.md` files require `type: mds`** in frontmatter to be compiled — `validate_file_type` enforces this.
-- **Recursion is detected at evaluation time** using the call stack set — the validator cannot catch recursive call chains because they depend on runtime scope.
+- **Recursion is detected at evaluation time** using `ctx.call_stack` — the validator cannot catch recursive call chains because they depend on runtime scope.
 - **Nested call result is always a String** — `Arg::Call` evaluation wraps the inner function's output in `Value::String`. Functions that return non-string values (e.g., future numeric functions) will still produce a string when used as a nested argument.
+- **`load_config` walk is capped at 256 iterations** — prevents unbounded traversal on unusual filesystems.
 
 ## Anti-Patterns
 
-- **Calling `eprintln!` from evaluator or resolver code** — all non-fatal diagnostics must go through the `warnings: &mut Vec<String>` parameter. Direct stderr output bypasses the quiet flag and makes the warnings un-testable.
+- **Calling `eprintln!` from evaluator or resolver code** — all non-fatal diagnostics must go through `ctx.warnings` (in the evaluator) or `warnings: &mut Vec<String>` (in the resolver). Direct stderr output bypasses the quiet flag and makes the warnings un-testable.
 - **Calling `evaluate` before `validate`** — the evaluator trusts that all references exist; skipping validation will produce misleading errors at evaluation rather than rich span-aware diagnostics.
 - **Resolving imports in the evaluator** — imports must be resolved before evaluation so scope is complete when `validate` runs. Adding import-like behavior in the evaluator breaks this order.
 - **Creating `ModuleCache` per-module instead of per-compile** — the cache is the only thing preventing re-parsing the same file dozens of times. Each `compile()` / `compile_str_with()` call creates exactly one cache.
 - **Using bare `MdsError::syntax(msg)` when source context is available** — always prefer `syntax_at` when you have an offset and source string.
 - **Adding object/map support without updating all Value methods** — `from_yaml`, `from_json`, `Display`, `is_truthy`, `type_name`, and `as_array` must all be consistent.
-- **Forgetting to capture closure scope in new definition-like directives** — any directive that defines a callable entity should call `scope.get_all_namespaces()`, `get_all_functions()`, and `get_all_vars()` at definition time so the callable works correctly when invoked from other modules. Remember that `FunctionDef::from` always produces empty captures — the resolver must fill them.
-- **Adding functions to `process_module`'s scope without also capturing current scope into the FunctionDef** — if you add a function to scope after other functions are already captured, the previously captured siblings won't see the new function.
+- **Forgetting to capture closure scope in new definition-like directives** — any directive that defines a callable entity should call `scope.get_all_namespaces()`, `scope.get_all_functions()`, and `scope.get_all_vars()` at definition time so the callable works correctly when invoked from other modules. Remember that `FunctionDef::from` always produces `captured: CapturedScope::default()` — the resolver must fill the captures.
+- **Adding functions to scope without also capturing current scope into the FunctionDef** — if you add a function to scope after other functions are already captured, the previously captured siblings won't see the new function.
 - **Adding a new `Arg` variant without updating all three match sites** — parser (`parse_single_arg_inner`), evaluator (`resolve_args`), and validator (`validate_var_args`) all pattern-match exhaustively on `Arg`. Adding a variant without updating all three will produce a compile error, which is by design.
-- **Passing `resolve_args` without `call_stack` or `warnings`** — nested `Arg::Call` evaluation requires the call stack for recursion detection and warnings for diagnostics. Any future refactor that removes these from `resolve_args` will silently allow unbounded recursion through argument nesting or lose warning context.
-- **Using `compile` instead of `compile_collecting_warnings` in CLI code** — the CLI must use the collecting variants to properly gate warning output on the `--quiet` flag. The same applies to validation: use `check_collecting_warnings` / `check_str_collecting_warnings` rather than `check` / `check_str` when the caller needs to control warning output.
-- **Duplicating `base_dir` fallback logic in new string-based API functions** — always call `resolve_base_dir(base_dir)` rather than inlining the `current_dir()` fallback. The function also maps the IO error to `MdsError::Io`, which inline code tends to omit.
-- **Calling `get_all_exports()` and expecting a `HashMap`** — `ResolvedModule::get_all_exports()` returns `Vec<(String, FunctionDef)>`, not a `HashMap`. Callers that need map-like access must collect explicitly.
+- **Passing separate `call_stack`/`warnings` instead of `ctx` to evaluator helpers** — all evaluator internal functions now take `ctx: &mut EvalContext`. Refactoring a helper to accept separate params breaks the invariant that all three fields move together.
+- **Using `compile` instead of `compile_collecting_warnings` in CLI code** — the CLI must use the collecting variants to properly gate warning output on the `--quiet` flag. The same applies to validation: use `check_collecting_warnings` rather than `check` when the caller needs to control warning output. The `check` command previously used the non-collecting variant, which silently discarded warnings; this was fixed so `check` respects `--quiet`.
+- **Duplicating `base_dir` fallback logic in new string-based API functions** — always call `resolve_base_dir(base_dir)` rather than inlining the `current_dir()` fallback.
+- **Calling `get_all_exports()` and expecting a `HashMap`** — `ResolvedModule::get_all_exports()` returns `Vec<(String, Arc<FunctionDef>)>`, not a `HashMap`. Callers that need map-like access must collect explicitly.
 - **Injecting `Value::Null` as a placeholder for `@define` params in validation** — the validator uses `Value::Array(vec![])` so that `@for item in param:` inside a define body passes the array type check. Using `Null` would produce a spurious type error at validate time.
-- **Ignoring the `Result` from `scope.pop()`** — `pop()` returns `Result<(), MdsError>` and errors when called on the global scope frame. Always use `scope.pop()?` to propagate the error. A mismatched push/pop is a compiler bug that should surface as a diagnostic error, not a panic or silent failure.
+- **Ignoring the `Result` from `scope.pop()`** — `pop()` returns `Result<(), MdsError>` and errors when called on the global scope frame. Always use `scope.pop()?`.
+- **Re-exporting via `to_namespace()` without export-visibility check** — `to_namespace()` was previously a bug: it included `prompt_body` unconditionally, ignoring whether `"prompt"` was in `explicit_exports`. The method now applies the same visibility rule as `get_prompt_value()`. Never bypass this method to build a `NamespaceScope` directly from `ResolvedModule` fields.
+- **Accessing `func.captured_namespaces` / `func.captured_functions` / `func.captured_vars` directly** — these three separate fields no longer exist. Access via `func.captured.namespaces`, `func.captured.functions`, `func.captured.vars`.
+- **Using `output: Option<PathBuf>` for the Build command's output field** — the field is `Option<String>` intentionally so the literal `"-"` can be compared before any path resolution occurs. Converting to `PathBuf` first would lose the sentinel value.
+- **Resolving `mds.json`'s `output_dir` relative to the source file** — `output_dir` must be resolved relative to the directory that contains `mds.json` (the `config_dir` returned by `load_config`), not relative to the input `.mds` file's directory. These differ when `mds.json` is in a parent directory.
 
 ## Gotchas
 
 - **`@define` body nodes have leading/trailing newlines stripped** — the parser calls `strip_leading_newline` and `strip_trailing_newline` on `@define` bodies. If you add a new block directive, apply the same stripping unless you want those newlines in output.
-- **`@for` body validation uses a Null-injected clone; `@define` body validation uses an Array-injected clone** — the validator uses `Value::Null` for the loop variable (type is unknown at define time) but `Value::Array(vec![])` for `@define` parameters. This asymmetry exists because `@define` params might be used as iterables (`@for item in param:`), which requires the placeholder to pass the array type check. The actual type is enforced by the evaluator at call time.
+- **`@for` body validation uses a Null-injected clone; `@define` body validation uses an Array-injected clone** — the validator uses `Value::Null` for the loop variable (type is unknown at define time) but `Value::Array(vec![])` for `@define` parameters. This asymmetry exists because `@define` params might be used as iterables (`@for item in param:`), which requires the placeholder to pass the array type check.
 - **Runtime vars override frontmatter silently** — there is no warning when a runtime var shadows a frontmatter key. Intentional but can cause confusion when debugging.
 - **`@export` changes all-implicit to explicit** — once any `@export` appears in a module, only explicitly listed names are exported. Adding an `@export name` to a previously-implicit-all module will break importers depending on other functions.
 - **`@export prompt` is valid** — the string `"prompt"` is a special case in export validation. It does not need a corresponding `@define prompt` — it refers to the module's rendered body.
-- **`@include` on an empty module pushes a warning and returns empty** — `evaluate_include` calls `warnings.push(...)` (not `eprintln!`) and returns `""`. No error. The include disappears from output. The warning only reaches stderr if the caller chooses to print it. Warnings are silently dropped once `warnings.len() >= MAX_WARNINGS (1,000)` — a template with thousands of empty `@include` directives will compile correctly but emit at most 1,000 warnings.
-- **Merged imports bring in `prompt` body but not frontmatter vars** — `@import "path"` (merge) brings functions and the `prompt` body text into scope, but NOT the imported module's frontmatter variables. Two merge-imported modules that both define the same frontmatter variable do not cause a collision.
+- **`to_namespace()` respects export visibility for `prompt_body`** — a bug fix: `to_namespace()` now only includes `prompt_body` in the `NamespaceScope` when `"prompt"` is an available export. Alias-imported modules with explicit exports that exclude `"prompt"` will no longer expose the body text via `@include alias`.
+- **`@include` on an empty module pushes a warning and returns empty** — `evaluate_include` calls `ctx.warnings.push(...)` (not `eprintln!`) and returns `""`. Warnings are silently dropped once `ctx.warnings.len() >= MAX_WARNINGS (1,000)`.
+- **Merged imports bring in `prompt` body but not frontmatter vars** — `@import "path"` (merge) brings functions and the `prompt` body text into scope, but NOT the imported module's frontmatter variables.
 - **Selective import of `prompt` binds as a variable, not a function** — `@import { prompt } from "path"` sets `prompt` as a `Value::String` via `scope.set_var`, not `scope.set_function`.
 - **`compile_str` takes no arguments** — the zero-argument form `compile_str(source)` is a convenience wrapper. Use `compile_str_with(source, base_dir, runtime_vars)` when you need import resolution relative to a specific directory or runtime variable overrides.
 - **`compile_file` takes no runtime vars** — `compile_file(path)` calls `compile(Path::new(path), None)`. If runtime vars are needed, call `compile` directly.
-- **Closure capture is eager and shallow** — `get_all_vars()` / `get_all_functions()` / `get_all_namespaces()` snapshot the scope at definition time. Functions defined after the closure capture are not visible to the captured function. Within `process_module`, `@define` nodes are processed in top-to-bottom AST order, so later-defined functions are not visible to earlier ones.
-- **`get_all_*` iteration order matters for shadowing** — all three `get_all_*` methods iterate outer→inner frames, so when a key exists in multiple frames the inner frame wins. The resulting `HashMap` thus correctly reflects inner-scope shadowing. This is the correct behavior for snapshot captures.
+- **Closure capture is eager and shallow** — `get_all_vars()` / `get_all_functions()` / `get_all_namespaces()` snapshot the scope at definition time. Functions defined after the closure capture are not visible to the captured function.
+- **`get_all_functions()` returns `Arc<FunctionDef>`; captured.functions stores owned `FunctionDef`** — the resolver converts `Arc<FunctionDef>` → owned `FunctionDef` when populating captures (via `(*v).clone()`). `invoke_function` then wraps each captured function back in `Arc::new(f.clone())` when restoring closure scope. This round-trip is intentional to break reference cycles.
+- **`call_stack` is `Vec`, not `HashSet`** — recursion detection in the evaluator now uses `ctx.call_stack.iter().any(|s| s == call_key)` (O(n) scan). At `MAX_CALL_DEPTH = 128`, this is negligible. The Vec is also the stack that `invoke_function` pushes to and pops from; a `debug_assert!` verifies the LIFO invariant after each return.
+- **`IndexSet` replaces two resolver fields** — if you need to check "is this path currently being resolved?", use `self.resolving.contains(&canonical)`. If you need to reconstruct the cycle path, use `self.resolving.iter()` to get an ordered sequence. There is no separate `resolving_stack` field.
 - **`compile_str` / `resolve_source` uses a virtual path `<source>`** — in-memory sources cannot be canonicalized. Repeated calls to `compile_str` re-parse every time; there is no caching for in-memory sources.
-- **Project root is set on first resolve** — `root_dir` is set lazily. If `resolve_source` is called first (e.g., via `compile_str_with`), `root_dir` is set to the _canonicalized_ `base_dir` via `base_dir.canonicalize().map_err(|e| MdsError::io(...))` — if the directory cannot be resolved, `resolve_source` returns `Err` immediately (no silent fallback). Canonicalization ensures `starts_with` comparisons work even when `base_dir` contains `.` or `..` components. File-based `resolve()` always finds the project root via git walk-up; `resolve_source` does not walk up.
-- **Cycle detection reconstructs the path from `resolving_stack`** — when circular import is detected, `build_cycle_string` uses `.position(...).unwrap_or(0)` to find the start of the cycle. If `position` returns `None` (which should not happen at runtime), the cycle string starts from index 0 as a safe fallback rather than panicking.
-- **Symlink detection uses two sequential canonicalize calls** — `resolve()` first canonicalizes the parent directory (resolving any symlinks in directory components, e.g. `/var → /private/var` on macOS), then appends the raw filename, then fully canonicalizes. Comparing the two results detects a symlink in the final component without a TOCTOU-prone `lstat`. Cost: two filesystem calls per import, but both happen atomically at the OS level.
-- **`TextNode` has no offset** — raw text nodes (`Node::Text(TextNode)`) do not carry a byte offset. Only structured nodes (`Interpolation`, `IfBlock`, `ForBlock`, `IncludeDirective`) have offsets for error reporting. `EscapedBrace` is also a unit variant with no offset.
-- **`enter_block()` must be paired with `self.depth -= 1`** — the helper only increments; callers are responsible for decrementing after the block body is parsed. Failing to decrement will cause subsequent blocks to see an inflated depth and may reject valid inputs.
-- **Selective import `from` keyword requires a whitespace separator** — `parse_import_directive` accepts `from ` (space) or `from\t` (tab) but rejects `from"path"` with no gap. Both the missing-`from` and missing-whitespace cases produce the same error `"selective import requires 'from' keyword"`. This means a typo like `@import { fn } from"./path"` fails with that message rather than a path error.
-- **String literal escapes are not full Rust/JSON escapes** — `unescape_string` in the parser only recognizes `\\`, `\"`, and `\'`. A backslash followed by any other character (e.g., `\n`, `\t`) is kept verbatim as both backslash and the following character — it is NOT converted to a control character. Template authors writing `{greet("say \nhello")}` will get the literal two-character sequence `\n`, not a newline. This matches the least-surprise principle for a template language where `\n` in a string argument is rarely intended.
-- **Evaluator's `Node::Define` arm is a no-op** — the evaluator skips `Node::Define` nodes entirely (`// Handled by resolver with full lexical capture`). All function registration and closure capture happen in the resolver's pre-evaluation AST walk. Closure restoration only occurs inside `invoke_function` when the function is called. The resolver's pre-evaluation scope pass is therefore the sole mechanism for cross-module function calls.
-- **`help(...)` attributes are variant-level, not constructor-level** — `CircularImport`, `Recursion`, and `TypeError` now have `#[diagnostic(help(...))]` annotations that miette renders automatically. When adding new error variants, add the `help` attribute directly on the variant, not in the constructor method.
-- **Re-export errors are raised at the barrel module, not the consumer** — when `@export name from "path"` fails because `name` is not exported from the source module, the error surfaces when the barrel itself is compiled, not when the consumer imports from the barrel. This means `reexport_nonexistent.mds` fails at compile time regardless of whether any consumer uses it.
+- **Project root is set on first resolve** — `root_dir` is set lazily. If `resolve_source` is called first, `root_dir` is set to the _canonicalized_ `base_dir` — if the directory cannot be resolved, `resolve_source` returns `Err` immediately.
+- **Re-export errors are raised at the barrel module, not the consumer** — when `@export name from "path"` fails because `name` is not exported from the source module, the error surfaces when the barrel itself is compiled, not when the consumer imports from the barrel.
 - **`--set KEY=VAL` last-write wins for duplicate keys** — when `--set name=First --set name=Second` is passed, the second value wins because runtime vars are collected into a `HashMap` and later writes overwrite earlier ones.
-- **All major `MdsError` variants now have `_at` constructors** — `recursion_at`, `import_error_at`, `export_error_at`, and `circular_import_at` were added alongside the existing span-aware constructors. When adding new error sites inside the validator or resolver where an AST offset is available, always use the `_at` form rather than the bare constructor so miette can annotate the source location.
+- **All major `MdsError` variants now have `_at` constructors** — `recursion_at`, `import_error_at`, `export_error_at`, and `circular_import_at` were added. When adding new error sites inside the validator or resolver where an AST offset is available, always use the `_at` form.
+- **`TextNode` has no offset** — raw text nodes (`Node::Text(TextNode)`) do not carry a byte offset. Only structured nodes have offsets for error reporting.
+- **`enter_block()` must be paired with `self.depth -= 1`** — the helper only increments; callers are responsible for decrementing after the block body is parsed.
+- **Selective import `from` keyword requires a whitespace separator** — `parse_import_directive` accepts `from ` (space) or `from\t` (tab) but rejects `from"path"` with no gap.
+- **String literal escapes are not full Rust/JSON escapes** — `unescape_string` in the parser only recognizes `\\`, `\"`, and `\'`. A backslash followed by any other character (e.g., `\n`, `\t`) is kept verbatim as both backslash and the following character.
+- **`help(...)` attributes are variant-level, not constructor-level** — `CircularImport`, `Recursion`, and `TypeError` have `#[diagnostic(help(...))]` annotations that miette renders automatically. When adding new error variants, add the `help` attribute directly on the variant, not in the constructor method.
+- **Exit code 2 covers three error types** — `MdsError::Io`, `MdsError::FileNotFound`, and `MdsError::NotMdsFile` all map to exit code 2. Other `MdsError` variants map to exit code 1. Non-`MdsError` miette errors (from `miette::miette!()`) also map to exit code 1.
+- **`mds build` default is file output, not stdout** — before this change the build command always wrote to stdout. Now it writes `<stem>.md` next to the source by default. Existing scripts that pipe `mds build foo.mds` and expect stdout output must be updated to add `-o -`.
+- **stdin input with `--out-dir` writes `output.md`, not `-.md`** — when input is stdin (`-`) and `--out-dir` is set, the output filename is hardcoded to `"output.md"` because deriving a name from the stdin path `-` would produce `-.md`. This is handled in `resolve_output_path` by filtering out the `-` sentinel before calling `derive_output_filename`.
+- **`load_config` starts from the input file's parent, not CWD** — the walk begins at the directory containing the input file. If the input file is in a subdirectory, a `mds.json` in that subdirectory is found first; one in a parent directory is also found via the walk. The resulting `output_dir` is always resolved relative to the `mds.json` location.
 
 ## Key Files
 
-- `src/lib.rs` — public API: `compile`, `compile_file`, `compile_str`, `compile_str_with`, `compile_collecting_warnings`, `compile_str_collecting_warnings`, `check`, `check_str`, `check_str_with`, `check_collecting_warnings`, `check_str_collecting_warnings`, `load_vars_file`, `clean_output`; public re-export `MAX_FILE_SIZE` (re-exported from `resolver::MAX_FILE_SIZE` as the single source of truth shared between the resolver and the CLI stdin reader); private `resolve_base_dir` helper shared by all string-based API variants
-- `src/main.rs` — CLI entry point: `auto_detect_mds_file`, `parse_cli_value`/`parse_cli_value_unquoted`, `build_runtime_vars`, `reject_directory_input`, `read_stdin`; `Build` and `Check` use `input: Option<PathBuf>`
+- `src/lib.rs` — public API: `compile`, `compile_file`, `compile_str`, `compile_str_with`, `compile_collecting_warnings`, `compile_str_collecting_warnings`, `check`, `check_str`, `check_str_with`, `check_collecting_warnings`, `check_str_collecting_warnings`, `load_vars_file`, `clean_output`; re-exports `MAX_FILE_SIZE`; private `resolve_base_dir` helper
+- `src/main.rs` — CLI entry point: `MdsConfig`/`BuildConfig` structs, `load_config` (walks up for `mds.json`), `resolve_output_path` (6-step precedence), `derive_output_filename`, `auto_detect_mds_file`, `parse_cli_value`, `build_runtime_vars`, `reject_directory_input`, `read_stdin`, `exit_code`
 - `src/ast.rs` — all AST types including `Arg::Call` for nested function call arguments; the contract between parser and everything downstream
-- `src/lexer.rs` — tokenizer; handles frontmatter, code fences, interpolation, directives
+- `src/lexer.rs` — `Lexer<'a>` struct with `scan_*` methods; public API is `tokenize(source, file)` only
 - `src/parser.rs` — converts token stream to `Module` AST; `enter_block()` helper, `parse_args_inner`/`parse_single_arg_inner` depth-bounded recursion, identifier validation, duplicate param detection
-- `src/resolver.rs` — orchestrator: drives the full pipeline, module cache, import resolution, closure capture, security guards; `build_cycle_string` uses `.unwrap_or(0)` as safe fallback for cycle start index; threads `&mut Vec<String>` warnings through to evaluate; `ResolvedModule::get_export` and `get_all_exports` for export visibility
-- `src/evaluator.rs` — AST walker that produces the rendered string; `resolve_args` handles `Arg::Call` via recursive evaluation with shared `call_stack` and `warnings`; `evaluate_include` pushes to warnings vec, never calls `eprintln!`
-- `src/validator.rs` — pre-evaluation semantic checks; `validate_var_args` recursively validates nested `Arg::Call` arguments; `@define` params injected as `Value::Array(vec![])` so param-as-iterable passes type check; `type_error_at` used for span-aware `@for` type errors
-- `src/scope.rs` — scope chain with frames for variables, functions, and namespaces; closure capture helpers; `get_all_*` iterate outer→inner for correct shadowing semantics
-- `src/value.rs` — runtime value enum with YAML/JSON converters and display rules; test numerics use `2.5` (not `3.14`) to satisfy clippy `approx_constant`
-- `src/error.rs` — `MdsError` enum with miette diagnostics; `CircularImport`, `Recursion`, `TypeError` carry `help(...)` diagnostic attributes; all major variants now have `_at` constructors (`recursion_at`, `import_error_at`, `export_error_at`, `circular_import_at` added); `ResourceLimit` variant for evaluator/value depth guards
-- `tests/integration.rs` — end-to-end tests covering all features, error paths, CLI integration (stdin, file output, vars file, quiet flag, auto-detect), edge cases (nested loops, loop shadowing, falsy values, mutual recursion, escape sequences in blocks/functions, zero-param functions, empty function bodies, re-export errors), `compile_file` API, error help-text verification, and spec-compliance tests for scope visibility, export visibility, and `--set` coercion rules
-- `tests/fixtures/reexport_nonexistent.mds` — fixture for re-export error: `@export nonexistent_fn from "./greetings.mds"` where `nonexistent_fn` is not exported, verifying the error is raised at the barrel module
+- `src/resolver.rs` — orchestrator: `ModuleCache` with `Arc<ResolvedModule>` cache, `IndexSet<PathBuf>` for cycle detection; `process_module` delegates to `build_scope_from_frontmatter`, `collect_definitions_and_imports`, `validate_exports`, `validate_and_read_file`; `ModuleCtx` and `CollectedDefs` type alias; `to_namespace()` now respects export visibility for `prompt_body`
+- `src/evaluator.rs` — AST walker; `EvalContext<'a>` bundles `call_stack: Vec<String>`, `total_iterations`, `warnings`; `resolve_args` takes `ctx: &mut EvalContext`; `evaluate_include` pushes to `ctx.warnings`
+- `src/validator.rs` — pre-evaluation semantic checks; `validate_var_args` recursively validates nested `Arg::Call` arguments; `@define` params injected as `Value::Array(vec![])` so param-as-iterable passes type check
+- `src/scope.rs` — `CapturedScope` struct bundling three closure capture maps; `FunctionDef.captured: CapturedScope`; `Frame::functions` and `NamespaceScope::functions` store `Arc<FunctionDef>`; `set_function` takes `Arc<FunctionDef>`; `get_function` returns `Option<&Arc<FunctionDef>>`
+- `src/value.rs` — runtime value enum with YAML/JSON converters and display rules
+- `src/error.rs` — `MdsError` enum with miette diagnostics; all major variants have `_at` constructors; `ResourceLimit` variant for evaluator/value depth guards
+- `tests/integration.rs` — end-to-end tests covering all features, error paths, CLI integration, and spec-compliance tests; includes full matrix of output-destination scenarios and `mds.json` config tests
 
 ## Related
 
-- `src/resolver.rs` — canonical reference for the module system, import semantics, security guards, and `ResolvedModule` export API
-- `src/evaluator.rs` — canonical reference for directive execution order, closure restore, call-depth guards, nested arg evaluation, and warning collection
-- `src/scope.rs` — canonical reference for closure capture API (`get_all_*` methods) and shadowing semantics
+- `src/resolver.rs` — canonical reference for the module system, import semantics, security guards, `Arc<ResolvedModule>` cache, `IndexSet` cycle detection, and `ResolvedModule` export API
+- `src/evaluator.rs` — canonical reference for `EvalContext` usage, directive execution order, closure restore, call-depth guards, nested arg evaluation, and warning collection
+- `src/scope.rs` — canonical reference for `CapturedScope` struct, `Arc<FunctionDef>` in frames, closure capture API (`get_all_*` methods), and shadowing semantics
 - `src/ast.rs` — canonical reference for `Arg` variants; any new argument form starts here
-- `src/lib.rs` — canonical reference for the two-tier warning API (`compile` vs `compile_collecting_warnings`, `check` vs `check_collecting_warnings`), `compile_file` convenience entry point, and `resolve_base_dir` helper for optional base directory resolution
-- `src/main.rs` — canonical reference for CLI auto-detection logic and `parse_cli_value` coercion rules
-- `src/error.rs` — canonical reference for `help(...)` diagnostic attribute placement on `MdsError` variants and available `_at` constructors; all major variants (`Recursion`, `ImportError`, `ExportError`, `CircularImport`) now have span-aware constructors
-- `tests/integration.rs` — covers all directive combinations including nested function calls, CLI stdin/quiet mode, auto-detect, `compile_file`, error help-text, scope/export visibility rules, `--set` coercion and deduplication, and re-export error scenarios; read before adding new directives to understand existing fixture patterns
+- `src/lib.rs` — canonical reference for the two-tier warning API (`compile` vs `compile_collecting_warnings`, `check` vs `check_collecting_warnings`), `compile_file` convenience entry point, and `resolve_base_dir` helper
+- `src/main.rs` — canonical reference for CLI auto-detection logic, `parse_cli_value` coercion rules, `exit_code` categorization, output destination resolution (`resolve_output_path`), and project config loading (`load_config`)
+- `src/error.rs` — canonical reference for `help(...)` diagnostic attribute placement on `MdsError` variants and available `_at` constructors
+- `tests/integration.rs` — covers all directive combinations including nested function calls, CLI stdin/quiet mode, auto-detect, `compile_file`, error help-text, scope/export visibility rules, `--set` coercion, re-export error scenarios, default file output, `--out-dir`, and `mds.json` config behavior
