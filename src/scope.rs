@@ -1,19 +1,31 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::ast::DefineBlock;
 use crate::value::Value;
+
+/// Closure captures bundled at function definition time.
+///
+/// `functions` is owned (not `Arc`) to avoid reference cycles: if function A
+/// captures function B and B captures A, using `Arc<FunctionDef>` inside the
+/// capture would create a cycle that leaks memory. Owned values break the cycle.
+#[derive(Debug, Clone, Default)]
+pub struct CapturedScope {
+    /// Namespace aliases captured from the function's definition site.
+    pub namespaces: HashMap<String, NamespaceScope>,
+    /// Functions captured from the function's definition site (owned — avoids reference cycles).
+    pub functions: HashMap<String, FunctionDef>,
+    /// Variables captured from the function's definition site.
+    pub vars: HashMap<String, Value>,
+}
 
 /// A function definition stored in scope.
 #[derive(Debug, Clone)]
 pub struct FunctionDef {
     pub params: Vec<String>,
     pub body: Vec<crate::ast::Node>,
-    /// Namespaces captured from the function's definition site (lexical scope).
-    pub captured_namespaces: HashMap<String, NamespaceScope>,
-    /// Functions captured from the function's definition site (lexical scope).
-    pub captured_functions: HashMap<String, FunctionDef>,
-    /// Variables captured from the function's definition site (lexical scope).
-    pub captured_vars: HashMap<String, Value>,
+    /// Lexical closure captures populated by the resolver at definition time.
+    pub captured: CapturedScope,
 }
 
 impl From<&DefineBlock> for FunctionDef {
@@ -21,9 +33,7 @@ impl From<&DefineBlock> for FunctionDef {
         FunctionDef {
             params: d.params.clone(),
             body: d.body.clone(),
-            captured_namespaces: HashMap::new(),
-            captured_functions: HashMap::new(),
-            captured_vars: HashMap::new(),
+            captured: CapturedScope::default(),
         }
     }
 }
@@ -38,7 +48,8 @@ pub struct Scope {
 #[derive(Debug, Clone, Default)]
 struct Frame {
     vars: HashMap<String, Value>,
-    functions: HashMap<String, FunctionDef>,
+    /// Functions stored as `Arc` so cloning out of scope is O(1).
+    functions: HashMap<String, Arc<FunctionDef>>,
     /// Namespace imports: alias -> (functions, vars)
     namespaces: HashMap<String, NamespaceScope>,
 }
@@ -46,7 +57,8 @@ struct Frame {
 /// A namespace scope for aliased imports.
 #[derive(Debug, Clone)]
 pub struct NamespaceScope {
-    pub functions: HashMap<String, FunctionDef>,
+    /// Functions stored as `Arc` so cloning out of scope is O(1).
+    pub functions: HashMap<String, Arc<FunctionDef>>,
     /// The compiled prompt body of the imported module.
     pub prompt_body: Option<String>,
 }
@@ -100,7 +112,7 @@ impl Scope {
     }
 
     /// Define a function in the current frame.
-    pub fn set_function(&mut self, name: &str, func: FunctionDef) {
+    pub fn set_function(&mut self, name: &str, func: Arc<FunctionDef>) {
         self.frames
             .last_mut()
             .expect("BUG: scope has no frames")
@@ -109,7 +121,7 @@ impl Scope {
     }
 
     /// Look up a function by walking the scope chain.
-    pub fn get_function(&self, name: &str) -> Option<&FunctionDef> {
+    pub fn get_function(&self, name: &str) -> Option<&Arc<FunctionDef>> {
         self.frames.iter().rev().find_map(|f| f.functions.get(name))
     }
 
@@ -140,7 +152,9 @@ impl Scope {
     /// Get all functions visible in the current scope (for closure capture).
     /// Iterates outer→inner so duplicate keys are overwritten by inner frames,
     /// preserving correct shadowing semantics.
-    pub fn get_all_functions(&self) -> HashMap<String, FunctionDef> {
+    ///
+    /// Returns `Arc<FunctionDef>` values — cloning is O(1).
+    pub fn get_all_functions(&self) -> HashMap<String, Arc<FunctionDef>> {
         self.collect_all(|f| &f.functions)
     }
 
@@ -184,16 +198,22 @@ mod tests {
         let mut scope = Scope::new();
         scope.set_function(
             "greet",
-            FunctionDef {
+            Arc::new(FunctionDef {
                 params: vec!["name".into()],
                 body: vec![],
-                captured_namespaces: HashMap::new(),
-                captured_functions: HashMap::new(),
-                captured_vars: HashMap::new(),
-            },
+                captured: CapturedScope::default(),
+            }),
         );
         assert!(scope.get_function("greet").is_some());
         assert!(scope.get_function("unknown").is_none());
+    }
+
+    #[test]
+    fn captured_scope_default() {
+        let cs = CapturedScope::default();
+        assert!(cs.namespaces.is_empty());
+        assert!(cs.functions.is_empty());
+        assert!(cs.vars.is_empty());
     }
 
     // ── pop() on the last (global) frame returns an error ────────────────────

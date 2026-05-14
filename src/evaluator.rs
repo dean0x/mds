@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::ast::{Arg, Expr, ForBlock, IfBlock, IncludeDirective, Node};
 use crate::error::MdsError;
 use crate::scope::{FunctionDef, Scope};
@@ -169,15 +171,16 @@ fn invoke_function(
     // Restore captured lexical scope from definition site so the function body
     // can resolve alias imports, sibling functions, and frontmatter variables
     // from its defining module.
-    for (alias, ns) in &func.captured_namespaces {
+    for (alias, ns) in &func.captured.namespaces {
         scope.set_namespace(alias, ns.clone());
     }
-    for (name, f) in &func.captured_functions {
-        scope.set_function(name, f.clone());
+    // captured.functions are owned FunctionDef (not Arc) — wrap in Arc for scope insertion.
+    for (name, f) in &func.captured.functions {
+        scope.set_function(name, Arc::new(f.clone()));
     }
     // Captured vars are restored before param binding so that params shadow
     // captured vars correctly (params take precedence over closure variables).
-    for (name, val) in &func.captured_vars {
+    for (name, val) in &func.captured.vars {
         scope.set_var(name, val.clone());
     }
     for (param, value) in func.params.iter().zip(args.iter()) {
@@ -200,10 +203,12 @@ fn call_function(
     scope: &mut Scope,
     ctx: &mut EvalContext,
 ) -> Result<String, MdsError> {
+    // Arc::clone is O(1); the deref coercion &Arc<FunctionDef> → &FunctionDef
+    // is applied automatically when passing to invoke_function.
     let func = scope
         .get_function(name)
         .ok_or_else(|| MdsError::undefined_fn(name))?
-        .clone();
+        .clone();  // Arc::clone — cheap
     invoke_function(&func, name, args, scope, ctx)
 }
 
@@ -224,7 +229,7 @@ fn call_qualified_function(
         .functions
         .get(name)
         .ok_or_else(|| MdsError::undefined_fn(&qualified_name))?
-        .clone();
+        .clone();  // Arc::clone — cheap
 
     invoke_function(&func, &qualified_name, args, scope, ctx)
 }
@@ -313,6 +318,7 @@ fn evaluate_include(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use crate::ast::{DefineBlock, Interpolation, TextNode};
 
     fn text(s: &str) -> Node {
@@ -447,7 +453,7 @@ mod tests {
             offset: 0,
         };
         let mut scope = Scope::new();
-        scope.set_function("greet", FunctionDef::from(&define));
+        scope.set_function("greet", Arc::new(FunctionDef::from(&define)));
 
         let nodes = vec![Node::Interpolation(Interpolation {
             expr: Expr::Call {

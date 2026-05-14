@@ -1,5 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use indexmap::IndexSet;
 
 use crate::ast::{ExportDirective, ImportDirective, Node};
 use crate::error::MdsError;
@@ -31,7 +34,7 @@ fn find_project_root(start: &Path) -> PathBuf {
 /// A resolved module with its AST, exports, and prompt body.
 #[derive(Debug, Clone)]
 pub struct ResolvedModule {
-    pub functions: HashMap<String, FunctionDef>,
+    pub functions: HashMap<String, Arc<FunctionDef>>,
     pub prompt_body: Option<String>,
     pub has_explicit_exports: bool,
     pub explicit_exports: HashSet<String>,
@@ -46,11 +49,11 @@ pub(crate) const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 /// Module cache to avoid re-resolving the same file.
 #[derive(Default)]
 pub struct ModuleCache {
-    modules: HashMap<PathBuf, ResolvedModule>,
-    /// Tracks modules currently being resolved (for cycle detection), O(1) lookup.
-    resolving: HashSet<PathBuf>,
-    /// Preserves insertion order of the resolving set for cycle path reconstruction.
-    resolving_stack: Vec<PathBuf>,
+    modules: HashMap<PathBuf, Arc<ResolvedModule>>,
+    /// Tracks modules currently being resolved. IndexSet provides both O(1)
+    /// membership test (like HashSet) and insertion-ordered iteration (like Vec),
+    /// so a separate `resolving_stack` is no longer needed.
+    resolving: IndexSet<PathBuf>,
     /// Root directory for path-traversal prevention (set on first resolve).
     root_dir: Option<PathBuf>,
 }
@@ -64,7 +67,7 @@ impl ModuleCache {
     ///
     /// Performs all security checks (symlink, depth, root_dir, size) and reads
     /// the file content. `&mut self` is required to initialise `self.root_dir` on
-    /// the first call and to check `self.resolving` / `self.resolving_stack`.
+    /// the first call and to check `self.resolving`.
     fn validate_and_read_file(
         &mut self,
         path: &Path,
@@ -155,17 +158,17 @@ impl ModuleCache {
         path: &Path,
         runtime_vars: &HashMap<String, Value>,
         warnings: &mut Vec<String>,
-    ) -> Result<ResolvedModule, MdsError> {
+    ) -> Result<Arc<ResolvedModule>, MdsError> {
         let (source, canonical, is_md) = self.validate_and_read_file(path)?;
 
         // Check cache (after canonicalization, before cycle/depth checks that need &mut self)
         if let Some(cached) = self.modules.get(&canonical) {
-            return Ok(cached.clone());
+            return Ok(Arc::clone(cached));
         }
 
         // Check for circular imports
         if self.resolving.contains(&canonical) {
-            let cycle = build_cycle_string(&self.resolving_stack, &canonical);
+            let cycle = build_cycle_string(&self.resolving, &canonical);
             return Err(MdsError::circular_import(cycle));
         }
 
@@ -175,23 +178,25 @@ impl ModuleCache {
         let file_str = canonical.display().to_string();
         let base_dir = canonical.parent().unwrap_or(Path::new(".")).to_path_buf();
 
-        // Mark as resolving before recursing into process_module
+        // Mark as resolving before recursing into process_module.
+        // IndexSet preserves insertion order, so it serves as both the set (O(1) lookup)
+        // and the ordered stack (for cycle path reconstruction).
         self.resolving.insert(canonical.clone());
-        self.resolving_stack.push(canonical.clone());
 
         let resolved =
             self.process_module(&source, &file_str, &base_dir, is_md, runtime_vars, warnings);
 
-        // Unmark regardless of success or failure
-        self.resolving.remove(&canonical);
-        self.resolving_stack.pop();
+        // Unmark regardless of success or failure.
+        // shift_remove preserves insertion order of remaining elements.
+        self.resolving.shift_remove(&canonical);
 
         let resolved = resolved?;
 
-        // Cache
-        self.modules.insert(canonical, resolved.clone());
+        // Wrap in Arc, store in cache, and return a clone of the Arc (O(1)).
+        let arc = Arc::new(resolved);
+        self.modules.insert(canonical, Arc::clone(&arc));
 
-        Ok(resolved)
+        Ok(arc)
     }
 
     /// Resolve a module from an in-memory source string.
@@ -202,7 +207,7 @@ impl ModuleCache {
         base_dir: &Path,
         runtime_vars: &HashMap<String, Value>,
         warnings: &mut Vec<String>,
-    ) -> Result<ResolvedModule, MdsError> {
+    ) -> Result<Arc<ResolvedModule>, MdsError> {
         // Set root_dir on first use so path-traversal checks work for imports.
         // Canonicalize to match the canonical paths used by resolve(), ensuring
         // starts_with checks are consistent even when base_dir contains `.` or `..`.
@@ -215,6 +220,7 @@ impl ModuleCache {
             })?);
         }
         self.process_module(source, "<source>", base_dir, false, runtime_vars, warnings)
+            .map(Arc::new)
     }
 
     /// Common module processing: tokenize, parse, build scope, evaluate.
@@ -270,7 +276,7 @@ impl ModuleCache {
         ctx: &ModuleCtx<'_>,
         warnings: &mut Vec<String>,
     ) -> Result<CollectedDefs, MdsError> {
-        let mut functions: HashMap<String, FunctionDef> = HashMap::new();
+        let mut functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
         let mut has_explicit_exports = false;
         let mut explicit_exports: HashSet<String> = HashSet::new();
 
@@ -291,11 +297,19 @@ impl ModuleCache {
                     // function body can resolve alias imports, sibling functions, and
                     // frontmatter variables from its defining module even when called from
                     // a different module.
-                    func.captured_namespaces = scope.get_all_namespaces();
-                    func.captured_functions = scope.get_all_functions();
-                    func.captured_vars = scope.get_all_vars();
-                    functions.insert(def.name.clone(), func.clone());
-                    scope.set_function(&def.name, func);
+                    func.captured.namespaces = scope.get_all_namespaces();
+                    // Convert Arc<FunctionDef> → owned FunctionDef for captured.functions.
+                    // Owned captures break potential reference cycles (A captures B captures A).
+                    func.captured.functions = scope
+                        .get_all_functions()
+                        .into_iter()
+                        .map(|(k, v)| (k, (*v).clone()))
+                        .collect();
+                    func.captured.vars = scope.get_all_vars();
+                    // Wrap in Arc for cheap storage and O(1) scope insertion.
+                    let arc = Arc::new(func);
+                    functions.insert(def.name.clone(), Arc::clone(&arc));
+                    scope.set_function(&def.name, arc);
                 }
                 Node::Import(import) => {
                     self.resolve_import(
@@ -445,19 +459,23 @@ impl ModuleCache {
 
 impl ResolvedModule {
     /// Get a single export by name.
-    pub fn get_export(&self, name: &str) -> Option<FunctionDef> {
+    ///
+    /// Returns `Arc<FunctionDef>` — cloning is O(1).
+    pub fn get_export(&self, name: &str) -> Option<Arc<FunctionDef>> {
         if self.has_explicit_exports && !self.explicit_exports.contains(name) {
             return None;
         }
-        self.functions.get(name).cloned()
+        self.functions.get(name).cloned()  // cloned() on &Arc = Arc::clone (cheap)
     }
 
     /// Get all exported functions.
-    pub fn get_all_exports(&self) -> Vec<(String, FunctionDef)> {
+    ///
+    /// Returns `Arc<FunctionDef>` values — cloning is O(1).
+    pub fn get_all_exports(&self) -> Vec<(String, Arc<FunctionDef>)> {
         self.functions
             .iter()
             .filter(|(name, _)| !self.has_explicit_exports || self.explicit_exports.contains(*name))
-            .map(|(name, func)| (name.clone(), func.clone()))
+            .map(|(name, func)| (name.clone(), Arc::clone(func)))
             .collect()
     }
 
@@ -482,7 +500,7 @@ impl ResolvedModule {
             .filter(|(name, _)| {
                 !self.has_explicit_exports || self.explicit_exports.contains(*name)
             })
-            .map(|(name, func)| (name.clone(), func.clone()))
+            .map(|(name, func)| (name.clone(), Arc::clone(func)))
             .collect();
         NamespaceScope {
             functions,
@@ -492,7 +510,7 @@ impl ResolvedModule {
 }
 
 /// Collected output of the AST definition/import walk in `collect_definitions_and_imports`.
-type CollectedDefs = (HashMap<String, FunctionDef>, bool, HashSet<String>);
+type CollectedDefs = (HashMap<String, Arc<FunctionDef>>, bool, HashSet<String>);
 
 /// Bundle of borrowed per-module context threaded through the AST walk helpers.
 struct ModuleCtx<'a> {
@@ -536,7 +554,7 @@ fn build_scope_from_frontmatter(
 /// Validate that all named exports refer to defined functions or the special `"prompt"` export.
 fn validate_exports(
     explicit_exports: &HashSet<String>,
-    functions: &HashMap<String, FunctionDef>,
+    functions: &HashMap<String, Arc<FunctionDef>>,
 ) -> Result<(), MdsError> {
     for name in explicit_exports {
         if name != "prompt" && !functions.contains_key(name) {
@@ -602,13 +620,16 @@ fn validate_file_type(path: &Path, source: &str) -> Result<(), MdsError> {
     Err(MdsError::not_mds_file(path.display().to_string()))
 }
 
-/// Format a cycle chain like "a.mds → b.mds → a.mds" from the resolving stack.
-fn build_cycle_string(resolving_stack: &[PathBuf], repeated: &Path) -> String {
-    let start = resolving_stack
+/// Format a cycle chain like "a.mds → b.mds → a.mds" from the resolving set.
+///
+/// `IndexSet` preserves insertion order, so we can use it as both the set
+/// and the ordered stack for cycle path reconstruction.
+fn build_cycle_string(resolving: &IndexSet<PathBuf>, repeated: &Path) -> String {
+    let start = resolving
         .iter()
         .position(|p| p == repeated)
         .unwrap_or(0);
-    resolving_stack[start..]
+    resolving.as_slice()[start..]
         .iter()
         .map(PathBuf::as_path)
         .chain(std::iter::once(repeated))
