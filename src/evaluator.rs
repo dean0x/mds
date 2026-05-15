@@ -509,7 +509,7 @@ mod tests {
     // ── prefer_first_error: double-fault error-preservation behaviour ─────────
 
     fn make_err(msg: &str) -> MdsError {
-        MdsError::syntax(msg.to_string())
+        MdsError::syntax(msg)
     }
 
     #[test]

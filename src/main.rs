@@ -454,7 +454,7 @@ fn run_build(
 ) -> Result<(), miette::Error> {
     let runtime_vars = build_runtime_vars(vars, set_vars)?;
 
-    // Resolve the input: explicit path/stdin, or auto-detect from cwd.
+    // Resolve the input: explicit path, or auto-detect from cwd (prints banner).
     let input = match input {
         Some(p) => p,
         None => {

@@ -210,21 +210,16 @@ impl ModuleCache {
         // cycle-detection state and allow unbounded recursion. Return an error
         // rather than panicking — prefer the user-facing module error if both fail.
         let popped = self.resolving.pop();
-        let lifo_check = if popped.as_ref() != Some(&canonical) {
-            Err(MdsError::syntax(
-                "internal error: resolving stack LIFO invariant violated — this is a compiler bug, please report it",
-            ))
-        } else {
-            Ok(())
-        };
 
         // Prefer the module processing error over the LIFO invariant violation
         // so the user sees the root cause rather than an internal compiler message.
-        let resolved = match (resolved, lifo_check) {
-            (Ok(r), Ok(())) => r,
-            (Err(e), _) => return Err(e),
-            (Ok(_), Err(e)) => return Err(e),
-        };
+        let resolved = resolved?;
+
+        if popped.as_ref() != Some(&canonical) {
+            return Err(MdsError::syntax(
+                "internal error: resolving stack LIFO invariant violated — this is a compiler bug, please report it",
+            ));
+        }
 
         // Wrap in Arc, store in cache, and return a clone of the Arc (O(1)).
         let arc = Arc::new(resolved);
