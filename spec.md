@@ -341,12 +341,102 @@ Errors include file path, line number, column, and a contextual explanation. Com
 
 ## 7. CLI Interface
 
+### 7.1 Commands
+
+| Command | Purpose |
+|---------|---------|
+| `mds build [FILE]` | Compile an `.mds` template to Markdown |
+| `mds check [FILE]` | Validate a template without rendering |
+| `mds init [FILENAME]` | Create a starter `.mds` file |
+
+### 7.2 `mds build`
+
 ```bash
-mds build input.mds -o output.md          # compile to file
-mds build input.mds                        # compile to stdout
-mds build input.mds --vars vars.json       # with runtime variables
-mds check input.mds                        # validate without rendering
+mds build                                  # Auto-detect single .mds in current dir
+mds build template.mds                     # Compile to template.md (next to source)
+mds build template.mds -o output.md        # Compile to a specific file
+mds build template.mds -o -               # Compile to stdout
+mds build template.mds --out-dir dist      # Compile to dist/template.md
+mds build template.mds --vars vars.json    # With variable overrides from JSON file
+mds build template.mds --set name=Alice    # Set a single variable
+mds build template.mds --set name=Alice --set count=3  # Multiple variables
+echo "Hello {name}!" | mds build -         # Compile from stdin (writes to stdout)
 ```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `-o, --output <PATH>` | Output file path, or `-` for stdout. Mutually exclusive with `--out-dir`. |
+| `--out-dir <DIR>` | Output directory. Creates `<stem>.md` inside it. Created if absent. |
+| `--vars <FILE>` | JSON file with runtime variable overrides. |
+| `--set KEY=VALUE` | Set a single variable. Repeatable. Values are coerced to boolean, number, null, or array when possible. |
+| `-q, --quiet` | Suppress status messages and warnings on stderr. |
+
+**Output path resolution** (precedence order, highest first):
+
+1. `-o -` → stdout
+2. `-o <path>` → exact path
+3. Stdin input with no `-o`/`--out-dir` → stdout
+4. `--out-dir <dir>` → `<dir>/<stem>.md`
+5. `mds.json` `build.output_dir` → `<config_dir>/<output_dir>/<stem>.md`
+6. Default → `<source_dir>/<stem>.md`
+
+### 7.3 `mds check`
+
+```bash
+mds check                                  # Auto-detect single .mds in current dir
+mds check template.mds                     # Validate a specific file
+mds check template.mds --set name=Alice    # Validate with variable overrides
+echo "@if flag:" | mds check -             # Validate from stdin
+```
+
+Exits 0 if the template is valid, non-zero on any error. Same `--vars`/`--set` options as `mds build`.
+
+### 7.4 `mds init`
+
+```bash
+mds init                                   # Creates hello.mds in current directory
+mds init my-prompt.mds                     # Creates my-prompt.mds
+mds init my-prompt.mds --force             # Overwrite if file already exists
+```
+
+Creates a compilable starter template. Path traversal (e.g. `../escaped.mds`) is rejected.
+
+### 7.5 Auto-Detection
+
+When no `FILE` argument is given to `mds build` or `mds check`, the compiler scans the current directory for `.mds` files:
+
+- **Exactly one found** → compile that file.
+- **Zero found** → error with hint to run `mds init`.
+- **Multiple found** → error listing the files with a hint to specify one.
+
+### 7.6 `mds.json` Project Config
+
+Place `mds.json` in the project root (or any ancestor directory). The compiler walks up from the input file to find it.
+
+```json
+{
+  "build": {
+    "output_dir": "dist"
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `build.output_dir` | string | Relative path to output directory. Must not contain `..` components. |
+
+Maximum config file size: 1 MB.
+
+### 7.7 Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Template error (syntax, undefined variable, arity mismatch, recursion, etc.) |
+| `2` | I/O or file-system error (file not found, not an MDS file, I/O failure) |
+| `3` | Resource limit exceeded (output too large, too many iterations) |
 
 ---
 
@@ -539,4 +629,4 @@ quoted_path     := "\"" path_chars "\""
 
 ## 12. Status
 
-v0.1 — Draft specification. Subject to change during implementation.
+v0.1 — Initial release. The compiler is feature-complete as described in this specification.
