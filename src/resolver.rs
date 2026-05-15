@@ -285,7 +285,7 @@ impl ModuleCache {
         validate_exports(&explicit_exports, &functions)?;
 
         // Validate semantic correctness before evaluation
-        validator::validate(&module.body, &scope, file_str, source)?;
+        validator::validate(&module.body, &mut scope, file_str, source)?;
 
         // Evaluate the body to get prompt text
         let prompt_body = evaluate(&module.body, &mut scope, warnings)?;

@@ -7,14 +7,14 @@ use crate::value::Value;
 /// Checks variable references, function arity, and type constraints
 /// before evaluation. Block-scoped variables (e.g., @for loop vars)
 /// are verified at evaluation time.
-pub fn validate(nodes: &[Node], scope: &Scope, file: &str, source: &str) -> Result<(), MdsError> {
+pub fn validate(nodes: &[Node], scope: &mut Scope, file: &str, source: &str) -> Result<(), MdsError> {
     for node in nodes {
         validate_node(node, scope, file, source)?;
     }
     Ok(())
 }
 
-fn validate_node(node: &Node, scope: &Scope, file: &str, source: &str) -> Result<(), MdsError> {
+fn validate_node(node: &Node, scope: &mut Scope, file: &str, source: &str) -> Result<(), MdsError> {
     match node {
         Node::Text(_) | Node::EscapedBrace => Ok(()),
         Node::Interpolation(interp) => {
@@ -56,19 +56,23 @@ fn validate_node(node: &Node, scope: &Scope, file: &str, source: &str) -> Result
                     block.iterable.len(),
                 ));
             }
-            let mut inner = scope.clone();
-            inner.set_var(&block.var, Value::Null);
-            validate(&block.body, &inner, file, source)
+            scope.push();
+            scope.set_var(&block.var, Value::Null);
+            let result = validate(&block.body, scope, file, source);
+            let _ = scope.pop(); // Cannot fail — we just pushed
+            result
         }
         Node::Define(def) => {
-            let mut inner = scope.clone();
+            scope.push();
             for param in &def.params {
                 // Use an empty array as the placeholder for each parameter so
                 // that `@for item in param:` inside the body passes the type
                 // check. The actual type is enforced at call time by the evaluator.
-                inner.set_var(param, Value::Array(vec![]));
+                scope.set_var(param, Value::Array(vec![]));
             }
-            validate(&def.body, &inner, file, source)
+            let result = validate(&def.body, scope, file, source);
+            let _ = scope.pop(); // Cannot fail — we just pushed
+            result
         }
         Node::Import(_) | Node::Export(_) => {
             // Handled by resolver
@@ -206,8 +210,8 @@ mod tests {
             body,
             offset: 0,
         });
-        let scope = Scope::new();
-        let result = validate(&[define], &scope, "test.mds", "");
+        let mut scope = Scope::new();
+        let result = validate(&[define], &mut scope, "test.mds", "");
         assert!(
             result.is_err(),
             "undefined var inside @define body must fail at validate time"
@@ -228,8 +232,8 @@ mod tests {
             body,
             offset: 0,
         });
-        let scope = Scope::new();
-        let result = validate(&[define], &scope, "test.mds", "");
+        let mut scope = Scope::new();
+        let result = validate(&[define], &mut scope, "test.mds", "");
         assert!(
             result.is_ok(),
             "param reference inside @define must pass: {result:?}"
