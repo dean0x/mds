@@ -3189,7 +3189,7 @@ fn warning_cap_at_max_warnings() {
         warnings.len()
     );
     assert!(
-        warnings.len() >= 1,
+        !warnings.is_empty(),
         "at least some warnings should have been collected"
     );
 }
