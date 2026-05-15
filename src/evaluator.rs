@@ -149,9 +149,9 @@ fn resolve_args(
         .collect()
 }
 
-/// On multi-fault, prefer the first error over the second.
+/// On double-fault, prefer the first error over the second.
 ///
-/// Used for double-fault scenarios (render error AND an internal pop/LIFO error):
+/// Used when a render error AND an internal pop/LIFO error occur simultaneously:
 /// the render error carries the actionable source-span diagnostic for the user,
 /// while pop/LIFO failures are compiler bugs that surface as secondary errors.
 fn prefer_first_error<T>(first: Result<T, MdsError>, second: Result<(), MdsError>) -> Result<T, MdsError> {
@@ -214,7 +214,7 @@ fn invoke_function(
         )))
     };
     let pop_result = scope.pop();
-    // On multi-fault, preserve the render error — it carries the actionable
+    // On double-fault, preserve the render error — it carries the actionable
     // source-span diagnostic for the user. LIFO/pop failures are compiler
     // bugs and surface as secondary errors.
     prefer_first_error(result, lifo_result.and(pop_result))
@@ -282,18 +282,23 @@ fn evaluate_for(
         .get_var(&block.iterable)
         .ok_or_else(|| MdsError::undefined_var(&block.iterable))?;
 
-    let items = iterable
+    let array = iterable
         .as_array()
-        .ok_or_else(|| MdsError::type_error(iterable.type_name()))?
-        .to_vec();
+        .ok_or_else(|| MdsError::type_error(iterable.type_name()))?;
 
-    if items.len() > MAX_LOOP_ITERATIONS {
+    // Check length before cloning to avoid allocating the full Vec only to
+    // immediately return a resource-limit error for oversized arrays.
+    if array.len() > MAX_LOOP_ITERATIONS {
         return Err(MdsError::resource_limit(format!(
             "array has {} elements, exceeding maximum loop iteration limit of {}",
-            items.len(),
+            array.len(),
             MAX_LOOP_ITERATIONS
         )));
     }
+
+    // Clone the array items to release the shared borrow on `scope` so the
+    // loop body can call `scope.set_var` without a borrow conflict.
+    let items = array.to_vec();
 
     let mut output = String::new();
 
@@ -509,7 +514,7 @@ mod tests {
     // ── prefer_first_error: double-fault error-preservation behaviour ─────────
 
     fn make_err(msg: &str) -> MdsError {
-        MdsError::syntax(msg.to_string())
+        MdsError::syntax(msg)
     }
 
     #[test]
@@ -554,6 +559,84 @@ mod tests {
         assert!(
             msg.contains("lifo error"),
             "secondary error should be returned when first is Ok; got: {msg}"
+        );
+    }
+
+    // ── Resource limit: MAX_CALL_DEPTH ───────────────────────────────────────
+
+    #[test]
+    fn call_depth_limit_rejects_deep_call_stack() {
+        // Build a call chain of MAX_CALL_DEPTH + 2 functions (f0 calls f1, f1 calls f2, ...).
+        // Uses direct AST construction to avoid the resolver's O(n^3) closure-capture overhead.
+        //
+        // Each FunctionDef has a simple body: [Interpolation(Call { "f{i+1}", [] })].
+        // The last function in the chain calls f0 to close the cycle (preventing
+        // the direct-recursion short-circuit which only catches same-key re-entry).
+        let n = MAX_CALL_DEPTH + 2;
+        let mut scope = Scope::new();
+
+        // Register n functions: fi calls f(i+1 % n)
+        for i in 0..n {
+            let next = (i + 1) % n;
+            let next_name = format!("f{next}");
+            let body = vec![Node::Interpolation(Interpolation {
+                expr: Expr::Call {
+                    name: next_name,
+                    args: vec![],
+                },
+                offset: 0,
+                len: 3,
+            })];
+            let func = FunctionDef {
+                params: vec![],
+                body,
+                captured: crate::scope::CapturedScope::default(),
+            };
+            scope.set_function(&format!("f{i}"), Arc::new(func));
+        }
+
+        // Invoke f0 — should fail with a call depth error
+        let call_node = vec![Node::Interpolation(Interpolation {
+            expr: Expr::Call {
+                name: "f0".to_string(),
+                args: vec![],
+            },
+            offset: 0,
+            len: 4,
+        })];
+        let mut warnings = vec![];
+        let result = evaluate(&call_node, &mut scope, &mut warnings);
+        assert!(result.is_err(), "call chain of {n} must be rejected");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("call depth"),
+            "error should mention call depth (got: {err})"
+        );
+    }
+
+    // ── Resource limit: MAX_OUTPUT_SIZE ──────────────────────────────────────
+
+    #[test]
+    fn output_size_limit_rejects_oversized_output() {
+        // Build a node list that accumulates past MAX_OUTPUT_SIZE (50 MB) across two
+        // nodes, rather than allocating a single 50 MB+ string in one shot.
+        // Each node is ~26 MB; after the second node the accumulated output exceeds
+        // the limit and evaluate_nodes returns a ResourceLimit error.
+        //
+        // Using two nodes of ~26 MB each keeps peak allocation at ~52 MB total
+        // (26 MB node + 26 MB node + accumulating output buffer), which is safer
+        // for CI environments than a single 50 MB+ pre-allocated string.
+        let half = MAX_OUTPUT_SIZE / 2 + 1;
+        let chunk = "x".repeat(half);
+        let nodes = vec![text(&chunk), text(&chunk)];
+        let mut scope = Scope::new();
+        let mut warnings = vec![];
+        let result = evaluate(&nodes, &mut scope, &mut warnings);
+        assert!(result.is_err(), "output exceeding MAX_OUTPUT_SIZE must be rejected");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("output") || err.contains("maximum size") || err.contains("50"),
+            "error should mention output size limit, got: {err}"
         );
     }
 }

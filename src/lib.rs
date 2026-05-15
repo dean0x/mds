@@ -47,6 +47,11 @@ pub(crate) mod scope;
 pub(crate) mod validator;
 pub mod value;
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use resolver::ModuleCache;
+
 pub use error::MdsError;
 pub use value::Value;
 
@@ -56,10 +61,11 @@ pub use value::Value;
 /// stdin reader in the CLI binary.
 pub const MAX_FILE_SIZE: u64 = resolver::MAX_FILE_SIZE;
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
-use resolver::ModuleCache;
+/// Maximum directory traversal depth for upward directory walks.
+///
+/// Shared between `find_project_root` in the resolver and `load_config` in the
+/// CLI binary — eliminating the duplicate definition.
+pub const MAX_TRAVERSAL_DEPTH: usize = resolver::MAX_TRAVERSAL_DEPTH;
 
 /// Compile an MDS file to a final Markdown string.
 ///

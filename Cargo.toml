@@ -2,7 +2,13 @@
 name = "mds"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80"
 description = "MDS (Markdown Script) compiler — composable LLM prompt templates"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/deanshrn/mdl"
+keywords = ["markdown", "template", "llm", "prompt", "compiler"]
+categories = ["template-engine", "command-line-utilities", "text-processing"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

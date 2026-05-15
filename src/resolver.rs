@@ -18,7 +18,7 @@ use crate::value::Value;
 /// Falls back to the given directory if no marker is found.
 fn find_project_root(start: &Path) -> PathBuf {
     let mut dir = start.to_path_buf();
-    for _ in 0..256 {
+    for _ in 0..MAX_TRAVERSAL_DEPTH {
         for marker in [".git", ".mdsroot"] {
             if dir.join(marker).exists() {
                 return dir;
@@ -32,16 +32,26 @@ fn find_project_root(start: &Path) -> PathBuf {
 }
 
 /// A resolved module with its AST, exports, and prompt body.
+///
+/// Fields are `pub(crate)` — all external access must go through the methods
+/// (`get_export`, `get_all_exports`, `get_prompt_value`, `to_namespace`) which
+/// enforce export-visibility logic. Direct field access bypasses that logic.
 #[derive(Debug, Clone)]
 pub struct ResolvedModule {
-    pub functions: HashMap<String, Arc<FunctionDef>>,
-    pub prompt_body: Option<String>,
-    pub has_explicit_exports: bool,
-    pub explicit_exports: HashSet<String>,
+    pub(crate) functions: HashMap<String, Arc<FunctionDef>>,
+    pub(crate) prompt_body: Option<String>,
+    pub(crate) has_explicit_exports: bool,
+    pub(crate) explicit_exports: HashSet<String>,
 }
 
 /// Maximum import depth to prevent stack overflow from deeply chained imports.
 const MAX_IMPORT_DEPTH: usize = 64;
+
+/// Maximum directory traversal depth when searching for project root markers.
+///
+/// Exported as `pub(crate)` so `src/main.rs` can import it for `load_config`'s
+/// upward directory walk — eliminating the duplicate definition there.
+pub(crate) const MAX_TRAVERSAL_DEPTH: usize = 256;
 
 /// Maximum file size (10 MB) to prevent runaway memory use.
 pub(crate) const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
@@ -63,31 +73,12 @@ impl ModuleCache {
         Self::default()
     }
 
-    /// Canonicalize `path` and run all security checks, returning `(canonical, is_md)`.
+    /// Canonicalize `path` and detect symlinks without a TOCTOU window.
     ///
-    /// This is the first half of the old `validate_and_read_file`.  It performs every
-    /// check that does NOT require reading the file — symlink detection, root_dir
-    /// initialisation, import-depth guard, and path-traversal prevention.  The caller
-    /// must check the cache before calling `read_validated_file`; that way cache hits
-    /// pay only the cost of two `canonicalize` syscalls and no I/O.
-    fn canonicalize_and_check(
-        &mut self,
-        path: &Path,
-    ) -> Result<(PathBuf, bool), MdsError> {
-        // Detect symlinks without a TOCTOU window by comparing the canonical path to
-        // the path constructed from (canonical parent dir) + (original filename).
-        //
-        // Strategy:
-        //   1. Canonicalize the parent directory of `path` — this resolves any symlinks
-        //      in the directory hierarchy (e.g. /var -> /private/var on macOS) without
-        //      following the final component.
-        //   2. Append the filename from `path` to get the "canonical parent + raw name".
-        //   3. Canonicalize the full path to get the real file location.
-        //   4. If they differ, the final component was a symlink.
-        //
-        // Both canonicalize calls use the file-system state atomically observed at that
-        // instant. This shrinks the TOCTOU window to the unavoidable OS-level race
-        // while correctly handling OS symlinks in the directory hierarchy.
+    /// Strategy: canonicalize parent dir (resolves dir-level symlinks), then
+    /// canonicalize the full path. If they differ, the final component is a symlink.
+    /// Returns the canonical path on success.
+    fn check_symlink(path: &Path) -> Result<PathBuf, MdsError> {
         let file_name = path
             .file_name()
             .ok_or_else(|| MdsError::file_not_found(path.display().to_string()))?;
@@ -102,29 +93,27 @@ impl ModuleCache {
             .canonicalize()
             .map_err(|_| MdsError::file_not_found(path.display().to_string()))?;
 
-        // If the final-component-preserved path differs from the fully-resolved path,
-        // the final component was a symlink.
         if canonical != canonical_without_following_last {
             return Err(MdsError::import_error(format!(
                 "symlinks are not allowed in imports: {}",
                 path.display()
             )));
         }
+        Ok(canonical)
+    }
 
-        // Set root_dir on first resolve (project root, not just entry point directory)
-        if self.root_dir.is_none() {
-            let entry_dir = canonical.parent().unwrap_or(Path::new("."));
-            self.root_dir = Some(find_project_root(entry_dir));
-        }
-
-        // Guard against excessively deep import chains
+    /// Guard against excessively deep import chains.
+    fn check_import_depth(&self) -> Result<(), MdsError> {
         if self.resolving.len() >= MAX_IMPORT_DEPTH {
             return Err(MdsError::import_error(format!(
                 "import depth exceeds maximum of {MAX_IMPORT_DEPTH} (possible deep chain)"
             )));
         }
+        Ok(())
+    }
 
-        // Prevent path traversal: resolved path must stay within the root directory
+    /// Prevent path traversal: canonical path must stay within root_dir.
+    fn check_path_traversal(&self, canonical: &Path) -> Result<(), MdsError> {
         if let Some(ref root) = self.root_dir {
             if !canonical.starts_with(root) {
                 return Err(MdsError::import_error(format!(
@@ -133,6 +122,30 @@ impl ModuleCache {
                 )));
             }
         }
+        Ok(())
+    }
+
+    /// Canonicalize `path` and run all security checks, returning `(canonical, is_md)`.
+    ///
+    /// This is the first half of the old `validate_and_read_file`.  It performs every
+    /// check that does NOT require reading the file — symlink detection, root_dir
+    /// initialisation, import-depth guard, and path-traversal prevention.  The caller
+    /// must check the cache before calling `read_validated_file`; that way cache hits
+    /// pay only the cost of two `canonicalize` syscalls and no I/O.
+    fn canonicalize_and_check(
+        &mut self,
+        path: &Path,
+    ) -> Result<(PathBuf, bool), MdsError> {
+        let canonical = Self::check_symlink(path)?;
+
+        // Set root_dir on first resolve (project root, not just entry point directory)
+        if self.root_dir.is_none() {
+            let entry_dir = canonical.parent().unwrap_or(Path::new("."));
+            self.root_dir = Some(find_project_root(entry_dir));
+        }
+
+        self.check_import_depth()?;
+        self.check_path_traversal(&canonical)?;
 
         let is_md = canonical.extension().and_then(|e| e.to_str()) == Some("md");
         Ok((canonical, is_md))
@@ -201,12 +214,29 @@ impl ModuleCache {
         // Unmark regardless of success or failure. resolve/unmark is strictly LIFO
         // (we always remove the last element we inserted), so pop() is O(1).
         // Safety-critical LIFO invariant: a mismatched pop would silently corrupt
-        // cycle-detection state and allow unbounded recursion. Enforce in release
-        // mode — cost is negligible at MAX_IMPORT_DEPTH = 64.
+        // cycle-detection state and allow unbounded recursion. Return an error
+        // rather than panicking.
+        //
+        // Check LIFO regardless of whether process_module succeeded or failed —
+        // both errors must be surfaced. On double-fault, prefer the module processing
+        // error (user-facing root cause) over the LIFO violation (internal compiler bug).
         let popped = self.resolving.pop();
-        assert_eq!(popped.as_ref(), Some(&canonical), "resolving unmark must be LIFO");
+        let lifo_result = if popped.as_ref() == Some(&canonical) {
+            Ok(())
+        } else {
+            Err(MdsError::syntax(format!(
+                "internal error: resolving stack LIFO invariant violated \
+                 (expected {expected}, got {got}) — this is a compiler bug, please report it",
+                expected = canonical.display(),
+                got = popped.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "<empty>".to_string()),
+            )))
+        };
 
-        let resolved = resolved?;
+        let resolved = match (resolved, lifo_result) {
+            (Err(module_err), _) => return Err(module_err),
+            (Ok(_), Err(lifo_err)) => return Err(lifo_err),
+            (Ok(resolved), Ok(())) => resolved,
+        };
 
         // Wrap in Arc, store in cache, and return a clone of the Arc (O(1)).
         let arc = Arc::new(resolved);
@@ -267,7 +297,7 @@ impl ModuleCache {
         validate_exports(&explicit_exports, &functions)?;
 
         // Validate semantic correctness before evaluation
-        validator::validate(&module.body, &scope, file_str, source)?;
+        validator::validate(&module.body, &mut scope, file_str, source)?;
 
         // Evaluate the body to get prompt text
         let prompt_body = evaluate(&module.body, &mut scope, warnings)?;
@@ -362,6 +392,97 @@ impl ModuleCache {
         Ok(())
     }
 
+    fn resolve_alias_import(
+        &mut self,
+        path: &str,
+        alias: &str,
+        offset: usize,
+        scope: &mut Scope,
+        ctx: &ModuleCtx<'_>,
+        warnings: &mut Vec<String>,
+    ) -> Result<(), MdsError> {
+        validate_import_path(path)?;
+        let import_path = resolve_path(ctx.base_dir, path);
+        let resolved = self
+            .resolve(&import_path, ctx.runtime_vars, warnings)
+            .map_err(|e| attach_import_span(e, path, ctx.file_str, ctx.source, offset))?;
+        scope.set_namespace(alias, resolved.to_namespace());
+        Ok(())
+    }
+
+    fn resolve_merge_import(
+        &mut self,
+        path: &str,
+        offset: usize,
+        scope: &mut Scope,
+        ctx: &ModuleCtx<'_>,
+        warnings: &mut Vec<String>,
+    ) -> Result<(), MdsError> {
+        validate_import_path(path)?;
+        let import_path = resolve_path(ctx.base_dir, path);
+        let resolved = self
+            .resolve(&import_path, ctx.runtime_vars, warnings)
+            .map_err(|e| attach_import_span(e, path, ctx.file_str, ctx.source, offset))?;
+        // Per spec: only functions and the prompt body are imported via merge.
+        // Frontmatter variables from the imported module are NOT brought into scope.
+        for (name, func) in resolved.get_all_exports() {
+            if scope.get_function(&name).is_some() {
+                return Err(MdsError::name_collision(name));
+            }
+            scope.set_function(&name, func);
+        }
+        if let Some(val) = resolved.get_prompt_value() {
+            scope.set_var("prompt", val);
+        }
+        Ok(())
+    }
+
+    fn resolve_selective_import(
+        &mut self,
+        names: &[String],
+        path: &str,
+        offset: usize,
+        scope: &mut Scope,
+        ctx: &ModuleCtx<'_>,
+        warnings: &mut Vec<String>,
+    ) -> Result<(), MdsError> {
+        validate_import_path(path)?;
+        let import_path = resolve_path(ctx.base_dir, path);
+        let resolved = self
+            .resolve(&import_path, ctx.runtime_vars, warnings)
+            .map_err(|e| attach_import_span(e, path, ctx.file_str, ctx.source, offset))?;
+        let line_len = ctx.source[offset..]
+            .find('\n')
+            .unwrap_or(ctx.source[offset..].len());
+        let not_exported = |name: &str| {
+            MdsError::import_error_at(
+                format!("'{name}' is not exported from '{path}'"),
+                ctx.file_str,
+                ctx.source,
+                offset,
+                line_len,
+            )
+        };
+        for name in names {
+            if name == "prompt" {
+                scope.set_var(
+                    "prompt",
+                    resolved
+                        .get_prompt_value()
+                        .ok_or_else(|| not_exported(name))?,
+                );
+            } else {
+                scope.set_function(
+                    name,
+                    resolved
+                        .get_export(name)
+                        .ok_or_else(|| not_exported(name))?,
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn resolve_import(
         &mut self,
         import: &ImportDirective,
@@ -370,78 +491,16 @@ impl ModuleCache {
         warnings: &mut Vec<String>,
     ) -> Result<(), MdsError> {
         match import {
-            ImportDirective::Alias {
-                path,
-                alias,
-                offset,
-            } => {
-                validate_import_path(path)?;
-                let import_path = resolve_path(ctx.base_dir, path);
-                let resolved = self
-                    .resolve(&import_path, ctx.runtime_vars, warnings)
-                    .map_err(|e| attach_import_span(e, path, ctx.file_str, ctx.source, *offset))?;
-                scope.set_namespace(alias, resolved.to_namespace());
+            ImportDirective::Alias { path, alias, offset } => {
+                self.resolve_alias_import(path, alias, *offset, scope, ctx, warnings)
             }
             ImportDirective::Merge { path, offset } => {
-                validate_import_path(path)?;
-                let import_path = resolve_path(ctx.base_dir, path);
-                let resolved = self
-                    .resolve(&import_path, ctx.runtime_vars, warnings)
-                    .map_err(|e| attach_import_span(e, path, ctx.file_str, ctx.source, *offset))?;
-                // Per spec: only functions and the prompt body are imported via merge.
-                // Frontmatter variables from the imported module are NOT brought into scope.
-                for (name, func) in resolved.get_all_exports() {
-                    if scope.get_function(&name).is_some() {
-                        return Err(MdsError::name_collision(name));
-                    }
-                    scope.set_function(&name, func);
-                }
-                if let Some(val) = resolved.get_prompt_value() {
-                    scope.set_var("prompt", val);
-                }
+                self.resolve_merge_import(path, *offset, scope, ctx, warnings)
             }
-            ImportDirective::Selective {
-                names,
-                path,
-                offset,
-            } => {
-                validate_import_path(path)?;
-                let import_path = resolve_path(ctx.base_dir, path);
-                let resolved = self
-                    .resolve(&import_path, ctx.runtime_vars, warnings)
-                    .map_err(|e| attach_import_span(e, path, ctx.file_str, ctx.source, *offset))?;
-                let line_len = ctx.source[*offset..]
-                    .find('\n')
-                    .unwrap_or(ctx.source[*offset..].len());
-                let not_exported = |name: &str| {
-                    MdsError::import_error_at(
-                        format!("'{name}' is not exported from '{path}'"),
-                        ctx.file_str,
-                        ctx.source,
-                        *offset,
-                        line_len,
-                    )
-                };
-                for name in names {
-                    if name == "prompt" {
-                        scope.set_var(
-                            "prompt",
-                            resolved
-                                .get_prompt_value()
-                                .ok_or_else(|| not_exported(name))?,
-                        );
-                    } else {
-                        scope.set_function(
-                            name,
-                            resolved
-                                .get_export(name)
-                                .ok_or_else(|| not_exported(name))?,
-                        );
-                    }
-                }
+            ImportDirective::Selective { names, path, offset } => {
+                self.resolve_selective_import(names, path, *offset, scope, ctx, warnings)
             }
         }
-        Ok(())
     }
 }
 
