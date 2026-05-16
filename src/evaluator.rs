@@ -92,6 +92,39 @@ fn evaluate_nodes(
     Ok(output)
 }
 
+/// Resolve a dot-separated path against the current scope.
+///
+/// `path[0]` is the root variable name; `path[1..]` are the field names to traverse.
+/// Returns `Ok(Value)` with the resolved value, or an error if the path is invalid.
+fn resolve_dot_path(path: &[String], scope: &Scope) -> Result<Value, MdsError> {
+    let root = &path[0];
+    let value = scope
+        .get_var(root)
+        .ok_or_else(|| MdsError::undefined_var(root))?;
+    if path.len() == 1 {
+        return Ok(value.clone());
+    }
+    let mut current = value.clone();
+    for field in &path[1..] {
+        match current {
+            Value::Object(ref map) => {
+                current = map.get(field).cloned().ok_or_else(|| {
+                    MdsError::syntax(format!(
+                        "field '{field}' not found on object '{root}'"
+                    ))
+                })?;
+            }
+            _ => {
+                return Err(MdsError::syntax(format!(
+                    "cannot access field '{field}' on {}",
+                    current.type_name()
+                )));
+            }
+        }
+    }
+    Ok(current)
+}
+
 fn evaluate_expr(
     expr: &Expr,
     scope: &mut Scope,
@@ -102,6 +135,12 @@ fn evaluate_expr(
             let value = scope
                 .get_var(name)
                 .ok_or_else(|| MdsError::undefined_var(name))?;
+            // Objects cannot be directly interpolated — user must access a specific field
+            if matches!(value, Value::Object(_)) {
+                return Err(MdsError::syntax(format!(
+                    "cannot interpolate object '{name}' directly, access a specific field with dot notation (e.g. {{{name}.field}})"
+                )));
+            }
             Ok(value.to_string())
         }
         Expr::Call { name, args } => {
@@ -115,6 +154,46 @@ fn evaluate_expr(
         } => {
             let resolved_args = resolve_args(args, scope, ctx, 0)?;
             call_qualified_function(namespace, name, &resolved_args, scope, ctx)
+        }
+        Expr::MemberAccess { object, fields } => {
+            let value = scope
+                .get_var(object)
+                .ok_or_else(|| {
+                    // Give a targeted error if the name refers to an imported namespace
+                    if scope.get_namespace(object).is_some() {
+                        MdsError::syntax(format!(
+                            "'{object}' is an imported module, not a variable — to call a function use {{{object}.func()}}"
+                        ))
+                    } else {
+                        MdsError::undefined_var(object)
+                    }
+                })?;
+            let mut current = value.clone();
+            for field in fields {
+                match current {
+                    Value::Object(ref map) => {
+                        current = map.get(field).cloned().ok_or_else(|| {
+                            MdsError::syntax(format!(
+                                "field '{field}' not found on object '{object}'"
+                            ))
+                        })?;
+                    }
+                    _ => {
+                        return Err(MdsError::syntax(format!(
+                            "cannot access field '{field}' on {}",
+                            current.type_name()
+                        )));
+                    }
+                }
+            }
+            // Objects cannot be directly interpolated — user must access a specific field
+            match current {
+                Value::Object(_) => Err(MdsError::syntax(format!(
+                    "cannot interpolate object directly, access a specific field with dot notation (e.g. {{{object}.{field}}})",
+                    field = fields.last().map_or("field", |f| f.as_str())
+                ))),
+                _ => Ok(current.to_string()),
+            }
         }
     }
 }
@@ -144,6 +223,12 @@ fn resolve_args(
                 let resolved = resolve_args(inner_args, scope, ctx, depth + 1)?;
                 let result = call_function(name, &resolved, scope, ctx)?;
                 Ok(Value::String(result))
+            }
+            Arg::MemberAccess { object, fields } => {
+                let path: Vec<String> = std::iter::once(object.clone())
+                    .chain(fields.iter().cloned())
+                    .collect();
+                resolve_dot_path(&path, scope)
             }
         })
         .collect()
@@ -260,9 +345,7 @@ fn evaluate_if(
     scope: &mut Scope,
     ctx: &mut EvalContext,
 ) -> Result<String, MdsError> {
-    let value = scope
-        .get_var(&block.condition)
-        .ok_or_else(|| MdsError::undefined_var(&block.condition))?;
+    let value = resolve_dot_path(&block.condition, scope)?;
 
     if value.is_truthy() {
         evaluate_nodes(&block.then_body, scope, ctx)
@@ -278,9 +361,57 @@ fn evaluate_for(
     scope: &mut Scope,
     ctx: &mut EvalContext,
 ) -> Result<String, MdsError> {
-    let iterable = scope
-        .get_var(&block.iterable)
-        .ok_or_else(|| MdsError::undefined_var(&block.iterable))?;
+    let iterable = resolve_dot_path(&block.iterable, scope)?;
+
+    if let Some(ref key_var) = block.key_var {
+        // Key-value iteration: @for key, value in obj:
+        let map = match iterable {
+            Value::Object(m) => m,
+            _ => {
+                return Err(MdsError::syntax(format!(
+                    "key-value iteration requires an object, but got {}",
+                    iterable.type_name()
+                )));
+            }
+        };
+
+        if map.len() > MAX_LOOP_ITERATIONS {
+            return Err(MdsError::resource_limit(format!(
+                "object has {} entries, exceeding maximum loop iteration limit of {}",
+                map.len(),
+                MAX_LOOP_ITERATIONS
+            )));
+        }
+
+        // Sort keys alphabetically for deterministic output
+        let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        let mut output = String::new();
+        for (key, val) in entries {
+            ctx.total_iterations += 1;
+            if ctx.total_iterations > MAX_TOTAL_ITERATIONS {
+                return Err(MdsError::resource_limit(format!(
+                    "total loop iterations exceeded maximum of {} across all loops in this compilation",
+                    MAX_TOTAL_ITERATIONS
+                )));
+            }
+            scope.push();
+            scope.set_var(key_var, Value::String(key));
+            scope.set_var(&block.var, val);
+            let rendered = evaluate_nodes(&block.body, scope, ctx);
+            let pop_result = scope.pop();
+            output.push_str(&prefer_first_error(rendered, pop_result)?);
+        }
+        return Ok(output);
+    }
+
+    // Standard array iteration: @for item in iterable:
+    if let Value::Object(_) = &iterable {
+        return Err(MdsError::syntax(
+            "to iterate over an object's entries, use `@for key, value in obj:` syntax".to_string(),
+        ));
+    }
 
     let array = iterable
         .as_array()
@@ -404,7 +535,7 @@ mod tests {
     #[test]
     fn evaluate_if_truthy() {
         let nodes = vec![Node::If(IfBlock {
-            condition: "flag".to_string(),
+            condition: vec!["flag".to_string()],
             then_body: vec![text("yes")],
             else_body: Some(vec![text("no")]),
             offset: 0,
@@ -418,7 +549,7 @@ mod tests {
     #[test]
     fn evaluate_if_falsy() {
         let nodes = vec![Node::If(IfBlock {
-            condition: "flag".to_string(),
+            condition: vec!["flag".to_string()],
             then_body: vec![text("yes")],
             else_body: Some(vec![text("no")]),
             offset: 0,
@@ -433,7 +564,8 @@ mod tests {
     fn evaluate_for_loop() {
         let nodes = vec![Node::For(ForBlock {
             var: "item".to_string(),
-            iterable: "items".to_string(),
+            key_var: None,
+            iterable: vec!["items".to_string()],
             body: vec![
                 text("- "),
                 Node::Interpolation(Interpolation {

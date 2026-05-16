@@ -21,14 +21,15 @@ fn validate_node(node: &Node, scope: &mut Scope, file: &str, source: &str) -> Re
             validate_expr(&interp.expr, scope, file, source, interp.offset, interp.len)
         }
         Node::If(block) => {
-            // Condition must be a defined variable (truthiness is checked at evaluation time)
-            scope.get_var(&block.condition).ok_or_else(|| {
+            // Condition root must be a defined variable (truthiness is checked at evaluation time)
+            let root = &block.condition[0];
+            scope.get_var(root).ok_or_else(|| {
                 MdsError::undefined_var_at(
-                    &block.condition,
+                    root,
                     file,
                     source,
                     block.offset,
-                    block.condition.len(),
+                    root.len(),
                 )
             })?;
             // INVARIANT: @if does not push a scope frame. then_body and else_body are
@@ -44,25 +45,32 @@ fn validate_node(node: &Node, scope: &mut Scope, file: &str, source: &str) -> Re
             Ok(())
         }
         Node::For(block) => {
-            let iterable_val = scope.get_var(&block.iterable).ok_or_else(|| {
+            let root = &block.iterable[0];
+            let iterable_val = scope.get_var(root).ok_or_else(|| {
                 MdsError::undefined_var_at(
-                    &block.iterable,
+                    root,
                     file,
                     source,
                     block.offset,
-                    block.iterable.len(),
+                    root.len(),
                 )
             })?;
-            if !matches!(iterable_val, Value::Array(_)) {
+            // Only perform static type checks when:
+            // 1. No key_var (single-var iteration should be an array)
+            // 2. The iterable is a simple identifier (no dot path — can't statically resolve type)
+            if block.key_var.is_none() && block.iterable.len() == 1 && !matches!(iterable_val, Value::Array(_)) {
                 return Err(MdsError::type_error_at(
                     iterable_val.type_name(),
                     file,
                     source,
                     block.offset,
-                    block.iterable.len(),
+                    root.len(),
                 ));
             }
             scope.push();
+            if let Some(ref key_var) = block.key_var {
+                scope.set_var(key_var, Value::Null);
+            }
             scope.set_var(&block.var, Value::Null);
             let result = validate(&block.body, scope, file, source);
             let _ = scope.pop(); // Cannot fail — we just pushed
@@ -106,6 +114,14 @@ fn validate_expr(
             .get_var(name)
             .ok_or_else(|| MdsError::undefined_var_at(name, file, source, offset, name.len()))
             .map(|_| ()),
+        Expr::MemberAccess { object, .. } => {
+            // Validate that the root object is defined in scope.
+            // Field existence is checked at runtime since objects may vary.
+            scope
+                .get_var(object)
+                .ok_or_else(|| MdsError::undefined_var_at(object, file, source, offset, object.len()))
+                .map(|_| ())
+        }
         Expr::Call { name, args } => {
             let func = scope
                 .get_function(name)
@@ -170,6 +186,13 @@ fn validate_var_args(
             Arg::Var(var_name) => {
                 scope.get_var(var_name).ok_or_else(|| {
                     MdsError::undefined_var_at(var_name, file, source, offset, var_name.len())
+                })?;
+            }
+            Arg::MemberAccess { object, .. } => {
+                // Validate that the root object is defined in scope.
+                // Field existence is checked at runtime.
+                scope.get_var(object).ok_or_else(|| {
+                    MdsError::undefined_var_at(object, file, source, offset, object.len())
                 })?;
             }
             Arg::Call {

@@ -60,6 +60,11 @@ pub enum Expr {
         name: String,
         args: Vec<Arg>,
     },
+    /// Object field access: `{config.key}` or `{a.b.c}`
+    MemberAccess {
+        object: String,
+        fields: Vec<String>,
+    },
 }
 
 /// A function argument — a string literal, variable reference, or nested call.
@@ -72,11 +77,18 @@ pub enum Arg {
         name: String,
         args: Vec<Arg>,
     },
+    /// Object field access passed as argument: `greet(config.name)`
+    MemberAccess {
+        object: String,
+        fields: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct IfBlock {
-    pub condition: String,
+    /// Condition as a dot-separated path: single identifier is `vec!["name"]`,
+    /// dot path is `vec!["config", "debug"]`.
+    pub condition: Vec<String>,
     pub then_body: Vec<Node>,
     pub else_body: Option<Vec<Node>>,
     pub offset: usize,
@@ -85,7 +97,10 @@ pub struct IfBlock {
 #[derive(Debug, Clone)]
 pub struct ForBlock {
     pub var: String,
-    pub iterable: String,
+    /// Optional key variable for `@for key, value in obj:` iteration.
+    pub key_var: Option<String>,
+    /// Iterable as a dot-separated path: `vec!["items"]` or `vec!["config", "items"]`.
+    pub iterable: Vec<String>,
     pub body: Vec<Node>,
     pub offset: usize,
 }

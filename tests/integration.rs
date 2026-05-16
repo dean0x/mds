@@ -1536,21 +1536,11 @@ fn crlf_line_endings() {
 }
 
 #[test]
-fn dot_notation_variable_access_gives_clear_error() {
-    // {alias.name} (dot without parens) must produce a helpful error,
-    // not a confusing "unclosed parenthesis" message.
-    let source = "@import \"./utils.mds\" as u\n\n{u.greet}\n";
-    let result = mds::compile_str_with(source, None, None);
-    assert!(result.is_err(), "dot notation without parens should be an error");
-    let err = format!("{}", result.unwrap_err());
-    assert!(
-        err.contains("dot notation") || err.contains("not supported"),
-        "error should explain that dot notation for variables is unsupported, got: {err}"
-    );
-    assert!(
-        !err.contains("unclosed parenthesis"),
-        "error must not say 'unclosed parenthesis' — misleading, got: {err}"
-    );
+fn dot_notation_object_access_works() {
+    // {obj.key} now works as object field access (not an error).
+    let source = "---\ndata:\n  name: Alice\n---\n{data.name}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert_eq!(result, "Alice\n");
 }
 
 #[test]
@@ -1708,19 +1698,14 @@ fn compile_str_truly_no_frontmatter() {
     );
 }
 
-// ── YAML map type rejected (Spec 4.1) ────────────────────────────────────────
+// ── YAML map type now supported (object access) ──────────────────────────────
 
 #[test]
-fn yaml_map_type_rejected() {
-    // Per spec: "No object/map type in v0.1". A YAML map value must be a compile error.
-    let source = "---\nconfig:\n  key: value\n---\nHello!\n";
-    let result = mds::compile_str(source);
-    assert!(result.is_err(), "YAML map/object type should be rejected");
-    let err = format!("{}", result.unwrap_err());
-    assert!(
-        err.contains("object") || err.contains("map") || err.contains("not supported"),
-        "error should mention object/map not supported, got: {err}"
-    );
+fn yaml_map_type_works() {
+    // YAML map values are now supported as objects with dot-notation access.
+    let source = "---\nconfig:\n  key: value\n---\n{config.key}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert_eq!(result, "value\n");
 }
 
 // ── Loop variable block scope (Spec 4.4) ─────────────────────────────────────
@@ -3237,4 +3222,144 @@ fn cli_init_rejects_path_traversal() {
         stderr.contains("..") || stderr.contains("traversal") || stderr.contains("components"),
         "error should mention path traversal, got: {stderr}"
     );
+}
+
+// ── Object/Map type support ───────────────────────────────────────────────────
+
+#[test]
+fn object_single_level_access() {
+    let source = "---\nconfig:\n  key: val\n---\n{config.key}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert_eq!(result, "val\n");
+}
+
+#[test]
+fn object_multi_level_access() {
+    let source = "---\na:\n  b:\n    c: deep\n---\n{a.b.c}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert_eq!(result, "deep\n");
+}
+
+#[test]
+fn object_direct_interpolation_error() {
+    let source = "---\nobj:\n  key: val\n---\n{obj}\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("cannot interpolate object"), "got: {err}");
+}
+
+#[test]
+fn object_field_not_found() {
+    let source = "---\nobj:\n  key: val\n---\n{obj.missing}\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("not found") && err.contains("missing"), "got: {err}");
+}
+
+#[test]
+fn object_access_on_non_object() {
+    let source = "---\nname: Alice\n---\n{name.key}\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("cannot access field") && err.contains("string"), "got: {err}");
+}
+
+#[test]
+fn if_dot_path_truthy() {
+    let source = "---\nconfig:\n  debug: true\n---\n@if config.debug:\nDEBUG ON\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("DEBUG ON"), "got: {result}");
+}
+
+#[test]
+fn if_dot_path_falsy() {
+    let source = "---\nconfig:\n  debug: false\n---\n@if config.debug:\nDEBUG ON\n@else:\nDEBUG OFF\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("DEBUG OFF"), "got: {result}");
+}
+
+#[test]
+fn for_dot_path_iterable() {
+    let source = "---\nconfig:\n  items:\n    - a\n    - b\n---\n@for item in config.items:\n- {item}\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("- a") && result.contains("- b"), "got: {result}");
+}
+
+#[test]
+fn for_key_value_object() {
+    let source = "---\nobj:\n  alpha: 1\n  beta: 2\n---\n@for key, value in obj:\n{key}={value}\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("alpha=1") && result.contains("beta=2"), "got: {result}");
+    // Verify alphabetical order
+    let alpha_pos = result.find("alpha=1").unwrap();
+    let beta_pos = result.find("beta=2").unwrap();
+    assert!(alpha_pos < beta_pos, "keys should be in sorted order, got: {result}");
+}
+
+#[test]
+fn for_single_var_object_error() {
+    let source = "---\nobj:\n  key: val\n---\n@for item in obj:\n{item}\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("key, value") || err.contains("key,value") || err.contains("object"),
+        "error should direct to key-value syntax, got: {err}"
+    );
+}
+
+#[test]
+fn for_key_value_non_object_error() {
+    let source = "---\nitems:\n  - a\n  - b\n---\n@for k, v in items:\n{k}\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("object") || err.contains("array"),
+        "error should mention type, got: {err}"
+    );
+}
+
+#[test]
+fn func_arg_dot_path() {
+    let source = "---\nconfig:\n  name: Alice\n---\n@define greet(who):\nHello {who}!\n@end\n{greet(config.name)}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("Hello Alice!"), "got: {result}");
+}
+
+#[test]
+fn objects_inside_arrays() {
+    let source = "---\nitems:\n  - name: Alice\n  - name: Bob\n---\n@for item in items:\n{item.name}\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("Alice") && result.contains("Bob"), "got: {result}");
+}
+
+#[test]
+fn empty_object_is_falsy() {
+    let source = "@if obj:\nTRUTHY\n@else:\nFALSY\n@end\n";
+    let mut vars = std::collections::HashMap::new();
+    vars.insert("obj".to_string(), mds::Value::Object(std::collections::HashMap::new()));
+    let result = mds::compile_str_with(source, None, Some(vars)).unwrap();
+    assert!(result.contains("FALSY"), "empty object should be falsy, got: {result}");
+}
+
+#[test]
+fn namespace_and_object_coexist() {
+    // Verify that {obj.key} (MemberAccess) works alongside the existing codebase features.
+    let source = "---\nobj:\n  key: val\n---\n{obj.key}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert_eq!(result, "val\n");
+}
+
+#[test]
+fn vars_file_with_nested_objects() {
+    // Test that load_vars_file handles nested JSON objects
+    let dir = tempfile::tempdir().unwrap();
+    let vars_path = dir.path().join("vars.json");
+    std::fs::write(&vars_path, r#"{"config": {"name": "Test"}}"#).unwrap();
+    let vars = mds::load_vars_file(&vars_path).unwrap();
+    assert!(matches!(vars.get("config"), Some(mds::Value::Object(_))));
 }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::error::MdsError;
@@ -13,12 +14,13 @@ pub enum Value {
     Number(f64),
     Boolean(bool),
     Array(Vec<Value>),
+    Object(HashMap<String, Value>),
     Null,
 }
 
 impl Value {
     /// MDS truthiness rules:
-    /// Falsy: false, null, "", [], 0
+    /// Falsy: false, null, "", [], {}, 0
     /// Everything else is truthy.
     #[must_use]
     pub fn is_truthy(&self) -> bool {
@@ -28,6 +30,7 @@ impl Value {
             Value::String(s) => !s.is_empty(),
             Value::Number(n) => *n != 0.0 && !n.is_nan(),
             Value::Array(a) => !a.is_empty(),
+            Value::Object(m) => !m.is_empty(),
         }
     }
 
@@ -57,8 +60,16 @@ impl Value {
                 .map(|v| Self::from_yaml_inner(v, depth + 1))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Value::Array),
-            serde_yml::Value::Mapping(_) => {
-                Err(MdsError::yaml_error("object/map types are not supported in MDS v0.1"))
+            serde_yml::Value::Mapping(mapping) => {
+                let mut map = HashMap::new();
+                for (k, v) in mapping {
+                    // Skip non-string keys (YAML allows non-string keys, MDS does not)
+                    if let serde_yml::Value::String(key) = k {
+                        let value = Self::from_yaml_inner(v, depth + 1)?;
+                        map.insert(key, value);
+                    }
+                }
+                Ok(Value::Object(map))
             }
             serde_yml::Value::Tagged(t) => Self::from_yaml_inner(t.value, depth + 1),
         }
@@ -89,8 +100,13 @@ impl Value {
                 .map(|v| Self::from_json_inner(v, depth + 1))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Value::Array),
-            serde_json::Value::Object(_) => {
-                Err(MdsError::json_error("object/map types are not supported in MDS v0.1"))
+            serde_json::Value::Object(obj) => {
+                let mut map = HashMap::new();
+                for (key, val) in obj {
+                    let value = Self::from_json_inner(val, depth + 1)?;
+                    map.insert(key, value);
+                }
+                Ok(Value::Object(map))
             }
         }
     }
@@ -112,6 +128,7 @@ impl Value {
             Value::Number(_) => "number",
             Value::Boolean(_) => "boolean",
             Value::Array(_) => "array",
+            Value::Object(_) => "object",
             Value::Null => "null",
         }
     }
@@ -159,6 +176,12 @@ impl<T: Into<Value>> From<Vec<T>> for Value {
     }
 }
 
+impl From<HashMap<String, Value>> for Value {
+    fn from(m: HashMap<String, Value>) -> Self {
+        Value::Object(m)
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -183,6 +206,18 @@ impl fmt::Display for Value {
                         write!(f, ", ")?;
                     }
                     write!(f, "{item}")?;
+                }
+                Ok(())
+            }
+            Value::Object(map) => {
+                // Sort keys alphabetically for deterministic output
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                for (i, key) in keys.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{key}: {}", map[*key])?;
                 }
                 Ok(())
             }
@@ -278,6 +313,123 @@ mod tests {
             err.contains("nesting") || err.contains("depth") || err.contains("64"),
             "error should mention depth limit, got: {err}"
         );
+    }
+
+    // ── Object/Map type tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_object_truthiness_empty() {
+        assert!(
+            !Value::Object(HashMap::new()).is_truthy(),
+            "empty object should be falsy"
+        );
+    }
+
+    #[test]
+    fn test_object_truthiness_non_empty() {
+        let mut m = HashMap::new();
+        m.insert("key".to_string(), Value::String("val".to_string()));
+        assert!(
+            Value::Object(m).is_truthy(),
+            "non-empty object should be truthy"
+        );
+    }
+
+    #[test]
+    fn test_from_yaml_mapping() {
+        use serde_yml::Value as YamlValue;
+        let mut mapping = serde_yml::Mapping::new();
+        mapping.insert(
+            YamlValue::String("key".to_string()),
+            YamlValue::String("val".to_string()),
+        );
+        let yaml = YamlValue::Mapping(mapping);
+        let result = Value::from_yaml(yaml).unwrap();
+        if let Value::Object(map) = result {
+            assert_eq!(map.get("key"), Some(&Value::String("val".to_string())));
+        } else {
+            panic!("expected Value::Object");
+        }
+    }
+
+    #[test]
+    fn test_from_json_object() {
+        let json = serde_json::json!({"key": "val"});
+        let result = Value::from_json(json).unwrap();
+        if let Value::Object(map) = result {
+            assert_eq!(map.get("key"), Some(&Value::String("val".to_string())));
+        } else {
+            panic!("expected Value::Object");
+        }
+    }
+
+    #[test]
+    fn test_yaml_nested_object_depth_limit() {
+        use serde_yml::Value as YamlValue;
+
+        // Build a YAML mapping nested 65 levels deep (just past the limit of 64).
+        let mut nested = YamlValue::Null;
+        for _ in 0..65 {
+            let mut mapping = serde_yml::Mapping::new();
+            mapping.insert(YamlValue::String("child".to_string()), nested);
+            nested = YamlValue::Mapping(mapping);
+        }
+
+        let result = Value::from_yaml(nested);
+        assert!(
+            result.is_err(),
+            "YAML object nested 65 levels deep must be rejected"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("nesting") || err.contains("depth") || err.contains("64"),
+            "error should mention depth limit, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_json_nested_object_depth_limit() {
+        // Build a JSON object nested 65 levels deep (just past the limit of 64).
+        let mut nested = serde_json::Value::Null;
+        for _ in 0..65 {
+            let mut obj = serde_json::Map::new();
+            obj.insert("child".to_string(), nested);
+            nested = serde_json::Value::Object(obj);
+        }
+
+        let result = Value::from_json(nested);
+        assert!(
+            result.is_err(),
+            "JSON object nested 65 levels deep must be rejected"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("nesting") || err.contains("depth") || err.contains("64"),
+            "error should mention depth limit, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_object_display() {
+        let mut m = HashMap::new();
+        m.insert("key1".to_string(), Value::String("val1".to_string()));
+        m.insert("key2".to_string(), Value::String("val2".to_string()));
+        let s = Value::Object(m).to_string();
+        assert_eq!(s, "key1: val1, key2: val2", "object display should be sorted key: val pairs");
+    }
+
+    #[test]
+    fn test_object_type_name() {
+        let obj = Value::Object(HashMap::new());
+        assert_eq!(obj.type_name(), "object");
+    }
+
+    #[test]
+    fn test_from_hashmap() {
+        let mut m = HashMap::new();
+        m.insert("a".to_string(), Value::Number(1.0));
+        let v: Value = m.clone().into();
+        assert_eq!(v, Value::Object(m));
     }
 
     // ── Security: JSON value depth limit ─────────────────────────────────────
