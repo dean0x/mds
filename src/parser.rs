@@ -552,8 +552,7 @@ fn parse_dot_expr(
             file, source, offset, len,
         ));
     }
-    for part in &parts {
-        let part = part.trim();
+    for part in parts.iter().map(|p| p.trim()) {
         if !is_valid_identifier(part) {
             return Err(MdsError::syntax_at(
                 format!("invalid dot-path in interpolation: '{content}' — each segment must be a valid identifier"),

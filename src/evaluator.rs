@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::ast::{Arg, Expr, ForBlock, IfBlock, IncludeDirective, Node};
 use crate::error::MdsError;
+use crate::parser::MAX_DOT_SEGMENTS;
 use crate::scope::{FunctionDef, Scope};
 use crate::value::Value;
 
@@ -98,9 +100,9 @@ fn evaluate_nodes(
 /// resolved root value. Passing an empty `fields` slice returns the root variable itself.
 /// Returns `Ok(Value)` with the resolved value, or an error if the path is invalid.
 fn resolve_dot_path(root: &str, fields: &[String], scope: &Scope) -> Result<Value, MdsError> {
-    if fields.len() > MAX_CALL_DEPTH {
+    if fields.len() > MAX_DOT_SEGMENTS {
         return Err(MdsError::syntax(format!(
-            "dot path depth exceeds maximum of {MAX_CALL_DEPTH} segments"
+            "dot path depth exceeds maximum of {MAX_DOT_SEGMENTS} segments"
         )));
     }
     let mut current = scope
@@ -363,7 +365,7 @@ fn run_loop_body(
 fn evaluate_for_key_value(
     key_var: &str,
     val_var: &str,
-    map: std::collections::HashMap<String, Value>,
+    map: HashMap<String, Value>,
     body: &[Node],
     scope: &mut Scope,
     ctx: &mut EvalContext,
