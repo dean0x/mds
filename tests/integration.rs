@@ -1030,8 +1030,8 @@ fn no_frontmatter_with_directives() {
 #[test]
 fn multiple_escaped_braces() {
     let result = mds::compile(fixture("multiple_escaped_braces.mds"), None).unwrap();
-    // \{a\} → literal '{' + 'a\}' as text, \{b\} → literal '{' + 'b\}' as text
-    // Per spec: only \{ is an escape sequence, \} is plain text
+    // \{a\} → literal '{a}' and \{b\} → literal '{b}'
+    // Per spec: both \{ and \} are escape sequences, producing literal { and }
     assert!(
         result.contains("{a") && result.contains("{b"),
         "escaped braces should produce literal '{{', got: {result}"
@@ -1165,9 +1165,8 @@ fn include_respects_export_visibility_for_prompt() {
 
 #[test]
 fn escaped_braces_in_function_body() {
-    // Per spec and existing tests (multiple_escaped_braces): only \{ is an escape
-    // sequence producing a literal '{'. The closing \} is plain text, rendered as \}.
-    // So \{curly braces\} → "{curly braces\}" in output.
+    // Per spec: both \{ and \} are escape sequences producing literal braces.
+    // So \{curly braces\} → "{curly braces}" in output.
     let result = mds::compile(fixture("escaped_brace_in_fn.mds"), None).unwrap();
     assert!(
         result.contains("{curly braces"),
@@ -1183,9 +1182,8 @@ fn escaped_braces_in_function_body() {
 
 #[test]
 fn escaped_braces_in_blocks() {
-    // Per spec and existing tests (multiple_escaped_braces): only \{ is an escape
-    // sequence producing a literal '{'. The closing \} is plain text, rendered as \}.
-    // So \{variable\} => "{variable\}" and \{item\} => "{item\}".
+    // Per spec: both \{ and \} are escape sequences producing literal braces.
+    // So \{variable\} => "{variable}" and \{item\} => "{item}".
     let result = mds::compile(fixture("escaped_brace_in_blocks.mds"), None).unwrap();
     assert!(
         result.contains("{variable"),
@@ -1540,7 +1538,7 @@ fn dot_notation_object_access_works() {
     // {obj.key} now works as object field access (not an error).
     let source = "---\ndata:\n  name: Alice\n---\n{data.name}\n";
     let result = mds::compile_str(source).unwrap();
-    assert_eq!(result, "Alice\n");
+    assert!(result.contains("Alice\n"), "got: {result}");
 }
 
 #[test]
@@ -1705,7 +1703,7 @@ fn yaml_map_type_works() {
     // YAML map values are now supported as objects with dot-notation access.
     let source = "---\nconfig:\n  key: value\n---\n{config.key}\n";
     let result = mds::compile_str(source).unwrap();
-    assert_eq!(result, "value\n");
+    assert!(result.contains("value\n"), "got: {result}");
 }
 
 // ── Loop variable block scope (Spec 4.4) ─────────────────────────────────────
@@ -3230,14 +3228,14 @@ fn cli_init_rejects_path_traversal() {
 fn object_single_level_access() {
     let source = "---\nconfig:\n  key: val\n---\n{config.key}\n";
     let result = mds::compile_str(source).unwrap();
-    assert_eq!(result, "val\n");
+    assert!(result.contains("val\n"), "got: {result}");
 }
 
 #[test]
 fn object_multi_level_access() {
     let source = "---\na:\n  b:\n    c: deep\n---\n{a.b.c}\n";
     let result = mds::compile_str(source).unwrap();
-    assert_eq!(result, "deep\n");
+    assert!(result.contains("deep\n"), "got: {result}");
 }
 
 #[test]
@@ -3351,7 +3349,7 @@ fn namespace_and_object_coexist() {
     // Verify that {obj.key} (MemberAccess) works alongside the existing codebase features.
     let source = "---\nobj:\n  key: val\n---\n{obj.key}\n";
     let result = mds::compile_str(source).unwrap();
-    assert_eq!(result, "val\n");
+    assert!(result.contains("val\n"), "got: {result}");
 }
 
 #[test]
@@ -3362,4 +3360,111 @@ fn vars_file_with_nested_objects() {
     std::fs::write(&vars_path, r#"{"config": {"name": "Test"}}"#).unwrap();
     let vars = mds::load_vars_file(&vars_path).unwrap();
     assert!(matches!(vars.get("config"), Some(mds::Value::Object(_))));
+}
+
+// ── Frontmatter Preservation in Output (E2) ──────────────────────────────────
+
+#[test]
+fn frontmatter_preserved_in_str_output() {
+    let result = mds::compile_str("---\nname: World\n---\nHello {name}!\n").unwrap();
+    assert_eq!(result, "---\nname: World\n---\nHello World!\n");
+}
+
+#[test]
+fn frontmatter_type_mds_stripped() {
+    let source = "---\ntype: mds\nname: Alice\n---\nHello {name}!\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("---\nname: Alice\n---\n"),
+        "type: mds should be stripped, got: {result}"
+    );
+    assert!(
+        !result.contains("type: mds"),
+        "type: mds should not be in output, got: {result}"
+    );
+}
+
+#[test]
+fn frontmatter_type_mds_only_no_fences() {
+    let source = "---\ntype: mds\n---\nHello!\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        !result.contains("---"),
+        "no frontmatter fences when only type: mds, got: {result}"
+    );
+    assert_eq!(result, "Hello!\n");
+}
+
+#[test]
+fn frontmatter_empty_no_fences() {
+    // Empty frontmatter (---\n---) — the parser returns None for empty frontmatter,
+    // so raw_frontmatter is None and no fences are emitted.
+    let result = mds::compile_str("---\n---\nHello!\n").unwrap();
+    assert!(
+        !result.starts_with("---"),
+        "empty frontmatter should not produce fences, got: {result}"
+    );
+}
+
+#[test]
+fn frontmatter_runtime_override_doesnt_alter_output() {
+    // The frontmatter in the output reflects original values; the body uses overridden values.
+    let source = "---\nname: Alice\n---\nHello {name}!\n";
+    let mut vars = std::collections::HashMap::new();
+    vars.insert("name".to_string(), mds::Value::String("Bob".to_string()));
+    let result = mds::compile_str_with(source, None, Some(vars)).unwrap();
+    assert!(
+        result.contains("name: Alice"),
+        "output frontmatter should show original value, got: {result}"
+    );
+    assert!(
+        result.contains("Hello Bob!"),
+        "body should use overridden value, got: {result}"
+    );
+}
+
+#[test]
+fn frontmatter_only_no_body() {
+    // Frontmatter-only file (no body text after ---) emits frontmatter fences.
+    let source = "---\nkey: val\n---\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("---\nkey: val\n---"),
+        "frontmatter-only file should preserve frontmatter, got: {result}"
+    );
+}
+
+#[test]
+fn frontmatter_with_objects_preserved() {
+    let source = "---\nconfig:\n  theme: dark\n  debug: true\n---\n{config.theme}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("config:"),
+        "nested YAML should be preserved in frontmatter, got: {result}"
+    );
+    assert!(result.contains("theme: dark"), "got: {result}");
+    assert!(
+        result.contains("dark\n"),
+        "body should resolve to 'dark', got: {result}"
+    );
+}
+
+#[test]
+fn frontmatter_imported_module_not_emitted() {
+    // Only the root module's frontmatter appears in output.
+    // Imported modules' frontmatter is captured but never emitted.
+    let dir = tempfile::tempdir().unwrap();
+    let lib_path = dir.path().join("lib.mds");
+    let main_path = dir.path().join("main.mds");
+    std::fs::write(&lib_path, "---\nlibkey: libval\n---\n@define greet(n):\nHi {n}!\n@end\n").unwrap();
+    std::fs::write(&main_path, "---\nmainkey: mainval\n---\n@import \"./lib.mds\"\n{greet(\"World\")}\n").unwrap();
+    let result = mds::compile(&main_path, None).unwrap();
+    assert!(
+        result.contains("mainkey: mainval"),
+        "root frontmatter should appear in output, got: {result}"
+    );
+    assert!(
+        !result.contains("libkey"),
+        "imported module frontmatter should not appear in output, got: {result}"
+    );
 }

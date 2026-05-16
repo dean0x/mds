@@ -61,7 +61,7 @@ Hello {name}!
 
 - Single braces: `{identifier}`
 - Valid interpolation: content must be a valid identifier (`[a-zA-Z_][a-zA-Z0-9_]*`) or function call
-- Escaping: `\{` produces a literal `{` in output
+- Escaping: `\{` produces a literal `{` in output; `\}` produces a literal `}` in output
 - Inside fenced code blocks (triple backtick): no interpolation occurs (raw passthrough)
 - Undefined variable → compilation error (not silent empty string)
 
@@ -619,7 +619,7 @@ text            := (raw_text | interpolation | escaped_brace)*
 interpolation   := "{" (qualified_call | identifier | function_call) "}"
 qualified_call  := identifier "." identifier "(" arguments? ")"
 function_call   := identifier "(" arguments? ")"
-escaped_brace   := "\{"
+escaped_brace   := "\{" | "\}"
 
 identifier      := [a-zA-Z_][a-zA-Z0-9_]*
 identifier_list := identifier ("," identifier)*

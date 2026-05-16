@@ -40,6 +40,7 @@ fn find_project_root(start: &Path) -> PathBuf {
 pub struct ResolvedModule {
     pub(crate) functions: HashMap<String, Arc<FunctionDef>>,
     pub(crate) prompt_body: Option<String>,
+    pub(crate) raw_frontmatter: Option<String>,
     pub(crate) has_explicit_exports: bool,
     pub(crate) explicit_exports: HashSet<String>,
 }
@@ -285,6 +286,9 @@ impl ModuleCache {
         let tokens = tokenize(source, file_str)?;
         let module = parse_with_ctx(&tokens, file_str, source)?;
 
+        // Capture raw frontmatter before build_scope_from_frontmatter borrows the module.
+        let raw_frontmatter = module.frontmatter.as_ref().map(|fm| fm.raw.clone());
+
         // Build scope from frontmatter + runtime vars
         let mut scope = build_scope_from_frontmatter(module.frontmatter.as_ref(), is_md, runtime_vars)?;
 
@@ -306,6 +310,7 @@ impl ModuleCache {
         Ok(ResolvedModule {
             functions,
             prompt_body,
+            raw_frontmatter,
             has_explicit_exports,
             explicit_exports,
         })

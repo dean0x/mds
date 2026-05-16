@@ -8,7 +8,7 @@
 //!
 //! ```rust
 //! let output = mds::compile_str("---\nname: World\n---\nHello {name}!\n")?;
-//! assert_eq!(output, "Hello World!\n");
+//! assert_eq!(output, "---\nname: World\n---\nHello World!\n");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -97,7 +97,7 @@ pub fn compile(
 ///
 /// ```rust
 /// let output = mds::compile_str("---\ngreeting: Hi\n---\n{greeting} there!\n")?;
-/// assert_eq!(output, "Hi there!\n");
+/// assert_eq!(output, "---\ngreeting: Hi\n---\nHi there!\n");
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[must_use = "the compiled Markdown output should be used"]
@@ -246,11 +246,12 @@ pub fn compile_collecting_warnings(
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
     let resolved = cache.resolve(path, &vars, &mut warnings)?;
-    let output = resolved
+    let body = resolved
         .prompt_body
         .as_deref()
         .map(clean_output)
         .unwrap_or_default();
+    let output = prepend_frontmatter(resolved.raw_frontmatter.as_deref(), body);
     Ok((output, warnings))
 }
 
@@ -269,11 +270,12 @@ pub fn compile_str_collecting_warnings(
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
     let resolved = cache.resolve_source(source, &dir, &vars, &mut warnings)?;
-    let output = resolved
+    let body = resolved
         .prompt_body
         .as_deref()
         .map(clean_output)
         .unwrap_or_default();
+    let output = prepend_frontmatter(resolved.raw_frontmatter.as_deref(), body);
     Ok((output, warnings))
 }
 
@@ -331,6 +333,42 @@ pub fn check_str_collecting_warnings(
     let mut warnings = vec![];
     cache.resolve_source(source, &dir, &vars, &mut warnings)?;
     Ok(((), warnings))
+}
+
+/// Remove the `type: mds` line from raw frontmatter content.
+///
+/// Returns `Some(remaining)` if any non-whitespace content survives after filtering,
+/// or `None` if the frontmatter would be empty (nothing worth emitting).
+fn strip_type_mds(raw: &str) -> Option<String> {
+    let filtered: String = raw
+        .lines()
+        .filter(|line| {
+            !line
+                .trim()
+                .strip_prefix("type:")
+                .is_some_and(|v| v.trim() == "mds")
+        })
+        .map(|line| format!("{line}\n"))
+        .collect();
+    if filtered.trim().is_empty() {
+        None
+    } else {
+        Some(filtered)
+    }
+}
+
+/// Prepend YAML frontmatter fences to a compiled body.
+///
+/// If `raw` is `None`, or after stripping `type: mds` the frontmatter is empty,
+/// the body is returned unchanged.
+fn prepend_frontmatter(raw: Option<&str>, body: String) -> String {
+    let Some(raw) = raw else {
+        return body;
+    };
+    let Some(cleaned) = strip_type_mds(raw) else {
+        return body;
+    };
+    format!("---\n{cleaned}---\n{body}")
 }
 
 /// Clean up output whitespace: collapse 3+ consecutive newlines to 2 (one blank line),
