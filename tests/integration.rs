@@ -3228,14 +3228,14 @@ fn cli_init_rejects_path_traversal() {
 fn object_single_level_access() {
     let source = "---\nconfig:\n  key: val\n---\n{config.key}\n";
     let result = mds::compile_str(source).unwrap();
-    assert!(result.contains("val\n"), "got: {result}");
+    assert_eq!(result, "---\nconfig:\n  key: val\n---\nval\n", "got: {result}");
 }
 
 #[test]
 fn object_multi_level_access() {
     let source = "---\na:\n  b:\n    c: deep\n---\n{a.b.c}\n";
     let result = mds::compile_str(source).unwrap();
-    assert!(result.contains("deep\n"), "got: {result}");
+    assert_eq!(result, "---\na:\n  b:\n    c: deep\n---\ndeep\n", "got: {result}");
 }
 
 #[test]
@@ -3349,7 +3349,7 @@ fn namespace_and_object_coexist() {
     // Verify that {obj.key} (MemberAccess) works alongside the existing codebase features.
     let source = "---\nobj:\n  key: val\n---\n{obj.key}\n";
     let result = mds::compile_str(source).unwrap();
-    assert!(result.contains("val\n"), "got: {result}");
+    assert_eq!(result, "---\nobj:\n  key: val\n---\nval\n", "got: {result}");
 }
 
 #[test]
@@ -3360,6 +3360,35 @@ fn vars_file_with_nested_objects() {
     std::fs::write(&vars_path, r#"{"config": {"name": "Test"}}"#).unwrap();
     let vars = mds::load_vars_file(&vars_path).unwrap();
     assert!(matches!(vars.get("config"), Some(mds::Value::Object(_))));
+}
+
+#[test]
+fn runtime_vars_object_dot_access() {
+    // Runtime-supplied objects (via compile_str_with) should be accessible via dot-path.
+    // This covers the runtime_vars path, distinct from frontmatter-defined objects.
+    let source = "{config.host}:{config.port}\n";
+    let mut inner = std::collections::HashMap::new();
+    inner.insert("host".to_string(), mds::Value::String("localhost".to_string()));
+    inner.insert("port".to_string(), mds::Value::String("8080".to_string()));
+    let mut vars = std::collections::HashMap::new();
+    vars.insert("config".to_string(), mds::Value::Object(inner));
+    let result = mds::compile_str_with(source, None, Some(vars)).unwrap();
+    // No frontmatter in source, so output is body only.
+    assert_eq!(result, "localhost:8080\n", "got: {result}");
+}
+
+#[test]
+fn for_key_value_dot_path_object() {
+    // Key-value iteration and dot-path object access should work in combination:
+    // @for key, value in config.settings should iterate the nested object.
+    let source = "---\nconfig:\n  settings:\n    theme: dark\n    lang: en\n---\n@for k, v in config.settings:\n{k}={v}\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    // Entries appear in sorted key order.
+    assert!(result.contains("lang=en"), "missing lang=en, got: {result}");
+    assert!(result.contains("theme=dark"), "missing theme=dark, got: {result}");
+    let lang_pos = result.find("lang=en").unwrap();
+    let theme_pos = result.find("theme=dark").unwrap();
+    assert!(lang_pos < theme_pos, "keys should be in sorted order, got: {result}");
 }
 
 // ── Frontmatter Preservation in Output (E2) ──────────────────────────────────
