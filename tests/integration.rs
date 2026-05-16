@@ -3383,12 +3383,13 @@ fn for_key_value_dot_path_object() {
     // @for key, value in config.settings should iterate the nested object.
     let source = "---\nconfig:\n  settings:\n    theme: dark\n    lang: en\n---\n@for k, v in config.settings:\n{k}={v}\n@end\n";
     let result = mds::compile_str(source).unwrap();
-    // Entries appear in sorted key order.
-    assert!(result.contains("lang=en"), "missing lang=en, got: {result}");
-    assert!(result.contains("theme=dark"), "missing theme=dark, got: {result}");
-    let lang_pos = result.find("lang=en").unwrap();
-    let theme_pos = result.find("theme=dark").unwrap();
-    assert!(lang_pos < theme_pos, "keys should be in sorted order, got: {result}");
+    // Entries appear in sorted key order (lang before theme alphabetically).
+    // Frontmatter is preserved in output.
+    assert_eq!(
+        result,
+        "---\nconfig:\n  settings:\n    theme: dark\n    lang: en\n---\nlang=en\ntheme=dark\n",
+        "got: {result}"
+    );
 }
 
 // ── Frontmatter Preservation in Output (E2) ──────────────────────────────────
@@ -3526,5 +3527,91 @@ fn strip_type_mds_only_strips_top_level_key() {
     assert!(
         result.contains("dark\n"),
         "body should resolve config.theme to 'dark', got: {result}"
+    );
+}
+
+// ── MAX_DOT_SEGMENTS depth-limit guards (E1 defense-in-depth) ───────────────
+
+#[test]
+fn dot_path_depth_limit_interpolation() {
+    // Interpolation with >32 dot segments must be rejected at parse time.
+    // Build a path with 33 segments: a.b.c.d...
+    let segments: Vec<String> = (0..33).map(|i| format!("f{i}")).collect();
+    let path = segments.join(".");
+    let source = format!("{{{path}}}\n");
+    let result = mds::compile_str(&source);
+    assert!(result.is_err(), "expected error for >32 segments, got Ok");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("exceeds maximum segment count"),
+        "error should mention segment count limit, got: {err}"
+    );
+}
+
+#[test]
+fn dot_path_depth_limit_if_condition() {
+    // @if condition with >32 dot segments must be rejected at parse time.
+    let segments: Vec<String> = (0..33).map(|i| format!("f{i}")).collect();
+    let path = segments.join(".");
+    let source = format!("@if {path}:\nyes\n@end\n");
+    let result = mds::compile_str(&source);
+    assert!(result.is_err(), "expected error for >32 segments in @if, got Ok");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("exceeds maximum segment count"),
+        "error should mention segment count limit, got: {err}"
+    );
+}
+
+#[test]
+fn dot_path_depth_limit_for_iterable() {
+    // @for iterable with >32 dot segments must be rejected at parse time.
+    let segments: Vec<String> = (0..33).map(|i| format!("f{i}")).collect();
+    let path = segments.join(".");
+    let source = format!("@for item in {path}:\n{{item}}\n@end\n");
+    let result = mds::compile_str(&source);
+    assert!(result.is_err(), "expected error for >32 segments in @for iterable, got Ok");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("exceeds maximum segment count"),
+        "error should mention segment count limit, got: {err}"
+    );
+}
+
+#[test]
+fn dot_path_depth_limit_exactly_at_boundary_is_allowed() {
+    // A path with exactly MAX_DOT_SEGMENTS (32) segments should not trigger the limit guard.
+    // Build root + 31 fields = 32 total segments.
+    // We use runtime vars to supply the deeply nested value so we don't need elaborate YAML.
+    // Only verify the parse/evaluate doesn't return a depth-limit error; the value
+    // itself may fail as undefined, which is acceptable.
+    let segments: Vec<String> = (0..32).map(|i| format!("f{i}")).collect();
+    let path = segments.join(".");
+    let source = format!("{{{path}}}\n");
+    let result = mds::compile_str(&source);
+    // Should not be a depth-limit error (may be an undefined-variable error).
+    if let Err(ref err) = result {
+        let err_str = format!("{err}");
+        assert!(
+            !err_str.contains("exceeds maximum segment count"),
+            "boundary-length path (32 segments) should not trigger depth limit, got: {err_str}"
+        );
+    }
+}
+
+// ── Traversed-path in error messages (evaluator path_so_far) ───────────────
+
+#[test]
+fn error_reports_full_traversed_path_on_missing_field() {
+    // When a field is missing after a successful partial traversal, the error
+    // should name the *traversed* path (not just the root variable).
+    // For {a.b.missing}, the error should mention "a.b" (the path traversed so far).
+    let source = "---\na:\n  b:\n    c: deep\n---\n{a.b.missing}\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err(), "expected error for missing field");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("missing") && err.contains("a.b"),
+        "error should report field 'missing' not found on 'a.b', got: {err}"
     );
 }
