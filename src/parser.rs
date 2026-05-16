@@ -265,32 +265,7 @@ impl Parser<'_> {
         let var_part = rest[..in_idx].trim();
         let iterable_str = rest[in_idx + 4..].trim();
 
-        // Determine if we have a key-value pattern: `key, value`
-        let (key_var, var) = if var_part.contains(',') {
-            let comma_idx = var_part
-                .find(',')
-                .expect("comma check already passed");
-            let key = var_part[..comma_idx].trim().to_string();
-            let val = var_part[comma_idx + 1..].trim().to_string();
-            if !is_valid_identifier(&key) {
-                return Err(MdsError::syntax(format!(
-                    "invalid key variable name: '{key}'"
-                )));
-            }
-            if !is_valid_identifier(&val) {
-                return Err(MdsError::syntax(format!(
-                    "invalid value variable name: '{val}'"
-                )));
-            }
-            (Some(key), val)
-        } else {
-            if !is_valid_identifier(var_part) {
-                return Err(MdsError::syntax(format!(
-                    "invalid loop variable name: '{var_part}'"
-                )));
-            }
-            (None, var_part.to_string())
-        };
+        let (key_var, var) = parse_for_vars(var_part)?;
 
         // Parse iterable as dot-separated path
         let iterable: Vec<String> = iterable_str
@@ -493,12 +468,43 @@ fn parse_quoted_path(s: &str) -> Result<String, MdsError> {
     Ok(s[1..=end].to_string())
 }
 
+/// Parse the variable part of a `@for` directive (before `in`).
+///
+/// Accepts either a single loop variable (`item`) or a key-value pair
+/// (`key, value`). Returns `(key_var, loop_var)` where `key_var` is `Some`
+/// only for key-value iteration.
+fn parse_for_vars(var_part: &str) -> Result<(Option<String>, String), MdsError> {
+    if var_part.contains(',') {
+        let comma_idx = var_part.find(',').expect("comma check already passed");
+        let key = var_part[..comma_idx].trim().to_string();
+        let val = var_part[comma_idx + 1..].trim().to_string();
+        if !is_valid_identifier(&key) {
+            return Err(MdsError::syntax(format!(
+                "invalid key variable name: '{key}'"
+            )));
+        }
+        if !is_valid_identifier(&val) {
+            return Err(MdsError::syntax(format!(
+                "invalid value variable name: '{val}'"
+            )));
+        }
+        Ok((Some(key), val))
+    } else {
+        if !is_valid_identifier(var_part) {
+            return Err(MdsError::syntax(format!(
+                "invalid loop variable name: '{var_part}'"
+            )));
+        }
+        Ok((None, var_part.to_string()))
+    }
+}
+
 /// Parse the expression inside `{ }` into an Expr.
 fn parse_interpolation_expr(
     content: &str,
     offset: usize,
-    _file: &str,
-    _source: &str,
+    file: &str,
+    source: &str,
 ) -> Result<Interpolation, MdsError> {
     let content = content.trim();
     let len = content.len();
@@ -523,7 +529,7 @@ fn parse_interpolation_expr(
                 let args_str = rest_after_dot[paren_pos + 1..]
                     .trim()
                     .strip_suffix(')')
-                    .ok_or_else(|| MdsError::syntax("unclosed parenthesis in function call"))?;
+                    .ok_or_else(|| MdsError::syntax_at("unclosed parenthesis in function call", file, source, offset, len))?;
                 let args = parse_args(args_str)?;
                 return Ok(Interpolation {
                     expr: Expr::QualifiedCall {
@@ -541,9 +547,10 @@ fn parse_interpolation_expr(
             for part in &parts {
                 let part = part.trim();
                 if !is_valid_identifier(part) {
-                    return Err(MdsError::syntax(format!(
-                        "invalid dot-path in interpolation: '{content}' — each segment must be a valid identifier"
-                    )));
+                    return Err(MdsError::syntax_at(
+                        format!("invalid dot-path in interpolation: '{content}' — each segment must be a valid identifier"),
+                        file, source, offset, len,
+                    ));
                 }
             }
             let object = parts[0].trim().to_string();
@@ -563,7 +570,7 @@ fn parse_interpolation_expr(
         let args_str = content[paren_pos + 1..]
             .trim()
             .strip_suffix(')')
-            .ok_or_else(|| MdsError::syntax("unclosed parenthesis in function call"))?;
+            .ok_or_else(|| MdsError::syntax_at("unclosed parenthesis in function call", file, source, offset, len))?;
         let args = parse_args(args_str)?;
         return Ok(Interpolation {
             expr: Expr::Call { name, args },
@@ -574,9 +581,12 @@ fn parse_interpolation_expr(
 
     // Simple variable reference
     if !is_valid_identifier(content) {
-        return Err(MdsError::syntax(format!(
-            "invalid interpolation: '{content}' is not a valid expression. Use a variable name (letters, numbers, underscores), a function call like func(), or escape with \\{{{{ for literal braces."
-        )));
+        return Err(MdsError::syntax_at(
+            format!(
+                "invalid interpolation: '{content}' is not a valid expression. Use a variable name (letters, numbers, underscores), a function call like func(), or escape with \\{{{{ for literal braces."
+            ),
+            file, source, offset, len,
+        ));
     }
     Ok(Interpolation {
         expr: Expr::Var(content.to_string()),
@@ -984,6 +994,125 @@ mod tests {
         } else {
             panic!("expected StringLiteral");
         }
+    }
+
+    // --- Tests for new features: MemberAccess, key-value @for, dot-path conditions ---
+
+    #[test]
+    fn parse_member_access_interpolation() {
+        // {config.key} should produce Expr::MemberAccess
+        let src = "{config.key}";
+        let tokens = tokenize(src, "test.mds").unwrap();
+        let module = parse_with_ctx(&tokens, "", "").unwrap();
+        if let Node::Interpolation(interp) = &module.body[0] {
+            if let Expr::MemberAccess { object, fields } = &interp.expr {
+                assert_eq!(object, "config");
+                assert_eq!(fields, &["key"]);
+            } else {
+                panic!("expected Expr::MemberAccess, got {:?}", interp.expr);
+            }
+        } else {
+            panic!("expected Interpolation node");
+        }
+    }
+
+    #[test]
+    fn parse_member_access_multi_segment() {
+        // {a.b.c} should produce MemberAccess with two fields
+        let src = "{a.b.c}";
+        let tokens = tokenize(src, "test.mds").unwrap();
+        let module = parse_with_ctx(&tokens, "", "").unwrap();
+        if let Node::Interpolation(interp) = &module.body[0] {
+            if let Expr::MemberAccess { object, fields } = &interp.expr {
+                assert_eq!(object, "a");
+                assert_eq!(fields, &["b", "c"]);
+            } else {
+                panic!("expected Expr::MemberAccess");
+            }
+        } else {
+            panic!("expected Interpolation node");
+        }
+    }
+
+    #[test]
+    fn parse_arg_member_access() {
+        // {greet(config.name)} should produce Expr::Call with Arg::MemberAccess
+        let src = r#"{greet(config.name)}"#;
+        let tokens = tokenize(src, "test.mds").unwrap();
+        let module = parse_with_ctx(&tokens, "", "").unwrap();
+        if let Node::Interpolation(interp) = &module.body[0] {
+            if let Expr::Call { name, args } = &interp.expr {
+                assert_eq!(name, "greet");
+                assert_eq!(args.len(), 1);
+                if let Arg::MemberAccess { object, fields } = &args[0] {
+                    assert_eq!(object, "config");
+                    assert_eq!(fields, &["name"]);
+                } else {
+                    panic!("expected Arg::MemberAccess, got {:?}", args[0]);
+                }
+            } else {
+                panic!("expected Expr::Call");
+            }
+        } else {
+            panic!("expected Interpolation node");
+        }
+    }
+
+    #[test]
+    fn parse_for_key_value_destructuring() {
+        // @for key, value in obj: should produce ForBlock with key_var set
+        let src = "@for key, value in obj:\n{key}: {value}\n@end\n";
+        let tokens = tokenize(src, "test.mds").unwrap();
+        let module = parse_with_ctx(&tokens, "", "").unwrap();
+        if let Node::For(block) = &module.body[0] {
+            assert_eq!(block.key_var.as_deref(), Some("key"));
+            assert_eq!(block.var, "value");
+            assert_eq!(block.iterable, &["obj"]);
+        } else {
+            panic!("expected For node");
+        }
+    }
+
+    #[test]
+    fn parse_for_dot_path_iterable() {
+        // @for item in data.list: — iterable is a dot-separated path
+        let src = "@for item in data.list:\n- {item}\n@end\n";
+        let tokens = tokenize(src, "test.mds").unwrap();
+        let module = parse_with_ctx(&tokens, "", "").unwrap();
+        if let Node::For(block) = &module.body[0] {
+            assert_eq!(block.key_var, None);
+            assert_eq!(block.var, "item");
+            assert_eq!(block.iterable, &["data", "list"]);
+        } else {
+            panic!("expected For node");
+        }
+    }
+
+    #[test]
+    fn parse_if_dot_path_condition() {
+        // @if config.debug: — condition is a multi-element Vec
+        let src = "@if config.debug:\nDebugging\n@end\n";
+        let tokens = tokenize(src, "test.mds").unwrap();
+        let module = parse_with_ctx(&tokens, "", "").unwrap();
+        if let Node::If(block) = &module.body[0] {
+            assert_eq!(block.condition, &["config", "debug"]);
+        } else {
+            panic!("expected If node");
+        }
+    }
+
+    #[test]
+    fn parse_invalid_dot_path_interpolation_returns_error() {
+        // {a.123.b} — "123" is not a valid identifier; should be an error
+        let src = "{a.123.b}";
+        let tokens = tokenize(src, "test.mds").unwrap();
+        let result = parse_with_ctx(&tokens, "test.mds", src);
+        assert!(result.is_err(), "invalid dot-path segment should fail");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("invalid dot-path"),
+            "error should mention 'invalid dot-path', got: {err_msg}"
+        );
     }
 
     #[test]
