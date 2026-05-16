@@ -45,9 +45,10 @@ count: 3
 **Rules:**
 
 - Standard YAML between `---` fences at file start
-- Types supported: string, number, boolean, array
+- Types supported: string, number, boolean, array, object (nested YAML mappings)
 - Runtime vars (CLI `--vars vars.json`) override frontmatter values
-- No object/map type in v0.1
+- Object values support dot-notation field access: `{config.key}`, `{a.b.c}`
+- Objects cannot be interpolated directly — access a specific field instead
 
 ---
 
@@ -59,8 +60,8 @@ Hello {name}!
 
 **Rules:**
 
-- Single braces: `{identifier}`
-- Valid interpolation: content must be a valid identifier (`[a-zA-Z_][a-zA-Z0-9_]*`) or function call
+- Single braces: `{identifier}` or dot path `{obj.field}`
+- Valid interpolation: a valid identifier (`[a-zA-Z_][a-zA-Z0-9_]*`), dot path (`{config.key}`, `{a.b.c}`), or function call
 - Escaping: `\{` produces a literal `{` in output; `\}` produces a literal `}` in output
 - Inside fenced code blocks (triple backtick): no interpolation occurs (raw passthrough)
 - Undefined variable → compilation error (not silent empty string)
@@ -87,8 +88,8 @@ Free tier content here.
 
 **Rules:**
 
-- Condition is a variable name (truthy/falsy check)
-- Falsy values: `false`, `null`, empty string `""`, empty array `[]`, `0`
+- Condition is a variable name or dot path (truthy/falsy check): `@if premium:` or `@if config.debug:`
+- Falsy values: `false`, `null`, empty string `""`, empty array `[]`, empty object `{}`, `0`
 - Everything else is truthy
 - Nesting: plain `@end`, resolved by innermost matching
 - No `@elseif` in v0.1 (use nested `@if` or restructure)
@@ -103,12 +104,22 @@ Free tier content here.
 @end
 ```
 
+Key-value iteration over objects:
+
+```mds
+@for key, value in config:
+{key} = {value}
+@end
+```
+
 **Rules:**
 
-- Iterates over arrays only
-- Loop variable (`item`) is block-scoped to the `@for...@end`
+- `@for item in iterable:` iterates over arrays; the iterable can be a variable name or dot path (`config.items`)
+- `@for key, value in obj:` iterates over object entries in sorted key order
+- Loop variables are block-scoped to the `@for...@end`
 - Loop variable shadows any outer variable with the same name
-- Iterating over a non-array → compilation error
+- Iterating over a non-array with single variable → compilation error (use `key, value` for objects)
+- Iterating with `key, value` over a non-object → compilation error
 
 ---
 
@@ -315,6 +326,16 @@ You have access to:
 | 4. Evaluate | Execute directives (expand loops, resolve conditions, call functions) | Iterate non-array, recursion detected |
 | 5. Render | Flatten evaluated tree → final Markdown string | (none expected) |
 
+### Frontmatter Preservation
+
+When the input file has YAML frontmatter, the compiled output preserves it:
+
+- The original frontmatter content is prepended to the output between `---` fences
+- The `type: mds` key (used for `.md` file detection) is stripped from the output frontmatter
+- If stripping `type: mds` leaves the frontmatter empty, no fences are emitted
+- Runtime variable overrides affect the body but do not alter the output frontmatter
+- Only the root module's frontmatter appears in output; imported modules' frontmatter is not emitted
+
 ### Error Format
 
 ```
@@ -477,6 +498,11 @@ Upgrade for premium features.
 ### Output: `welcome.md`
 
 ```markdown
+---
+name: Alice
+items: [apple, banana]
+premium: true
+---
 Hello Alice!
 
 Your items:
@@ -578,8 +604,6 @@ A language server (Rust) providing diagnostics, completions, go-to-definition fo
 These are intentionally deferred to keep the language simple and the compiler focused:
 
 - Structured JSON output (chat message arrays)
-- Dot notation for object variables (`{user.name}`)
-- Object/map variable type
 - TypeScript/JS integration or runtime bindings
 - Built-in functions (upper, lower, join, etc.)
 - `@elseif` chains
@@ -612,13 +636,16 @@ wildcard_reexport := "@export" "*" "from" quoted_path
 
 define          := "@define" identifier "(" params? "):" body "@end"
 include         := "@include" identifier
-if_block        := "@if" expression ":" body ("@else:" body)? "@end"
-for_block       := "@for" identifier "in" identifier ":" body "@end"
+if_block        := "@if" dot_path ":" body ("@else:" body)? "@end"
+for_block       := "@for" loop_vars "in" dot_path ":" body "@end"
+loop_vars       := identifier | identifier "," identifier
 
 text            := (raw_text | interpolation | escaped_brace)*
-interpolation   := "{" (qualified_call | identifier | function_call) "}"
+interpolation   := "{" (qualified_call | member_access | function_call | identifier) "}"
 qualified_call  := identifier "." identifier "(" arguments? ")"
+member_access   := identifier ("." identifier)+
 function_call   := identifier "(" arguments? ")"
+dot_path        := identifier ("." identifier)*
 escaped_brace   := "\{" | "\}"
 
 identifier      := [a-zA-Z_][a-zA-Z0-9_]*

@@ -22,6 +22,7 @@ fn validate_node(node: &Node, scope: &mut Scope, file: &str, source: &str) -> Re
         }
         Node::If(block) => {
             // Condition root must be a defined variable (truthiness is checked at evaluation time)
+            debug_assert!(!block.condition.is_empty(), "IfBlock.condition must be non-empty (parser invariant)");
             let root = &block.condition[0];
             scope.get_var(root).ok_or_else(|| {
                 MdsError::undefined_var_at(
@@ -45,6 +46,7 @@ fn validate_node(node: &Node, scope: &mut Scope, file: &str, source: &str) -> Re
             Ok(())
         }
         Node::For(block) => {
+            debug_assert!(!block.iterable.is_empty(), "ForBlock.iterable must be non-empty (parser invariant)");
             let root = &block.iterable[0];
             let iterable_val = scope.get_var(root).ok_or_else(|| {
                 MdsError::undefined_var_at(

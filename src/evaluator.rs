@@ -97,14 +97,12 @@ fn evaluate_nodes(
 /// `path[0]` is the root variable name; `path[1..]` are the field names to traverse.
 /// Returns `Ok(Value)` with the resolved value, or an error if the path is invalid.
 fn resolve_dot_path(path: &[String], scope: &Scope) -> Result<Value, MdsError> {
+    debug_assert!(!path.is_empty(), "resolve_dot_path called with empty path");
     let root = &path[0];
-    let value = scope
+    let mut current = scope
         .get_var(root)
+        .cloned()
         .ok_or_else(|| MdsError::undefined_var(root))?;
-    if path.len() == 1 {
-        return Ok(value.clone());
-    }
-    let mut current = value.clone();
     for field in &path[1..] {
         match current {
             Value::Object(ref map) => {
@@ -156,43 +154,24 @@ fn evaluate_expr(
             call_qualified_function(namespace, name, &resolved_args, scope, ctx)
         }
         Expr::MemberAccess { object, fields } => {
-            let value = scope
-                .get_var(object)
-                .ok_or_else(|| {
-                    // Give a targeted error if the name refers to an imported namespace
-                    if scope.get_namespace(object).is_some() {
-                        MdsError::syntax(format!(
-                            "'{object}' is an imported module, not a variable — to call a function use {{{object}.func()}}"
-                        ))
-                    } else {
-                        MdsError::undefined_var(object)
-                    }
-                })?;
-            let mut current = value.clone();
-            for field in fields {
-                match current {
-                    Value::Object(ref map) => {
-                        current = map.get(field).cloned().ok_or_else(|| {
-                            MdsError::syntax(format!(
-                                "field '{field}' not found on object '{object}'"
-                            ))
-                        })?;
-                    }
-                    _ => {
-                        return Err(MdsError::syntax(format!(
-                            "cannot access field '{field}' on {}",
-                            current.type_name()
-                        )));
-                    }
-                }
+            // Give a targeted error when the name refers to an imported namespace rather
+            // than a variable — before delegating to resolve_dot_path which only looks up vars.
+            if scope.get_var(object).is_none() && scope.get_namespace(object).is_some() {
+                return Err(MdsError::syntax(format!(
+                    "'{object}' is an imported module, not a variable — to call a function use {{{object}.func()}}"
+                )));
             }
+            let path: Vec<String> = std::iter::once(object.clone())
+                .chain(fields.iter().cloned())
+                .collect();
+            let value = resolve_dot_path(&path, scope)?;
             // Objects cannot be directly interpolated — user must access a specific field
-            match current {
+            match value {
                 Value::Object(_) => Err(MdsError::syntax(format!(
                     "cannot interpolate object directly, access a specific field with dot notation (e.g. {{{object}.{field}}})",
                     field = fields.last().map_or("field", |f| f.as_str())
                 ))),
-                _ => Ok(current.to_string()),
+                _ => Ok(value.to_string()),
             }
         }
     }
