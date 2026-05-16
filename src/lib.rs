@@ -340,16 +340,19 @@ pub fn check_str_collecting_warnings(
 /// Returns `Some(remaining)` if any non-whitespace content survives after filtering,
 /// or `None` if the frontmatter would be empty (nothing worth emitting).
 fn strip_type_mds(raw: &str) -> Option<String> {
-    let filtered: String = raw
-        .lines()
-        .filter(|line| {
-            !line
-                .trim()
-                .strip_prefix("type:")
-                .is_some_and(|v| v.trim() == "mds")
-        })
-        .map(|line| format!("{line}\n"))
-        .collect();
+    let mut filtered = String::with_capacity(raw.len());
+    for line in raw.lines() {
+        // Only strip the top-level (no leading whitespace) `type: mds` directive.
+        // Using line.trim() here would incorrectly remove indented keys inside nested
+        // YAML objects (e.g. `  type: mds` under a mapping), corrupting the output.
+        let is_type_mds = line
+            .strip_prefix("type:")
+            .is_some_and(|v| v.trim() == "mds");
+        if !is_type_mds {
+            filtered.push_str(line);
+            filtered.push('\n');
+        }
+    }
     if filtered.trim().is_empty() {
         None
     } else {

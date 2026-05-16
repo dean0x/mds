@@ -3468,3 +3468,34 @@ fn frontmatter_imported_module_not_emitted() {
         "imported module frontmatter should not appear in output, got: {result}"
     );
 }
+
+#[test]
+fn strip_type_mds_only_strips_top_level_key() {
+    // Regression: strip_type_mds used line.trim() before matching, which caused
+    // indented 'type: mds' lines inside nested YAML objects to be incorrectly removed.
+    // Only the top-level (no leading whitespace) 'type: mds' directive should be stripped.
+    let source = "---\ntype: mds\nconfig:\n  type: mds\n  theme: dark\n---\n{config.theme}\n";
+    let result = mds::compile_str(source).unwrap();
+    // The top-level `type: mds` must not appear as an unindented frontmatter key.
+    // Check that no line in the output equals "type: mds" (i.e. no leading whitespace).
+    let has_top_level_type_mds = result
+        .lines()
+        .any(|line| line == "type: mds");
+    assert!(
+        !has_top_level_type_mds,
+        "top-level 'type: mds' should be stripped from output, got: {result}"
+    );
+    // The indented `  type: mds` under config: must be preserved (was the bug).
+    assert!(
+        result.contains("  type: mds"),
+        "indented 'type: mds' inside nested YAML object should be preserved, got: {result}"
+    );
+    assert!(
+        result.contains("theme: dark"),
+        "sibling key in nested object should be preserved, got: {result}"
+    );
+    assert!(
+        result.contains("dark\n"),
+        "body should resolve config.theme to 'dark', got: {result}"
+    );
+}
