@@ -675,33 +675,41 @@ fn parse_args_inner(args_str: &str, depth: usize) -> Result<Vec<Arg>, MdsError> 
         if escaped {
             current.push(ch);
             escaped = false;
-        } else if in_string {
-            if ch == '\\' {
-                escaped = true;
-                current.push(ch);
-            } else if ch == string_char {
-                current.push(ch);
-                in_string = false;
-            } else {
+            continue;
+        }
+        if in_string {
+            match ch {
+                '\\' => {
+                    escaped = true;
+                    current.push(ch);
+                }
+                c if c == string_char => {
+                    current.push(ch);
+                    in_string = false;
+                }
+                _ => current.push(ch),
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => {
+                in_string = true;
+                string_char = ch;
                 current.push(ch);
             }
-        } else if ch == '"' || ch == '\'' {
-            in_string = true;
-            string_char = ch;
-            current.push(ch);
-        } else if ch == '(' {
-            paren_depth += 1;
-            current.push(ch);
-        } else if ch == ')' {
-            // paren_depth should not reach 0 here since the outer call site
-            // already stripped the closing ')' of the top-level call
-            paren_depth = paren_depth.saturating_sub(1);
-            current.push(ch);
-        } else if ch == ',' && paren_depth == 0 {
-            args.push(parse_single_arg_inner(current.trim(), depth)?);
-            current.clear();
-        } else {
-            current.push(ch);
+            '(' => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if paren_depth == 0 => {
+                args.push(parse_single_arg_inner(current.trim(), depth)?);
+                current.clear();
+            }
+            _ => current.push(ch),
         }
     }
 
