@@ -110,24 +110,24 @@ fn resolve_dot_path(root: &str, fields: &[String], scope: &Scope) -> Result<Valu
         .cloned()
         .ok_or_else(|| MdsError::undefined_var(root))?;
     for (i, field) in fields.iter().enumerate() {
+        // Build the traversed path for error messages (e.g. "a.b" when failing at "c").
+        let traversed_path = || {
+            std::iter::once(root)
+                .chain(fields[..i].iter().map(|s| s.as_str()))
+                .collect::<Vec<_>>()
+                .join(".")
+        };
         match current {
             Value::Object(ref map) => {
                 current = map.get(field).cloned().ok_or_else(|| {
-                    let path = std::iter::once(root)
-                        .chain(fields[..i].iter().map(|s| s.as_str()))
-                        .collect::<Vec<_>>()
-                        .join(".");
-                    MdsError::syntax(format!("field '{field}' not found on '{path}'"))
+                    MdsError::syntax(format!("field '{field}' not found on '{}'", traversed_path()))
                 })?;
             }
             _ => {
-                let path = std::iter::once(root)
-                    .chain(fields[..i].iter().map(|s| s.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(".");
                 return Err(MdsError::syntax(format!(
-                    "cannot access field '{field}' on {} '{path}'",
-                    current.type_name()
+                    "cannot access field '{field}' on {} '{}'",
+                    current.type_name(),
+                    traversed_path()
                 )));
             }
         }
@@ -416,7 +416,7 @@ fn evaluate_for_array(
 ) -> Result<String, MdsError> {
     if let Value::Object(_) = &iterable {
         return Err(MdsError::syntax(
-            "to iterate over an object's entries, use `@for key, value in obj:` syntax".to_string(),
+            "to iterate over an object's entries, use `@for key, value in obj:` syntax",
         ));
     }
 
