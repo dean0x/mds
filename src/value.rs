@@ -6,6 +6,19 @@ use crate::error::MdsError;
 /// Maximum nesting depth for YAML and JSON value trees.
 const MAX_VALUE_DEPTH: usize = 64;
 
+/// Return a human-readable type name for a YAML value, used in error diagnostics.
+fn yaml_type_name(v: &serde_yml::Value) -> &'static str {
+    match v {
+        serde_yml::Value::Null => "null",
+        serde_yml::Value::Bool(_) => "boolean",
+        serde_yml::Value::Number(_) => "integer/float",
+        serde_yml::Value::String(_) => "string",
+        serde_yml::Value::Sequence(_) => "sequence",
+        serde_yml::Value::Mapping(_) => "mapping",
+        serde_yml::Value::Tagged(_) => "tagged",
+    }
+}
+
 /// Runtime value type for MDS variables and expressions.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
@@ -63,11 +76,20 @@ impl Value {
             serde_yml::Value::Mapping(mapping) => {
                 let mut map = HashMap::new();
                 for (k, v) in mapping {
-                    // Skip non-string keys (YAML allows non-string keys, MDS does not)
-                    if let serde_yml::Value::String(key) = k {
-                        let value = Self::from_yaml_inner(v, depth + 1)?;
-                        map.insert(key, value);
-                    }
+                    // MDS only supports string keys in objects. Reject non-string keys
+                    // with a clear diagnostic rather than silently discarding the entry,
+                    // which would leave the user with confusing 'field not found' errors.
+                    let key = match k {
+                        serde_yml::Value::String(s) => s,
+                        other => {
+                            return Err(MdsError::yaml_error(format!(
+                                "MDS only supports string keys in objects; found {} key — use a quoted string key instead",
+                                yaml_type_name(&other)
+                            )));
+                        }
+                    };
+                    let value = Self::from_yaml_inner(v, depth + 1)?;
+                    map.insert(key, value);
                 }
                 Ok(Value::Object(map))
             }
@@ -350,6 +372,66 @@ mod tests {
         } else {
             panic!("expected Value::Object");
         }
+    }
+
+    #[test]
+    fn from_yaml_non_string_key_integer_returns_error() {
+        use serde_yml::Value as YamlValue;
+        let mut mapping = serde_yml::Mapping::new();
+        mapping.insert(
+            YamlValue::Number(42.into()),
+            YamlValue::String("answer".to_string()),
+        );
+        let yaml = YamlValue::Mapping(mapping);
+        let result = Value::from_yaml(yaml);
+        assert!(
+            result.is_err(),
+            "YAML mapping with integer key must return an error"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("string") || err.contains("key"),
+            "error should mention string keys, got: {err}"
+        );
+    }
+
+    #[test]
+    fn from_yaml_non_string_key_boolean_returns_error() {
+        use serde_yml::Value as YamlValue;
+        let mut mapping = serde_yml::Mapping::new();
+        mapping.insert(
+            YamlValue::Bool(true),
+            YamlValue::String("value".to_string()),
+        );
+        let yaml = YamlValue::Mapping(mapping);
+        let result = Value::from_yaml(yaml);
+        assert!(
+            result.is_err(),
+            "YAML mapping with boolean key must return an error"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("string") || err.contains("key"),
+            "error should mention string keys, got: {err}"
+        );
+    }
+
+    #[test]
+    fn from_yaml_non_string_key_null_returns_error() {
+        use serde_yml::Value as YamlValue;
+        let mut mapping = serde_yml::Mapping::new();
+        mapping.insert(YamlValue::Null, YamlValue::String("value".to_string()));
+        let yaml = YamlValue::Mapping(mapping);
+        let result = Value::from_yaml(yaml);
+        assert!(
+            result.is_err(),
+            "YAML mapping with null key must return an error"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("string") || err.contains("key"),
+            "error should mention string keys, got: {err}"
+        );
     }
 
     #[test]
