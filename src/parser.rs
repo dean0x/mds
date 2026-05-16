@@ -508,6 +508,27 @@ fn parse_for_vars(var_part: &str) -> Result<(Option<String>, String), MdsError> 
     }
 }
 
+/// Validates that every segment of a split dot-path is a valid identifier and that the
+/// segment count does not exceed `MAX_DOT_SEGMENTS`.
+///
+/// Returns `Ok(())` on success, or `Err` with a human-readable reason string that the
+/// caller embeds into the appropriate `MdsError` variant (syntax or syntax_at).
+fn validate_dot_path_parts(parts: &[&str]) -> Result<(), String> {
+    if parts.len() > MAX_DOT_SEGMENTS {
+        return Err(format!(
+            "dot path exceeds maximum segment count of {MAX_DOT_SEGMENTS}"
+        ));
+    }
+    for part in parts.iter().map(|p| p.trim()) {
+        if !is_valid_identifier(part) {
+            return Err(format!(
+                "each segment must be a valid identifier (got '{part}')"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Resolve a dot-leading expression into a QualifiedCall or MemberAccess interpolation.
 ///
 /// Called when a dot appears before any `(` in interpolation content, i.e.:
@@ -529,6 +550,18 @@ fn parse_dot_expr(
         // namespace.func(args) — QualifiedCall
         let namespace = content[..dot_pos].trim().to_string();
         let name = rest_after_dot[..paren_pos].trim().to_string();
+        if !is_valid_identifier(&namespace) {
+            return Err(MdsError::syntax_at(
+                format!("invalid namespace in qualified call: '{namespace}' — must be a valid identifier"),
+                file, source, offset, len,
+            ));
+        }
+        if !is_valid_identifier(&name) {
+            return Err(MdsError::syntax_at(
+                format!("invalid function name in qualified call: '{name}' — must be a valid identifier"),
+                file, source, offset, len,
+            ));
+        }
         let args_str = rest_after_dot[paren_pos + 1..]
             .trim()
             .strip_suffix(')')
@@ -543,20 +576,12 @@ fn parse_dot_expr(
 
     // No '(' anywhere — obj.field or obj.field1.field2 (MemberAccess)
     let parts: Vec<&str> = content.split('.').collect();
-    if parts.len() > MAX_DOT_SEGMENTS {
-        return Err(MdsError::syntax_at(
-            format!("dot path in interpolation exceeds maximum segment count of {MAX_DOT_SEGMENTS}"),
+    validate_dot_path_parts(&parts).map_err(|reason| {
+        MdsError::syntax_at(
+            format!("invalid dot-path in interpolation: '{content}' — {reason}"),
             file, source, offset, len,
-        ));
-    }
-    for part in parts.iter().map(|p| p.trim()) {
-        if !is_valid_identifier(part) {
-            return Err(MdsError::syntax_at(
-                format!("invalid dot-path in interpolation: '{content}' — each segment must be a valid identifier"),
-                file, source, offset, len,
-            ));
-        }
-    }
+        )
+    })?;
     let object = parts[0].trim().to_string();
     let fields: Vec<String> = parts[1..].iter().map(|s| s.trim().to_string()).collect();
     Ok(Interpolation {
@@ -720,19 +745,9 @@ fn parse_single_arg_inner(s: &str, depth: usize) -> Result<Arg, MdsError> {
     } else if s.contains('.') && !s.contains('(') {
         // Object member access as argument: config.name or a.b.c
         let parts: Vec<&str> = s.split('.').collect();
-        if parts.len() > MAX_DOT_SEGMENTS {
-            return Err(MdsError::syntax(format!(
-                "dot path in argument exceeds maximum segment count of {MAX_DOT_SEGMENTS}"
-            )));
-        }
-        for part in &parts {
-            let part = part.trim();
-            if !is_valid_identifier(part) {
-                return Err(MdsError::syntax(format!(
-                    "invalid dot-path in argument: '{s}'"
-                )));
-            }
-        }
+        validate_dot_path_parts(&parts).map_err(|reason| {
+            MdsError::syntax(format!("invalid dot-path in argument: '{s}' — {reason}"))
+        })?;
         Ok(Arg::MemberAccess {
             object: parts[0].trim().to_string(),
             fields: parts[1..].iter().map(|s| s.trim().to_string()).collect(),

@@ -718,7 +718,11 @@ fn validate_file_type(path: &Path, source: &str) -> Result<(), MdsError> {
                 fm.lines().any(|line| {
                     line.trim()
                         .strip_prefix("type:")
-                        .is_some_and(|v| v.trim() == "mds")
+                        .is_some_and(|v| {
+                            let v = v.trim();
+                            // Match all three YAML quoting styles, mirroring strip_type_mds.
+                            v == "mds" || v == "\"mds\"" || v == "'mds'"
+                        })
                 })
             });
         if found {
