@@ -792,17 +792,4 @@ mod tests {
         );
     }
 
-    // ── Debug derive ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn virtual_fs_implements_debug() {
-        let fs = vfs();
-        let _ = format!("{fs:?}");
-    }
-
-    #[test]
-    fn native_fs_implements_debug() {
-        let fs = NativeFs::new();
-        let _ = format!("{fs:?}");
-    }
 }

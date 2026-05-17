@@ -173,29 +173,9 @@ impl ModuleCache {
         // Unmark regardless of success or failure. resolve/unmark is strictly LIFO
         // (we always remove the last element we inserted), so pop() is O(1).
         // Safety-critical LIFO invariant: a mismatched pop would silently corrupt
-        // cycle-detection state and allow unbounded recursion. Return an error
-        // rather than panicking.
-        //
-        // Check LIFO regardless of whether process_module succeeded or failed —
-        // both errors must be surfaced. On double-fault, prefer the module processing
-        // error (user-facing root cause) over the LIFO violation (internal compiler bug).
+        // cycle-detection state and allow unbounded recursion.
         let popped = self.resolving.pop();
-        let lifo_result = if popped.as_deref() == Some(key) {
-            Ok(())
-        } else {
-            Err(MdsError::syntax(format!(
-                "internal error: resolving stack LIFO invariant violated \
-                 (expected {expected}, got {got}) — this is a compiler bug, please report it",
-                expected = key,
-                got = popped.as_deref().unwrap_or("<empty>"),
-            )))
-        };
-
-        let resolved = match (resolved, lifo_result) {
-            (Err(module_err), _) => return Err(module_err),
-            (Ok(_), Err(lifo_err)) => return Err(lifo_err),
-            (Ok(resolved), Ok(())) => resolved,
-        };
+        let resolved = Self::check_lifo_pop(resolved, popped, key)?;
 
         // Wrap in Arc, store in cache, and return a clone of the Arc (O(1)).
         let key_owned = key.to_string();
@@ -281,21 +261,31 @@ impl ModuleCache {
         let resolved = self.process_module(&ctx, false, warnings);
 
         let popped = self.resolving.pop();
-        let lifo_result = if popped.as_deref() == Some(&base_key) {
+        Self::check_lifo_pop(resolved, popped, &base_key).map(Arc::new)
+    }
+
+    /// Assert the LIFO pop invariant after `process_module`.
+    ///
+    /// On double-fault (module error + LIFO violation), prefer the module error
+    /// (user-facing root cause) over the LIFO violation (internal compiler bug).
+    fn check_lifo_pop<T>(
+        module_result: Result<T, MdsError>,
+        popped: Option<String>,
+        expected: &str,
+    ) -> Result<T, MdsError> {
+        let lifo_result = if popped.as_deref() == Some(expected) {
             Ok(())
         } else {
             Err(MdsError::syntax(format!(
                 "internal error: resolving stack LIFO invariant violated \
                  (expected {expected}, got {got}) — this is a compiler bug, please report it",
-                expected = base_key,
                 got = popped.as_deref().unwrap_or("<empty>"),
             )))
         };
-
-        match (resolved, lifo_result) {
+        match (module_result, lifo_result) {
             (Err(module_err), _) => Err(module_err),
             (Ok(_), Err(lifo_err)) => Err(lifo_err),
-            (Ok(resolved), Ok(())) => Ok(Arc::new(resolved)),
+            (Ok(resolved), Ok(())) => Ok(resolved),
         }
     }
 

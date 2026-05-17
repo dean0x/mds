@@ -194,10 +194,6 @@ fn value_methods() {
 
 #[test]
 fn cli_import_pattern_works() {
-    use mds::MdsError;
-    use mds::MAX_FILE_SIZE;
-    use mds::MAX_TRAVERSAL_DEPTH;
-
     let _: fn(&str) -> Result<String, MdsError> = |s| mds::compile_str(s);
     assert!(MAX_FILE_SIZE > 0);
     assert!(MAX_TRAVERSAL_DEPTH > 0);
