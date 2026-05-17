@@ -6,7 +6,7 @@ use std::process;
 
 use clap::{Parser, Subcommand};
 use miette::Result;
-use mds::MdsError;
+use mds::{MdsError, MAX_FILE_SIZE as MAX_STDIN_SIZE, MAX_TRAVERSAL_DEPTH};
 use serde::Deserialize;
 
 // ── Project config (mds.json) ─────────────────────────────────────────────────
@@ -25,12 +25,6 @@ struct BuildConfig {
 /// Maximum allowed size for `mds.json` (1 MB) to prevent runaway memory use.
 const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
 
-/// Maximum directory traversal depth when searching for `mds.json`.
-///
-/// Imported from the library crate — single source of truth with `find_project_root`
-/// in `resolver.rs`.
-use mds::MAX_TRAVERSAL_DEPTH;
-
 /// Walk up from `start` looking for `mds.json`.
 ///
 /// Returns `Ok(Some((config, config_dir)))` when found, `Ok(None)` when no
@@ -41,7 +35,7 @@ use mds::MAX_TRAVERSAL_DEPTH;
 /// resolve relative `output_dir` values.
 fn load_config(
     start: &Path,
-) -> std::result::Result<Option<(MdsConfig, PathBuf)>, miette::Error> {
+) -> Result<Option<(MdsConfig, PathBuf)>> {
     // Walk upward from `start` (which may be a file; begin at its parent).
     let start_dir = if start.is_dir() {
         start.to_path_buf()
@@ -111,7 +105,7 @@ fn derive_output_filename(input: &Path) -> OsString {
 fn prepare_output_dir(
     dir: &Path,
     input_path: Option<&Path>,
-) -> std::result::Result<PathBuf, miette::Error> {
+) -> Result<PathBuf> {
     let filename = input_path
         .map(derive_output_filename)
         .unwrap_or_else(|| OsString::from("output.md"));
@@ -134,7 +128,7 @@ fn resolve_output_path(
     output: &Option<String>,
     out_dir: &Option<PathBuf>,
     config: &Option<(MdsConfig, PathBuf)>,
-) -> std::result::Result<Option<PathBuf>, miette::Error> {
+) -> Result<Option<PathBuf>> {
     // 1 & 2. Explicit `-o` flag: `-` means stdout, anything else is a literal path.
     match output.as_deref() {
         Some("-") => return Ok(None),
@@ -196,7 +190,7 @@ fn resolve_output_path(
 ///
 /// Returns `Ok(path)` if exactly one `.mds` file is found, or an `Err` describing
 /// why auto-detection failed (zero files, multiple files, or I/O error).
-fn auto_detect_mds_file() -> std::result::Result<PathBuf, miette::Error> {
+fn auto_detect_mds_file() -> Result<PathBuf> {
     let cwd = std::env::current_dir()
         .map_err(|e| miette::miette!("cannot determine current directory: {e}"))?;
 
@@ -256,11 +250,11 @@ enum Commands {
         /// Input .mds file (use "-" for stdin; omit to auto-detect in current directory)
         input: Option<PathBuf>,
         /// Output destination: a file path, or "-" for stdout.
-        /// Defaults to <name>.md next to the source file.
+        /// Defaults to `<name>.md` next to the source file.
         /// Mutually exclusive with --out-dir.
         #[arg(short = 'o', long = "output", conflicts_with = "out_dir")]
         output: Option<String>,
-        /// Output directory. The output file is named <input-stem>.md inside this directory.
+        /// Output directory. The output file is named `<input-stem>.md` inside this directory.
         /// Directory is created if it does not exist.
         /// Mutually exclusive with -o/--output.
         #[arg(long = "out-dir", conflicts_with = "output")]
@@ -385,7 +379,7 @@ fn main() {
 /// Load vars from an optional file path, returning None if no file was given.
 fn load_vars_file(
     path: Option<PathBuf>,
-) -> Result<Option<HashMap<String, mds::Value>>, miette::Error> {
+) -> Result<Option<HashMap<String, mds::Value>>> {
     path.map(|p| mds::load_vars_file(&p).map_err(|e| miette::miette!("{e}")))
         .transpose()
 }
@@ -394,7 +388,7 @@ fn load_vars_file(
 fn build_runtime_vars(
     vars: Option<PathBuf>,
     set_vars: Vec<(String, String)>,
-) -> Result<Option<HashMap<String, mds::Value>>, miette::Error> {
+) -> Result<Option<HashMap<String, mds::Value>>> {
     let mut runtime_vars = load_vars_file(vars)?;
     for (key, val) in set_vars {
         runtime_vars
@@ -405,7 +399,7 @@ fn build_runtime_vars(
 }
 
 /// Return an error if the input path is a directory (only file or stdin allowed).
-fn reject_directory_input(input: &Path) -> Result<(), miette::Error> {
+fn reject_directory_input(input: &Path) -> Result<()> {
     if input != Path::new("-") && input.is_dir() {
         return Err(miette::miette!(
             "expected a file, got a directory: {}",
@@ -415,14 +409,11 @@ fn reject_directory_input(input: &Path) -> Result<(), miette::Error> {
     Ok(())
 }
 
-/// Maximum stdin bytes accepted — shares the per-file limit from the library.
-use mds::MAX_FILE_SIZE as MAX_STDIN_SIZE;
-
 /// Read from stdin and return the source string along with the current working directory.
 ///
 /// Reads at most `MAX_STDIN_SIZE + 1` bytes so we can detect over-sized input without
 /// buffering the entire stream first.
-fn read_stdin() -> Result<(String, std::path::PathBuf), miette::Error> {
+fn read_stdin() -> Result<(String, PathBuf)> {
     let mut source = String::new();
     std::io::stdin()
         .take(MAX_STDIN_SIZE + 1)
@@ -445,7 +436,7 @@ fn read_stdin() -> Result<(String, std::path::PathBuf), miette::Error> {
 /// Does not check for directory or validate the file; callers perform those checks after resolution.
 fn resolve_input(
     input: Option<PathBuf>,
-) -> std::result::Result<(PathBuf, bool), miette::Error> {
+) -> Result<(PathBuf, bool)> {
     match input {
         Some(p) => Ok((p, false)),
         None => auto_detect_mds_file().map(|p| (p, true)),
@@ -462,7 +453,7 @@ fn write_output(
     output_path: Option<PathBuf>,
     compiled: &str,
     quiet: bool,
-) -> std::result::Result<(), miette::Error> {
+) -> Result<()> {
     match output_path {
         Some(path) => {
             if let Some(parent) = path.parent() {
@@ -496,7 +487,7 @@ fn run_build(
     vars: Option<PathBuf>,
     set_vars: Vec<(String, String)>,
     quiet: bool,
-) -> Result<(), miette::Error> {
+) -> Result<()> {
     let runtime_vars = build_runtime_vars(vars, set_vars)?;
 
     // Resolve the input: explicit path, or auto-detect from cwd.
@@ -537,7 +528,7 @@ fn run_check(
     vars: Option<PathBuf>,
     set_vars: Vec<(String, String)>,
     quiet: bool,
-) -> Result<(), miette::Error> {
+) -> Result<()> {
     let runtime_vars = build_runtime_vars(vars, set_vars)?;
 
     // Resolve the input: explicit path/stdin, or auto-detect from cwd.
@@ -570,7 +561,7 @@ fn run_check(
     Ok(())
 }
 
-fn run_init(filename: PathBuf, force: bool, quiet: bool) -> Result<(), miette::Error> {
+fn run_init(filename: PathBuf, force: bool, quiet: bool) -> Result<()> {
     if filename
         .components()
         .any(|c| c == std::path::Component::ParentDir)
@@ -610,7 +601,7 @@ Your items:
     Ok(())
 }
 
-fn run(cli: Cli) -> Result<(), miette::Error> {
+fn run(cli: Cli) -> Result<()> {
     let quiet = cli.quiet;
     match cli.command {
         Commands::Build {
