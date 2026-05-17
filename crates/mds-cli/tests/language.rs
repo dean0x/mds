@@ -245,11 +245,7 @@ fn crlf_line_endings() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("crlf.mds");
     // Write the file with \r\n line endings (Windows style).
-    std::fs::write(
-        &path,
-        b"---\r\nname: Alice\r\n---\r\nHello {name}!\r\n",
-    )
-    .unwrap();
+    std::fs::write(&path, b"---\r\nname: Alice\r\n---\r\nHello {name}!\r\n").unwrap();
 
     let result = mds::compile(&path, None).unwrap();
     assert!(

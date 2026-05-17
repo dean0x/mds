@@ -355,7 +355,10 @@ fn build_stdin_with_output_writes_file() {
         .unwrap();
 
     let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "stdin build with -o should succeed");
+    assert!(
+        output.status.success(),
+        "stdin build with -o should succeed"
+    );
     assert!(out_path.exists(), "output file should be created");
     let content = std::fs::read_to_string(&out_path).unwrap();
     assert!(
@@ -571,7 +574,11 @@ fn build_mds_json_creates_output_dir() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        dir.path().join("generated").join("docs").join("tpl.md").exists(),
+        dir.path()
+            .join("generated")
+            .join("docs")
+            .join("tpl.md")
+            .exists(),
         "nested output_dir should be auto-created"
     );
 }

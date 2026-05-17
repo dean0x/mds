@@ -12,14 +12,20 @@ fn dot_notation_object_access_works() {
 fn object_single_level_access() {
     let source = "---\nconfig:\n  key: val\n---\n{config.key}\n";
     let result = mds::compile_str(source).unwrap();
-    assert_eq!(result, "---\nconfig:\n  key: val\n---\nval\n", "got: {result}");
+    assert_eq!(
+        result, "---\nconfig:\n  key: val\n---\nval\n",
+        "got: {result}"
+    );
 }
 
 #[test]
 fn object_multi_level_access() {
     let source = "---\na:\n  b:\n    c: deep\n---\n{a.b.c}\n";
     let result = mds::compile_str(source).unwrap();
-    assert_eq!(result, "---\na:\n  b:\n    c: deep\n---\ndeep\n", "got: {result}");
+    assert_eq!(
+        result, "---\na:\n  b:\n    c: deep\n---\ndeep\n",
+        "got: {result}"
+    );
 }
 
 #[test]
@@ -37,7 +43,10 @@ fn object_field_not_found() {
     let result = mds::compile_str(source);
     assert!(result.is_err());
     let err = format!("{}", result.unwrap_err());
-    assert!(err.contains("not found") && err.contains("missing"), "got: {err}");
+    assert!(
+        err.contains("not found") && err.contains("missing"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -46,7 +55,10 @@ fn object_access_on_non_object() {
     let result = mds::compile_str(source);
     assert!(result.is_err());
     let err = format!("{}", result.unwrap_err());
-    assert!(err.contains("cannot access field") && err.contains("string"), "got: {err}");
+    assert!(
+        err.contains("cannot access field") && err.contains("string"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -58,7 +70,8 @@ fn if_dot_path_truthy() {
 
 #[test]
 fn if_dot_path_falsy() {
-    let source = "---\nconfig:\n  debug: false\n---\n@if config.debug:\nDEBUG ON\n@else:\nDEBUG OFF\n@end\n";
+    let source =
+        "---\nconfig:\n  debug: false\n---\n@if config.debug:\nDEBUG ON\n@else:\nDEBUG OFF\n@end\n";
     let result = mds::compile_str(source).unwrap();
     assert!(result.contains("DEBUG OFF"), "got: {result}");
 }
@@ -67,18 +80,28 @@ fn if_dot_path_falsy() {
 fn for_dot_path_iterable() {
     let source = "---\nconfig:\n  items:\n    - a\n    - b\n---\n@for item in config.items:\n- {item}\n@end\n";
     let result = mds::compile_str(source).unwrap();
-    assert!(result.contains("- a") && result.contains("- b"), "got: {result}");
+    assert!(
+        result.contains("- a") && result.contains("- b"),
+        "got: {result}"
+    );
 }
 
 #[test]
 fn for_key_value_object() {
-    let source = "---\nobj:\n  alpha: 1\n  beta: 2\n---\n@for key, value in obj:\n{key}={value}\n@end\n";
+    let source =
+        "---\nobj:\n  alpha: 1\n  beta: 2\n---\n@for key, value in obj:\n{key}={value}\n@end\n";
     let result = mds::compile_str(source).unwrap();
-    assert!(result.contains("alpha=1") && result.contains("beta=2"), "got: {result}");
+    assert!(
+        result.contains("alpha=1") && result.contains("beta=2"),
+        "got: {result}"
+    );
     // Verify alphabetical order
     let alpha_pos = result.find("alpha=1").unwrap();
     let beta_pos = result.find("beta=2").unwrap();
-    assert!(alpha_pos < beta_pos, "keys should be in sorted order, got: {result}");
+    assert!(
+        alpha_pos < beta_pos,
+        "keys should be in sorted order, got: {result}"
+    );
 }
 
 #[test]
@@ -116,7 +139,10 @@ fn func_arg_dot_path() {
 fn objects_inside_arrays() {
     let source = "---\nitems:\n  - name: Alice\n  - name: Bob\n---\n@for item in items:\n{item.name}\n@end\n";
     let result = mds::compile_str(source).unwrap();
-    assert!(result.contains("Alice") && result.contains("Bob"), "got: {result}");
+    assert!(
+        result.contains("Alice") && result.contains("Bob"),
+        "got: {result}"
+    );
 }
 
 #[test]
@@ -125,7 +151,10 @@ fn empty_object_is_falsy() {
     let mut vars = HashMap::new();
     vars.insert("obj".to_string(), mds::Value::Object(HashMap::new()));
     let result = mds::compile_str_with(source, None, Some(vars)).unwrap();
-    assert!(result.contains("FALSY"), "empty object should be falsy, got: {result}");
+    assert!(
+        result.contains("FALSY"),
+        "empty object should be falsy, got: {result}"
+    );
 }
 
 #[test]
@@ -152,7 +181,10 @@ fn runtime_vars_object_dot_access() {
     // This covers the runtime_vars path, distinct from frontmatter-defined objects.
     let source = "{config.host}:{config.port}\n";
     let mut inner = HashMap::new();
-    inner.insert("host".to_string(), mds::Value::String("localhost".to_string()));
+    inner.insert(
+        "host".to_string(),
+        mds::Value::String("localhost".to_string()),
+    );
     inner.insert("port".to_string(), mds::Value::String("8080".to_string()));
     let mut vars = HashMap::new();
     vars.insert("config".to_string(), mds::Value::Object(inner));
@@ -199,7 +231,10 @@ fn dot_path_depth_limit_if_condition() {
     let path = segments.join(".");
     let source = format!("@if {path}:\nyes\n@end\n");
     let result = mds::compile_str(&source);
-    assert!(result.is_err(), "expected error for >32 segments in @if, got Ok");
+    assert!(
+        result.is_err(),
+        "expected error for >32 segments in @if, got Ok"
+    );
     let err = format!("{}", result.unwrap_err());
     assert!(
         err.contains("exceeds maximum segment count"),
@@ -214,7 +249,10 @@ fn dot_path_depth_limit_for_iterable() {
     let path = segments.join(".");
     let source = format!("@for item in {path}:\n{{item}}\n@end\n");
     let result = mds::compile_str(&source);
-    assert!(result.is_err(), "expected error for >32 segments in @for iterable, got Ok");
+    assert!(
+        result.is_err(),
+        "expected error for >32 segments in @for iterable, got Ok"
+    );
     let err = format!("{}", result.unwrap_err());
     assert!(
         err.contains("exceeds maximum segment count"),

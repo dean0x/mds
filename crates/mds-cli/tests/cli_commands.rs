@@ -342,7 +342,10 @@ fn exit_code_success() {
         .stderr(std::process::Stdio::null())
         .status()
         .expect("failed to run mds");
-    assert!(status.success(), "expected exit code 0 for successful build");
+    assert!(
+        status.success(),
+        "expected exit code 0 for successful build"
+    );
 }
 
 #[test]

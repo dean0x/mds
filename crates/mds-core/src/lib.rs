@@ -456,7 +456,10 @@ pub fn load_vars_file(path: &Path) -> Result<HashMap<String, Value>, MdsError> {
         )));
     }
     let content = String::from_utf8(bytes).map_err(|e| {
-        MdsError::io(format!("invalid UTF-8 in vars file {}: {e}", path.display()))
+        MdsError::io(format!(
+            "invalid UTF-8 in vars file {}: {e}",
+            path.display()
+        ))
     })?;
     let json: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| MdsError::json_error(e.to_string()))?;

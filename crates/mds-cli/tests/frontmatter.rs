@@ -94,8 +94,16 @@ fn frontmatter_imported_module_not_emitted() {
     let dir = tempfile::tempdir().unwrap();
     let lib_path = dir.path().join("lib.mds");
     let main_path = dir.path().join("main.mds");
-    std::fs::write(&lib_path, "---\nlibkey: libval\n---\n@define greet(n):\nHi {n}!\n@end\n").unwrap();
-    std::fs::write(&main_path, "---\nmainkey: mainval\n---\n@import \"./lib.mds\"\n{greet(\"World\")}\n").unwrap();
+    std::fs::write(
+        &lib_path,
+        "---\nlibkey: libval\n---\n@define greet(n):\nHi {n}!\n@end\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &main_path,
+        "---\nmainkey: mainval\n---\n@import \"./lib.mds\"\n{greet(\"World\")}\n",
+    )
+    .unwrap();
     let result = mds::compile(&main_path, None).unwrap();
     assert!(
         result.contains("mainkey: mainval"),
@@ -116,9 +124,7 @@ fn strip_type_mds_only_strips_top_level_key() {
     let result = mds::compile_str(source).unwrap();
     // The top-level `type: mds` must not appear as an unindented frontmatter key.
     // Check that no line in the output equals "type: mds" (i.e. no leading whitespace).
-    let has_top_level_type_mds = result
-        .lines()
-        .any(|line| line == "type: mds");
+    let has_top_level_type_mds = result.lines().any(|line| line == "type: mds");
     assert!(
         !has_top_level_type_mds,
         "top-level 'type: mds' should be stripped from output, got: {result}"

@@ -185,11 +185,7 @@ fn include_respects_export_visibility_for_prompt() {
         "@define greet(name):\nHello {name}!\n@end\n\n@export greet\n\nThis body should be hidden.\n",
     )
     .unwrap();
-    std::fs::write(
-        &consumer,
-        "@import \"./provider.mds\" as p\n\n@include p\n",
-    )
-    .unwrap();
+    std::fs::write(&consumer, "@import \"./provider.mds\" as p\n\n@include p\n").unwrap();
 
     let (result, warnings) = mds::compile_collecting_warnings(&consumer, None).unwrap();
     // The provider has explicit exports without "prompt", so @include should

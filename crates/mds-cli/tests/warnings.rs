@@ -47,11 +47,7 @@ fn warning_cap_at_max_warnings() {
 
     // Create a shared empty module (no body — just a @define with no body text)
     let lib_path = dir.path().join("empty_lib.mds");
-    std::fs::write(
-        &lib_path,
-        "@define noop():\n@end\n",
-    )
-    .unwrap();
+    std::fs::write(&lib_path, "@define noop():\n@end\n").unwrap();
 
     // Build main template: import empty_lib as 'lib' and @include it 1010 times.
     let mut src = String::from("@import \"./empty_lib.mds\" as lib\n");
