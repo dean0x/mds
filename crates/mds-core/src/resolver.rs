@@ -153,7 +153,13 @@ impl ModuleCache {
         // and the ordered stack (for cycle path reconstruction).
         self.resolving.insert(key.to_string());
 
-        let resolved = self.process_module(&source, key, key, is_md, runtime_vars, warnings);
+        let ctx = ModuleCtx {
+            file_str: key_display_name(key),
+            source: &source,
+            base_key: key,
+            runtime_vars,
+        };
+        let resolved = self.process_module(&ctx, is_md, warnings);
 
         // Unmark regardless of success or failure. resolve/unmark is strictly LIFO
         // (we always remove the last element we inserted), so pop() is O(1).
@@ -222,6 +228,10 @@ impl ModuleCache {
     /// Resolve a module from an in-memory source string.
     ///
     /// Imports within the source are resolved relative to `base_dir`.
+    ///
+    /// **NativeFs-only**: this method takes a `&Path` and calls `canonicalize()` and
+    /// `fs.set_root()`, which only make sense for OS-backed filesystems. For virtual or
+    /// WASM environments use [`ModuleCache::resolve_key`] instead.
     pub fn resolve_source(
         &mut self,
         source: &str,
@@ -245,52 +255,49 @@ impl ModuleCache {
         // the canonical directory so imports resolve relative to that directory
         // (not its parent).
         let base_key = format!("{canonical_str}/<source>");
-        self.process_module(source, "<source>", &base_key, false, runtime_vars, warnings)
-            .map(Arc::new)
+        let ctx = ModuleCtx {
+            file_str: "<source>",
+            source,
+            base_key: &base_key,
+            runtime_vars,
+        };
+        self.process_module(&ctx, false, warnings).map(Arc::new)
     }
 
     /// Common module processing: tokenize, parse, build scope, evaluate.
     ///
-    /// `file_str` is the display path for error messages (may be `"<source>"`).
-    /// `base_key` is the normalized key used to resolve relative imports.
+    /// `ctx.file_str` is the display path for error messages (may be `"<source>"`).
+    /// `ctx.base_key` is the normalized key used to resolve relative imports.
+    /// `is_md` controls whether the `type` frontmatter key is treated as a file-type marker.
     fn process_module(
         &mut self,
-        source: &str,
-        file_str: &str,
-        base_key: &str,
+        ctx: &ModuleCtx<'_>,
         is_md: bool,
-        runtime_vars: &HashMap<String, Value>,
         warnings: &mut Vec<String>,
     ) -> Result<ResolvedModule, MdsError> {
         // Tokenize and parse
-        let tokens = tokenize(source, file_str)?;
-        let module = parse_with_ctx(&tokens, file_str, source)?;
+        let tokens = tokenize(ctx.source, ctx.file_str)?;
+        let module = parse_with_ctx(&tokens, ctx.file_str, ctx.source)?;
 
         // Capture raw frontmatter before build_scope_from_frontmatter borrows the module.
         let raw_frontmatter = module.frontmatter.as_ref().map(|fm| fm.raw.clone());
 
         // Build scope from frontmatter + runtime vars
         let mut scope =
-            build_scope_from_frontmatter(module.frontmatter.as_ref(), is_md, runtime_vars)?;
+            build_scope_from_frontmatter(module.frontmatter.as_ref(), is_md, ctx.runtime_vars)?;
 
         // Walk the AST: collect @define functions (with closure capture), process imports/exports
-        let ctx = ModuleCtx {
-            file_str,
-            source,
-            base_key,
-            runtime_vars,
-        };
         let CollectedDefs {
             functions,
             has_explicit_exports,
             explicit_exports,
-        } = self.collect_definitions_and_imports(&module.body, &mut scope, &ctx, warnings)?;
+        } = self.collect_definitions_and_imports(&module.body, &mut scope, ctx, warnings)?;
 
         // Validate that all named exports refer to defined functions or "prompt"
         validate_exports(&explicit_exports, &functions)?;
 
         // Validate semantic correctness before evaluation
-        validator::validate(&module.body, &mut scope, file_str, source)?;
+        validator::validate(&module.body, &mut scope, ctx.file_str, ctx.source)?;
 
         // Evaluate the body to get prompt text
         let prompt_body = evaluate(&module.body, &mut scope, warnings)?;
@@ -709,27 +716,32 @@ fn validate_file_type(key: &str, source: &str) -> Result<(), MdsError> {
     }
 
     // For .md files, accept when frontmatter contains `type: mds`.
-    if ext == Some("md") {
-        let found = source
-            .strip_prefix("---\n")
-            .or_else(|| source.strip_prefix("---\r\n"))
-            .and_then(|after_fence| after_fence.find("\n---").map(|end| &after_fence[..end]))
-            .is_some_and(|fm| {
-                // Check each line for `type: mds` without a full YAML parse.
-                fm.lines().any(|line| {
-                    line.trim().strip_prefix("type:").is_some_and(|v| {
-                        let v = v.trim();
-                        // Match all three YAML quoting styles, mirroring strip_type_mds.
-                        v == "mds" || v == "\"mds\"" || v == "'mds'"
-                    })
-                })
-            });
-        if found {
-            return Ok(());
-        }
+    if ext == Some("md") && has_type_mds_frontmatter(source) {
+        return Ok(());
     }
 
     Err(MdsError::not_mds_file(key.to_string()))
+}
+
+/// Return `true` if `source` has a YAML frontmatter block containing `type: mds`.
+///
+/// Checks without a full YAML parse by scanning frontmatter lines for the key.
+/// Recognises all three YAML quoting styles: bare, single-quoted, double-quoted.
+fn has_type_mds_frontmatter(source: &str) -> bool {
+    source
+        .strip_prefix("---\n")
+        .or_else(|| source.strip_prefix("---\r\n"))
+        .and_then(|after_fence| after_fence.find("\n---").map(|end| &after_fence[..end]))
+        .is_some_and(|fm| {
+            fm.lines().any(|line| {
+                line.trim().strip_prefix("type:").is_some_and(|v| {
+                    let v = v.trim();
+                    // Match bare, double-quoted, and single-quoted values,
+                    // mirroring the strip_type_mds helper elsewhere.
+                    v == "mds" || v == "\"mds\"" || v == "'mds'"
+                })
+            })
+        })
 }
 
 /// Format a cycle chain like "a.mds → b.mds → a.mds" from the resolving set.
