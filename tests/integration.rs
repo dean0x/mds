@@ -1030,8 +1030,8 @@ fn no_frontmatter_with_directives() {
 #[test]
 fn multiple_escaped_braces() {
     let result = mds::compile(fixture("multiple_escaped_braces.mds"), None).unwrap();
-    // \{a\} → literal '{' + 'a\}' as text, \{b\} → literal '{' + 'b\}' as text
-    // Per spec: only \{ is an escape sequence, \} is plain text
+    // \{a\} → literal '{a}' and \{b\} → literal '{b}'
+    // Per spec: both \{ and \} are escape sequences, producing literal { and }
     assert!(
         result.contains("{a") && result.contains("{b"),
         "escaped braces should produce literal '{{', got: {result}"
@@ -1165,9 +1165,8 @@ fn include_respects_export_visibility_for_prompt() {
 
 #[test]
 fn escaped_braces_in_function_body() {
-    // Per spec and existing tests (multiple_escaped_braces): only \{ is an escape
-    // sequence producing a literal '{'. The closing \} is plain text, rendered as \}.
-    // So \{curly braces\} → "{curly braces\}" in output.
+    // Per spec: both \{ and \} are escape sequences producing literal braces.
+    // So \{curly braces\} → "{curly braces}" in output.
     let result = mds::compile(fixture("escaped_brace_in_fn.mds"), None).unwrap();
     assert!(
         result.contains("{curly braces"),
@@ -1183,9 +1182,8 @@ fn escaped_braces_in_function_body() {
 
 #[test]
 fn escaped_braces_in_blocks() {
-    // Per spec and existing tests (multiple_escaped_braces): only \{ is an escape
-    // sequence producing a literal '{'. The closing \} is plain text, rendered as \}.
-    // So \{variable\} => "{variable\}" and \{item\} => "{item\}".
+    // Per spec: both \{ and \} are escape sequences producing literal braces.
+    // So \{variable\} => "{variable}" and \{item\} => "{item}".
     let result = mds::compile(fixture("escaped_brace_in_blocks.mds"), None).unwrap();
     assert!(
         result.contains("{variable"),
@@ -1536,21 +1534,11 @@ fn crlf_line_endings() {
 }
 
 #[test]
-fn dot_notation_variable_access_gives_clear_error() {
-    // {alias.name} (dot without parens) must produce a helpful error,
-    // not a confusing "unclosed parenthesis" message.
-    let source = "@import \"./utils.mds\" as u\n\n{u.greet}\n";
-    let result = mds::compile_str_with(source, None, None);
-    assert!(result.is_err(), "dot notation without parens should be an error");
-    let err = format!("{}", result.unwrap_err());
-    assert!(
-        err.contains("dot notation") || err.contains("not supported"),
-        "error should explain that dot notation for variables is unsupported, got: {err}"
-    );
-    assert!(
-        !err.contains("unclosed parenthesis"),
-        "error must not say 'unclosed parenthesis' — misleading, got: {err}"
-    );
+fn dot_notation_object_access_works() {
+    // {obj.key} now works as object field access (not an error).
+    let source = "---\ndata:\n  name: Alice\n---\n{data.name}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("Alice\n"), "got: {result}");
 }
 
 #[test]
@@ -1708,19 +1696,14 @@ fn compile_str_truly_no_frontmatter() {
     );
 }
 
-// ── YAML map type rejected (Spec 4.1) ────────────────────────────────────────
+// ── YAML map type now supported (object access) ──────────────────────────────
 
 #[test]
-fn yaml_map_type_rejected() {
-    // Per spec: "No object/map type in v0.1". A YAML map value must be a compile error.
-    let source = "---\nconfig:\n  key: value\n---\nHello!\n";
-    let result = mds::compile_str(source);
-    assert!(result.is_err(), "YAML map/object type should be rejected");
-    let err = format!("{}", result.unwrap_err());
-    assert!(
-        err.contains("object") || err.contains("map") || err.contains("not supported"),
-        "error should mention object/map not supported, got: {err}"
-    );
+fn yaml_map_type_works() {
+    // YAML map values are now supported as objects with dot-notation access.
+    let source = "---\nconfig:\n  key: value\n---\n{config.key}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("value\n"), "got: {result}");
 }
 
 // ── Loop variable block scope (Spec 4.4) ─────────────────────────────────────
@@ -3236,5 +3219,399 @@ fn cli_init_rejects_path_traversal() {
     assert!(
         stderr.contains("..") || stderr.contains("traversal") || stderr.contains("components"),
         "error should mention path traversal, got: {stderr}"
+    );
+}
+
+// ── Object/Map type support ───────────────────────────────────────────────────
+
+#[test]
+fn object_single_level_access() {
+    let source = "---\nconfig:\n  key: val\n---\n{config.key}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert_eq!(result, "---\nconfig:\n  key: val\n---\nval\n", "got: {result}");
+}
+
+#[test]
+fn object_multi_level_access() {
+    let source = "---\na:\n  b:\n    c: deep\n---\n{a.b.c}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert_eq!(result, "---\na:\n  b:\n    c: deep\n---\ndeep\n", "got: {result}");
+}
+
+#[test]
+fn object_direct_interpolation_error() {
+    let source = "---\nobj:\n  key: val\n---\n{obj}\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("cannot interpolate object"), "got: {err}");
+}
+
+#[test]
+fn object_field_not_found() {
+    let source = "---\nobj:\n  key: val\n---\n{obj.missing}\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("not found") && err.contains("missing"), "got: {err}");
+}
+
+#[test]
+fn object_access_on_non_object() {
+    let source = "---\nname: Alice\n---\n{name.key}\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("cannot access field") && err.contains("string"), "got: {err}");
+}
+
+#[test]
+fn if_dot_path_truthy() {
+    let source = "---\nconfig:\n  debug: true\n---\n@if config.debug:\nDEBUG ON\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("DEBUG ON"), "got: {result}");
+}
+
+#[test]
+fn if_dot_path_falsy() {
+    let source = "---\nconfig:\n  debug: false\n---\n@if config.debug:\nDEBUG ON\n@else:\nDEBUG OFF\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("DEBUG OFF"), "got: {result}");
+}
+
+#[test]
+fn for_dot_path_iterable() {
+    let source = "---\nconfig:\n  items:\n    - a\n    - b\n---\n@for item in config.items:\n- {item}\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("- a") && result.contains("- b"), "got: {result}");
+}
+
+#[test]
+fn for_key_value_object() {
+    let source = "---\nobj:\n  alpha: 1\n  beta: 2\n---\n@for key, value in obj:\n{key}={value}\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("alpha=1") && result.contains("beta=2"), "got: {result}");
+    // Verify alphabetical order
+    let alpha_pos = result.find("alpha=1").unwrap();
+    let beta_pos = result.find("beta=2").unwrap();
+    assert!(alpha_pos < beta_pos, "keys should be in sorted order, got: {result}");
+}
+
+#[test]
+fn for_single_var_object_error() {
+    let source = "---\nobj:\n  key: val\n---\n@for item in obj:\n{item}\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("key, value") || err.contains("key,value") || err.contains("object"),
+        "error should direct to key-value syntax, got: {err}"
+    );
+}
+
+#[test]
+fn for_key_value_non_object_error() {
+    let source = "---\nitems:\n  - a\n  - b\n---\n@for k, v in items:\n{k}\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("object") || err.contains("array"),
+        "error should mention type, got: {err}"
+    );
+}
+
+#[test]
+fn func_arg_dot_path() {
+    let source = "---\nconfig:\n  name: Alice\n---\n@define greet(who):\nHello {who}!\n@end\n{greet(config.name)}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("Hello Alice!"), "got: {result}");
+}
+
+#[test]
+fn objects_inside_arrays() {
+    let source = "---\nitems:\n  - name: Alice\n  - name: Bob\n---\n@for item in items:\n{item.name}\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("Alice") && result.contains("Bob"), "got: {result}");
+}
+
+#[test]
+fn empty_object_is_falsy() {
+    let source = "@if obj:\nTRUTHY\n@else:\nFALSY\n@end\n";
+    let mut vars = std::collections::HashMap::new();
+    vars.insert("obj".to_string(), mds::Value::Object(std::collections::HashMap::new()));
+    let result = mds::compile_str_with(source, None, Some(vars)).unwrap();
+    assert!(result.contains("FALSY"), "empty object should be falsy, got: {result}");
+}
+
+#[test]
+fn namespace_and_object_coexist() {
+    // Verify that {obj.key} (MemberAccess) works alongside the existing codebase features.
+    let source = "---\nobj:\n  key: val\n---\n{obj.key}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert_eq!(result, "---\nobj:\n  key: val\n---\nval\n", "got: {result}");
+}
+
+#[test]
+fn vars_file_with_nested_objects() {
+    // Test that load_vars_file handles nested JSON objects
+    let dir = tempfile::tempdir().unwrap();
+    let vars_path = dir.path().join("vars.json");
+    std::fs::write(&vars_path, r#"{"config": {"name": "Test"}}"#).unwrap();
+    let vars = mds::load_vars_file(&vars_path).unwrap();
+    assert!(matches!(vars.get("config"), Some(mds::Value::Object(_))));
+}
+
+#[test]
+fn runtime_vars_object_dot_access() {
+    // Runtime-supplied objects (via compile_str_with) should be accessible via dot-path.
+    // This covers the runtime_vars path, distinct from frontmatter-defined objects.
+    let source = "{config.host}:{config.port}\n";
+    let mut inner = std::collections::HashMap::new();
+    inner.insert("host".to_string(), mds::Value::String("localhost".to_string()));
+    inner.insert("port".to_string(), mds::Value::String("8080".to_string()));
+    let mut vars = std::collections::HashMap::new();
+    vars.insert("config".to_string(), mds::Value::Object(inner));
+    let result = mds::compile_str_with(source, None, Some(vars)).unwrap();
+    // No frontmatter in source, so output is body only.
+    assert_eq!(result, "localhost:8080\n", "got: {result}");
+}
+
+#[test]
+fn for_key_value_dot_path_object() {
+    // Key-value iteration and dot-path object access should work in combination:
+    // @for key, value in config.settings should iterate the nested object.
+    let source = "---\nconfig:\n  settings:\n    theme: dark\n    lang: en\n---\n@for k, v in config.settings:\n{k}={v}\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    // Entries appear in sorted key order (lang before theme alphabetically).
+    // Frontmatter is preserved in output.
+    assert_eq!(
+        result,
+        "---\nconfig:\n  settings:\n    theme: dark\n    lang: en\n---\nlang=en\ntheme=dark\n",
+        "got: {result}"
+    );
+}
+
+// ── Frontmatter Preservation in Output (E2) ──────────────────────────────────
+
+#[test]
+fn frontmatter_preserved_in_str_output() {
+    let result = mds::compile_str("---\nname: World\n---\nHello {name}!\n").unwrap();
+    assert_eq!(result, "---\nname: World\n---\nHello World!\n");
+}
+
+#[test]
+fn frontmatter_type_mds_stripped() {
+    let source = "---\ntype: mds\nname: Alice\n---\nHello {name}!\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("---\nname: Alice\n---\n"),
+        "type: mds should be stripped, got: {result}"
+    );
+    assert!(
+        !result.contains("type: mds"),
+        "type: mds should not be in output, got: {result}"
+    );
+}
+
+#[test]
+fn frontmatter_type_mds_only_no_fences() {
+    let source = "---\ntype: mds\n---\nHello!\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        !result.contains("---"),
+        "no frontmatter fences when only type: mds, got: {result}"
+    );
+    assert_eq!(result, "Hello!\n");
+}
+
+#[test]
+fn frontmatter_empty_no_fences() {
+    // Empty frontmatter (---\n---) — the parser returns None for empty frontmatter,
+    // so raw_frontmatter is None and no fences are emitted.
+    let result = mds::compile_str("---\n---\nHello!\n").unwrap();
+    assert!(
+        !result.starts_with("---"),
+        "empty frontmatter should not produce fences, got: {result}"
+    );
+}
+
+#[test]
+fn frontmatter_runtime_override_doesnt_alter_output() {
+    // The frontmatter in the output reflects original values; the body uses overridden values.
+    let source = "---\nname: Alice\n---\nHello {name}!\n";
+    let mut vars = std::collections::HashMap::new();
+    vars.insert("name".to_string(), mds::Value::String("Bob".to_string()));
+    let result = mds::compile_str_with(source, None, Some(vars)).unwrap();
+    assert!(
+        result.contains("name: Alice"),
+        "output frontmatter should show original value, got: {result}"
+    );
+    assert!(
+        result.contains("Hello Bob!"),
+        "body should use overridden value, got: {result}"
+    );
+}
+
+#[test]
+fn frontmatter_only_no_body() {
+    // Frontmatter-only file (no body text after ---) emits frontmatter fences.
+    let source = "---\nkey: val\n---\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("---\nkey: val\n---"),
+        "frontmatter-only file should preserve frontmatter, got: {result}"
+    );
+}
+
+#[test]
+fn frontmatter_with_objects_preserved() {
+    let source = "---\nconfig:\n  theme: dark\n  debug: true\n---\n{config.theme}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("config:"),
+        "nested YAML should be preserved in frontmatter, got: {result}"
+    );
+    assert!(result.contains("theme: dark"), "got: {result}");
+    assert!(
+        result.contains("dark\n"),
+        "body should resolve to 'dark', got: {result}"
+    );
+}
+
+#[test]
+fn frontmatter_imported_module_not_emitted() {
+    // Only the root module's frontmatter appears in output.
+    // Imported modules' frontmatter is captured but never emitted.
+    let dir = tempfile::tempdir().unwrap();
+    let lib_path = dir.path().join("lib.mds");
+    let main_path = dir.path().join("main.mds");
+    std::fs::write(&lib_path, "---\nlibkey: libval\n---\n@define greet(n):\nHi {n}!\n@end\n").unwrap();
+    std::fs::write(&main_path, "---\nmainkey: mainval\n---\n@import \"./lib.mds\"\n{greet(\"World\")}\n").unwrap();
+    let result = mds::compile(&main_path, None).unwrap();
+    assert!(
+        result.contains("mainkey: mainval"),
+        "root frontmatter should appear in output, got: {result}"
+    );
+    assert!(
+        !result.contains("libkey"),
+        "imported module frontmatter should not appear in output, got: {result}"
+    );
+}
+
+#[test]
+fn strip_type_mds_only_strips_top_level_key() {
+    // Regression: strip_type_mds used line.trim() before matching, which caused
+    // indented 'type: mds' lines inside nested YAML objects to be incorrectly removed.
+    // Only the top-level (no leading whitespace) 'type: mds' directive should be stripped.
+    let source = "---\ntype: mds\nconfig:\n  type: mds\n  theme: dark\n---\n{config.theme}\n";
+    let result = mds::compile_str(source).unwrap();
+    // The top-level `type: mds` must not appear as an unindented frontmatter key.
+    // Check that no line in the output equals "type: mds" (i.e. no leading whitespace).
+    let has_top_level_type_mds = result
+        .lines()
+        .any(|line| line == "type: mds");
+    assert!(
+        !has_top_level_type_mds,
+        "top-level 'type: mds' should be stripped from output, got: {result}"
+    );
+    // The indented `  type: mds` under config: must be preserved (was the bug).
+    assert!(
+        result.contains("  type: mds"),
+        "indented 'type: mds' inside nested YAML object should be preserved, got: {result}"
+    );
+    assert!(
+        result.contains("theme: dark"),
+        "sibling key in nested object should be preserved, got: {result}"
+    );
+    assert!(
+        result.contains("dark\n"),
+        "body should resolve config.theme to 'dark', got: {result}"
+    );
+}
+
+// ── MAX_DOT_SEGMENTS depth-limit guards (E1 defense-in-depth) ───────────────
+
+#[test]
+fn dot_path_depth_limit_interpolation() {
+    // Interpolation with >32 dot segments must be rejected at parse time.
+    // Build a path with 33 segments: a.b.c.d...
+    let segments: Vec<String> = (0..33).map(|i| format!("f{i}")).collect();
+    let path = segments.join(".");
+    let source = format!("{{{path}}}\n");
+    let result = mds::compile_str(&source);
+    assert!(result.is_err(), "expected error for >32 segments, got Ok");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("exceeds maximum segment count"),
+        "error should mention segment count limit, got: {err}"
+    );
+}
+
+#[test]
+fn dot_path_depth_limit_if_condition() {
+    // @if condition with >32 dot segments must be rejected at parse time.
+    let segments: Vec<String> = (0..33).map(|i| format!("f{i}")).collect();
+    let path = segments.join(".");
+    let source = format!("@if {path}:\nyes\n@end\n");
+    let result = mds::compile_str(&source);
+    assert!(result.is_err(), "expected error for >32 segments in @if, got Ok");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("exceeds maximum segment count"),
+        "error should mention segment count limit, got: {err}"
+    );
+}
+
+#[test]
+fn dot_path_depth_limit_for_iterable() {
+    // @for iterable with >32 dot segments must be rejected at parse time.
+    let segments: Vec<String> = (0..33).map(|i| format!("f{i}")).collect();
+    let path = segments.join(".");
+    let source = format!("@for item in {path}:\n{{item}}\n@end\n");
+    let result = mds::compile_str(&source);
+    assert!(result.is_err(), "expected error for >32 segments in @for iterable, got Ok");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("exceeds maximum segment count"),
+        "error should mention segment count limit, got: {err}"
+    );
+}
+
+#[test]
+fn dot_path_depth_limit_exactly_at_boundary_is_allowed() {
+    // A path with exactly MAX_DOT_SEGMENTS (32) segments should not trigger the limit guard.
+    // Build root + 31 fields = 32 total segments.
+    // We use runtime vars to supply the deeply nested value so we don't need elaborate YAML.
+    // Only verify the parse/evaluate doesn't return a depth-limit error; the value
+    // itself may fail as undefined, which is acceptable.
+    let segments: Vec<String> = (0..32).map(|i| format!("f{i}")).collect();
+    let path = segments.join(".");
+    let source = format!("{{{path}}}\n");
+    let result = mds::compile_str(&source);
+    // Should not be a depth-limit error (may be an undefined-variable error).
+    if let Err(ref err) = result {
+        let err_str = format!("{err}");
+        assert!(
+            !err_str.contains("exceeds maximum segment count"),
+            "boundary-length path (32 segments) should not trigger depth limit, got: {err_str}"
+        );
+    }
+}
+
+// ── Traversed-path in error messages (evaluator path_so_far) ───────────────
+
+#[test]
+fn error_reports_full_traversed_path_on_missing_field() {
+    // When a field is missing after a successful partial traversal, the error
+    // should name the *traversed* path (not just the root variable).
+    // For {a.b.missing}, the error should mention "a.b" (the path traversed so far).
+    let source = "---\na:\n  b:\n    c: deep\n---\n{a.b.missing}\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err(), "expected error for missing field");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("missing") && err.contains("a.b"),
+        "error should report field 'missing' not found on 'a.b', got: {err}"
     );
 }

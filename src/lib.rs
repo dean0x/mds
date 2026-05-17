@@ -8,7 +8,7 @@
 //!
 //! ```rust
 //! let output = mds::compile_str("---\nname: World\n---\nHello {name}!\n")?;
-//! assert_eq!(output, "Hello World!\n");
+//! assert_eq!(output, "---\nname: World\n---\nHello World!\n");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -41,6 +41,7 @@ pub(crate) mod ast;
 pub mod error;
 pub(crate) mod evaluator;
 pub(crate) mod lexer;
+pub(crate) mod limits;
 pub(crate) mod parser;
 pub(crate) mod resolver;
 pub(crate) mod scope;
@@ -97,7 +98,7 @@ pub fn compile(
 ///
 /// ```rust
 /// let output = mds::compile_str("---\ngreeting: Hi\n---\n{greeting} there!\n")?;
-/// assert_eq!(output, "Hi there!\n");
+/// assert_eq!(output, "---\ngreeting: Hi\n---\nHi there!\n");
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[must_use = "the compiled Markdown output should be used"]
@@ -246,11 +247,12 @@ pub fn compile_collecting_warnings(
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
     let resolved = cache.resolve(path, &vars, &mut warnings)?;
-    let output = resolved
+    let body = resolved
         .prompt_body
         .as_deref()
         .map(clean_output)
         .unwrap_or_default();
+    let output = prepend_frontmatter(resolved.raw_frontmatter.as_deref(), body);
     Ok((output, warnings))
 }
 
@@ -269,11 +271,12 @@ pub fn compile_str_collecting_warnings(
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
     let resolved = cache.resolve_source(source, &dir, &vars, &mut warnings)?;
-    let output = resolved
+    let body = resolved
         .prompt_body
         .as_deref()
         .map(clean_output)
         .unwrap_or_default();
+    let output = prepend_frontmatter(resolved.raw_frontmatter.as_deref(), body);
     Ok((output, warnings))
 }
 
@@ -331,6 +334,51 @@ pub fn check_str_collecting_warnings(
     let mut warnings = vec![];
     cache.resolve_source(source, &dir, &vars, &mut warnings)?;
     Ok(((), warnings))
+}
+
+/// Remove the `type: mds` line from raw frontmatter content.
+///
+/// Returns `Some(remaining)` if any non-whitespace content survives after filtering,
+/// or `None` if the frontmatter would be empty (nothing worth emitting).
+fn strip_type_mds(raw: &str) -> Option<String> {
+    let mut filtered = String::with_capacity(raw.len());
+    for line in raw.lines() {
+        // Only strip the top-level (no leading whitespace) `type: mds` directive.
+        // Using line.trim() here would incorrectly remove indented keys inside nested
+        // YAML objects (e.g. `  type: mds` under a mapping), corrupting the output.
+        //
+        // All three YAML quoting styles for the value "mds" are stripped:
+        //   type: mds     (plain scalar)
+        //   type: "mds"   (double-quoted)
+        //   type: 'mds'   (single-quoted)
+        let is_type_mds = line.strip_prefix("type:").is_some_and(|v| {
+            let v = v.trim();
+            v == "mds" || v == "\"mds\"" || v == "'mds'"
+        });
+        if !is_type_mds {
+            filtered.push_str(line);
+            filtered.push('\n');
+        }
+    }
+    if filtered.trim().is_empty() {
+        None
+    } else {
+        Some(filtered)
+    }
+}
+
+/// Prepend YAML frontmatter fences to a compiled body.
+///
+/// If `raw` is `None`, or after stripping `type: mds` the frontmatter is empty,
+/// the body is returned unchanged.
+fn prepend_frontmatter(raw: Option<&str>, body: String) -> String {
+    let Some(raw) = raw else {
+        return body;
+    };
+    let Some(cleaned) = strip_type_mds(raw) else {
+        return body;
+    };
+    format!("---\n{cleaned}---\n{body}")
 }
 
 /// Clean up output whitespace: collapse 3+ consecutive newlines to 2 (one blank line),
@@ -455,5 +503,74 @@ mod tests {
     #[test]
     fn clean_output_strips_carriage_returns() {
         assert_eq!(clean_output("hello\r\nworld\r\n"), "hello\nworld\n");
+    }
+
+    // ── strip_type_mds: YAML quoting variants ─────────────────────────────────
+
+    #[test]
+    fn strip_type_mds_plain_value() {
+        // Baseline: unquoted `type: mds` is stripped.
+        let raw = "type: mds\nname: Alice\n";
+        let result = strip_type_mds(raw);
+        assert_eq!(result, Some("name: Alice\n".to_string()));
+    }
+
+    #[test]
+    fn strip_type_mds_double_quoted() {
+        // `type: "mds"` — double-quoted YAML string — must also be stripped.
+        let raw = "type: \"mds\"\nname: Alice\n";
+        let result = strip_type_mds(raw);
+        assert_eq!(
+            result,
+            Some("name: Alice\n".to_string()),
+            "double-quoted type:mds should be stripped, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn strip_type_mds_single_quoted() {
+        // `type: 'mds'` — single-quoted YAML string — must also be stripped.
+        let raw = "type: 'mds'\nname: Alice\n";
+        let result = strip_type_mds(raw);
+        assert_eq!(
+            result,
+            Some("name: Alice\n".to_string()),
+            "single-quoted type:mds should be stripped, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn strip_type_mds_no_space_after_colon() {
+        // `type:mds` — no space after colon — must also be stripped.
+        let raw = "type:mds\nname: Alice\n";
+        let result = strip_type_mds(raw);
+        assert_eq!(
+            result,
+            Some("name: Alice\n".to_string()),
+            "no-space type:mds should be stripped, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn strip_type_mds_quoted_only_returns_none() {
+        // Frontmatter with only a quoted `type: "mds"` should return None (empty after strip).
+        let raw = "type: \"mds\"\n";
+        let result = strip_type_mds(raw);
+        assert_eq!(
+            result, None,
+            "frontmatter with only quoted type:mds should be None, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn strip_type_mds_indented_quoted_not_stripped() {
+        // Indented `  type: "mds"` inside a nested mapping must NOT be stripped.
+        let raw = "type: mds\nconfig:\n  type: \"mds\"\n  theme: dark\n";
+        let result = strip_type_mds(raw);
+        assert_eq!(
+            result,
+            Some("config:\n  type: \"mds\"\n  theme: dark\n".to_string()),
+            "indented quoted type:mds should be preserved, got: {result:?}"
+        );
     }
 }
