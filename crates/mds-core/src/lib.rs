@@ -40,6 +40,7 @@
 pub(crate) mod ast;
 pub(crate) mod error;
 pub(crate) mod evaluator;
+pub(crate) mod fs;
 pub(crate) mod lexer;
 pub(crate) mod limits;
 pub(crate) mod parser;
@@ -48,10 +49,11 @@ pub(crate) mod scope;
 pub(crate) mod validator;
 pub(crate) mod value;
 
+pub use fs::{FileSystem, NativeFs, VirtualFs};
+pub use resolver::ModuleCache;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-
-use resolver::ModuleCache;
 
 pub use error::MdsError;
 pub use value::Value;
@@ -157,7 +159,7 @@ pub fn check(
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
-    cache.resolve(path, &vars, &mut warnings)?;
+    cache.resolve_path(path, &vars, &mut warnings)?;
     emit_warnings(&warnings);
     Ok(())
 }
@@ -246,7 +248,7 @@ pub fn compile_collecting_warnings(
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
-    let resolved = cache.resolve(path, &vars, &mut warnings)?;
+    let resolved = cache.resolve_path(path, &vars, &mut warnings)?;
     let body = resolved
         .prompt_body
         .as_deref()
@@ -302,7 +304,7 @@ pub fn check_collecting_warnings(
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
-    cache.resolve(path, &vars, &mut warnings)?;
+    cache.resolve_path(path, &vars, &mut warnings)?;
     Ok(((), warnings))
 }
 
@@ -414,6 +416,145 @@ fn clean_output(s: &str) -> String {
     out
 }
 
+/// Compile a module from an in-memory virtual filesystem.
+///
+/// `modules` is a map of key → source content. `entry` is the key of the
+/// module to compile (e.g. `"main.mds"`).
+///
+/// This is the virtual-filesystem counterpart of [`compile`], suitable for
+/// WASM environments and testing where OS filesystem access is unavailable.
+///
+/// # Examples
+///
+/// ```rust
+/// use std::collections::HashMap;
+///
+/// let mut modules = HashMap::new();
+/// modules.insert("main.mds".to_string(), "---\nname: World\n---\nHello {name}!\n".to_string());
+///
+/// let output = mds::compile_virtual(modules, "main.mds", None)?;
+/// assert_eq!(output, "---\nname: World\n---\nHello World!\n");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use = "the compiled Markdown output should be used"]
+pub fn compile_virtual(
+    modules: HashMap<String, String>,
+    entry: &str,
+    runtime_vars: Option<HashMap<String, Value>>,
+) -> Result<String, MdsError> {
+    let (output, warnings) = compile_virtual_collecting_warnings(modules, entry, runtime_vars)?;
+    emit_warnings(&warnings);
+    Ok(output)
+}
+
+/// Compile a module from an in-memory virtual filesystem and return the output
+/// along with any collected warnings.
+///
+/// Unlike [`compile_virtual`], this function does not print warnings to stderr.
+/// The caller is responsible for deciding whether to display them (e.g. based
+/// on a quiet flag).
+///
+/// This is the virtual-filesystem counterpart of [`compile_collecting_warnings`].
+///
+/// # Examples
+///
+/// ```rust
+/// use std::collections::HashMap;
+///
+/// let mut modules = HashMap::new();
+/// modules.insert("main.mds".to_string(), "---\nname: World\n---\nHello {name}!\n".to_string());
+///
+/// let (output, warnings) = mds::compile_virtual_collecting_warnings(modules, "main.mds", None)?;
+/// assert_eq!(output, "---\nname: World\n---\nHello World!\n");
+/// assert!(warnings.is_empty());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use = "the compiled Markdown output and warnings should be used"]
+pub fn compile_virtual_collecting_warnings(
+    modules: HashMap<String, String>,
+    entry: &str,
+    runtime_vars: Option<HashMap<String, Value>>,
+) -> Result<(String, Vec<String>), MdsError> {
+    let vars = runtime_vars.unwrap_or_default();
+    let mut cache = ModuleCache::virtual_fs(modules);
+    let mut warnings = vec![];
+    let resolved = cache.resolve_key(entry, &vars, &mut warnings)?;
+    let body = resolved
+        .prompt_body
+        .as_deref()
+        .map(clean_output)
+        .unwrap_or_default();
+    let output = prepend_frontmatter(resolved.raw_frontmatter.as_deref(), body);
+    Ok((output, warnings))
+}
+
+/// Check (validate) a module from an in-memory virtual filesystem without rendering output.
+///
+/// `modules` is a map of key → source content. `entry` is the key of the
+/// module to check (e.g. `"main.mds"`).
+///
+/// Returns `Ok(())` if the module is valid, or an error describing the problem.
+/// Warnings (e.g. empty `@include`) are printed to stderr.
+///
+/// This is the virtual-filesystem counterpart of [`check`], suitable for
+/// WASM environments and testing where OS filesystem access is unavailable.
+///
+/// # Examples
+///
+/// ```rust
+/// use std::collections::HashMap;
+///
+/// let mut modules = HashMap::new();
+/// modules.insert("main.mds".to_string(), "---\nname: World\n---\nHello {name}!\n".to_string());
+///
+/// mds::check_virtual(modules, "main.mds", None)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use = "errors should be handled"]
+pub fn check_virtual(
+    modules: HashMap<String, String>,
+    entry: &str,
+    runtime_vars: Option<HashMap<String, Value>>,
+) -> Result<(), MdsError> {
+    let ((), warnings) = check_virtual_collecting_warnings(modules, entry, runtime_vars)?;
+    emit_warnings(&warnings);
+    Ok(())
+}
+
+/// Check (validate) a module from an in-memory virtual filesystem and return any
+/// collected warnings without rendering output.
+///
+/// Unlike [`check_virtual`], this function does not print warnings to stderr.
+/// The caller is responsible for deciding whether to display them (e.g. based
+/// on a quiet flag).
+///
+/// This is the virtual-filesystem counterpart of [`check_collecting_warnings`].
+///
+/// # Examples
+///
+/// ```rust
+/// use std::collections::HashMap;
+///
+/// let mut modules = HashMap::new();
+/// modules.insert("main.mds".to_string(), "---\nname: World\n---\nHello {name}!\n".to_string());
+///
+/// let ((), warnings) = mds::check_virtual_collecting_warnings(modules, "main.mds", None)?;
+/// assert!(warnings.is_empty());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use = "warnings should be used"]
+pub fn check_virtual_collecting_warnings(
+    modules: HashMap<String, String>,
+    entry: &str,
+    runtime_vars: Option<HashMap<String, Value>>,
+) -> Result<((), Vec<String>), MdsError> {
+    let vars = runtime_vars.unwrap_or_default();
+    let mut cache = ModuleCache::virtual_fs(modules);
+    let mut warnings = vec![];
+    cache.resolve_key(entry, &vars, &mut warnings)?;
+    Ok(((), warnings))
+}
+
 /// Convenience wrapper around [`compile`] for callers who have a path as `&str`.
 ///
 /// Warnings (e.g. empty `@include`) are printed to stderr.
@@ -448,10 +589,10 @@ pub fn load_vars_file(path: &Path) -> Result<HashMap<String, Value>, MdsError> {
     // Read bytes first, then check size (same TOCTOU-safe pattern as resolver.rs).
     let bytes = std::fs::read(path)
         .map_err(|e| MdsError::io(format!("cannot read vars file {}: {e}", path.display())))?;
-    if bytes.len() as u64 > resolver::MAX_FILE_SIZE {
+    if bytes.len() as u64 > MAX_FILE_SIZE {
         return Err(MdsError::resource_limit(format!(
             "vars file exceeds maximum size of {} bytes: {}",
-            resolver::MAX_FILE_SIZE,
+            MAX_FILE_SIZE,
             path.display()
         )));
     }

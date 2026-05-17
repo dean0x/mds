@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use mds::{MdsError, Value, MAX_FILE_SIZE, MAX_TRAVERSAL_DEPTH};
+use mds::{
+    FileSystem, MdsError, ModuleCache, NativeFs, Value, VirtualFs, MAX_FILE_SIZE,
+    MAX_TRAVERSAL_DEPTH,
+};
 
 #[test]
 fn public_functions_exist() {
@@ -11,11 +14,15 @@ fn public_functions_exist() {
     let _ = mds::compile(Path::new("nonexistent.mds"), None);
     let _ = mds::compile_collecting_warnings(Path::new("nonexistent.mds"), None);
     let _ = mds::compile_file("nonexistent.mds");
+    let _ = mds::compile_virtual(HashMap::new(), "main.mds", None);
+    let _ = mds::compile_virtual_collecting_warnings(HashMap::new(), "main.mds", None);
     let _ = mds::check_str("Hello!\n");
     let _ = mds::check_str_with("Hello!\n", None, None);
     let _ = mds::check_str_collecting_warnings("Hello!\n", None, None);
     let _ = mds::check(Path::new("nonexistent.mds"), None);
     let _ = mds::check_collecting_warnings(Path::new("nonexistent.mds"), None);
+    let _ = mds::check_virtual(HashMap::new(), "main.mds", None);
+    let _ = mds::check_virtual_collecting_warnings(HashMap::new(), "main.mds", None);
     let _ = mds::load_vars_file(Path::new("nonexistent.json"));
 }
 
@@ -190,11 +197,154 @@ fn value_methods() {
 
 #[test]
 fn cli_import_pattern_works() {
-    use mds::MdsError;
-    use mds::MAX_FILE_SIZE;
-    use mds::MAX_TRAVERSAL_DEPTH;
-
     let _: fn(&str) -> Result<String, MdsError> = |s| mds::compile_str(s);
     assert!(MAX_FILE_SIZE > 0);
     assert!(MAX_TRAVERSAL_DEPTH > 0);
+}
+
+// ── New public types from Phase 2 ─────────────────────────────────────────────
+
+#[test]
+fn filesystem_trait_importable() {
+    // FileSystem trait is part of the public API.
+    fn _accepts_fs(_fs: &dyn FileSystem) {}
+    let fs = NativeFs::new();
+    _accepts_fs(&fs);
+}
+
+#[test]
+fn native_fs_new_exists() {
+    let _fs = NativeFs::new();
+}
+
+#[test]
+fn virtual_fs_new_exists() {
+    let _fs = VirtualFs::new(HashMap::new());
+}
+
+#[test]
+fn module_cache_native_constructor() {
+    let _cache = ModuleCache::native();
+}
+
+#[test]
+fn module_cache_virtual_fs_constructor() {
+    let _cache = ModuleCache::virtual_fs(HashMap::new());
+}
+
+#[test]
+fn module_cache_with_fs_constructor() {
+    let fs: Box<dyn FileSystem> = Box::new(NativeFs::new());
+    let _cache = ModuleCache::with_fs(fs);
+}
+
+#[test]
+fn module_cache_new_still_works() {
+    let _cache = ModuleCache::new();
+}
+
+#[test]
+fn compile_virtual_exists() {
+    // compile_virtual is callable with a trivial module.
+    let mut modules = HashMap::new();
+    modules.insert("main.mds".to_string(), "Hello!\n".to_string());
+    let result = mds::compile_virtual(modules, "main.mds", None);
+    assert!(result.is_ok(), "compile_virtual should succeed: {result:?}");
+    assert_eq!(result.unwrap(), "Hello!\n");
+}
+
+#[test]
+fn compile_virtual_collecting_warnings_direct() {
+    // Direct call to compile_virtual_collecting_warnings: assert on both the
+    // output string and the warnings vector.
+    let mut modules = HashMap::new();
+    modules.insert(
+        "main.mds".to_string(),
+        "---\nname: World\n---\nHello {name}!\n".to_string(),
+    );
+    let result = mds::compile_virtual_collecting_warnings(modules, "main.mds", None);
+    assert!(
+        result.is_ok(),
+        "compile_virtual_collecting_warnings should succeed: {result:?}"
+    );
+    let (output, warnings) = result.unwrap();
+    assert!(
+        output.contains("Hello World!"),
+        "expected rendered output, got: {output}"
+    );
+    assert!(
+        warnings.is_empty(),
+        "expected no warnings, got: {warnings:?}"
+    );
+}
+
+#[test]
+fn check_virtual_exists() {
+    // check_virtual is callable with a trivial module.
+    let mut modules = HashMap::new();
+    modules.insert("main.mds".to_string(), "Hello!\n".to_string());
+    let result = mds::check_virtual(modules, "main.mds", None);
+    assert!(result.is_ok(), "check_virtual should succeed: {result:?}");
+}
+
+#[test]
+fn check_virtual_collecting_warnings_direct() {
+    // Direct call to check_virtual_collecting_warnings: assert on both the
+    // unit result and the warnings vector.
+    let mut modules = HashMap::new();
+    modules.insert(
+        "main.mds".to_string(),
+        "---\nname: World\n---\nHello {name}!\n".to_string(),
+    );
+    let result = mds::check_virtual_collecting_warnings(modules, "main.mds", None);
+    assert!(
+        result.is_ok(),
+        "check_virtual_collecting_warnings should succeed: {result:?}"
+    );
+    let ((), warnings) = result.unwrap();
+    assert!(
+        warnings.is_empty(),
+        "expected no warnings, got: {warnings:?}"
+    );
+}
+
+#[test]
+fn check_virtual_rejects_invalid_module() {
+    // check_virtual returns an error for an invalid template.
+    let mut modules = HashMap::new();
+    modules.insert(
+        "main.mds".to_string(),
+        "Hello {undefined_var}!\n".to_string(),
+    );
+    let result = mds::check_virtual(modules, "main.mds", None);
+    assert!(
+        result.is_err(),
+        "check_virtual should fail for undefined variable"
+    );
+}
+
+/// Verify that `compile_str_with` resolves `@import` paths relative to the
+/// supplied `base_dir`, not its parent. Regression test for the base_key
+/// sentinel fix in `resolve_source`.
+#[test]
+fn compile_str_with_import_resolves_relative_to_base_dir() {
+    use std::io::Write;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let lib_path = dir.path().join("lib.mds");
+    let mut f = std::fs::File::create(&lib_path).unwrap();
+    f.write_all(b"@define greet(x):\nHello {x}!\n@end\n")
+        .unwrap();
+
+    let source = "@import \"./lib.mds\"\n{greet(\"World\")}\n";
+    let result = mds::compile_str_with(source, Some(dir.path()), None);
+    assert!(
+        result.is_ok(),
+        "compile_str_with should succeed: {result:?}"
+    );
+    let output = result.unwrap();
+    assert!(
+        output.contains("Hello World!"),
+        "expected 'Hello World!' in output, got: {output}"
+    );
 }

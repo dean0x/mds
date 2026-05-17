@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use indexmap::IndexSet;
@@ -7,29 +7,12 @@ use indexmap::IndexSet;
 use crate::ast::{DefineBlock, ExportDirective, ImportDirective, Node};
 use crate::error::MdsError;
 use crate::evaluator::evaluate;
+use crate::fs::{FileSystem, NativeFs, VirtualFs};
 use crate::lexer::tokenize;
 use crate::parser::parse_with_ctx;
 use crate::scope::{FunctionDef, NamespaceScope, Scope};
 use crate::validator;
 use crate::value::Value;
-
-/// Walk up from a directory to find the project root.
-/// Looks for `.git` or `.mdsroot` markers.
-/// Falls back to the given directory if no marker is found.
-fn find_project_root(start: &Path) -> PathBuf {
-    let mut dir = start.to_path_buf();
-    for _ in 0..MAX_TRAVERSAL_DEPTH {
-        for marker in [".git", ".mdsroot"] {
-            if dir.join(marker).exists() {
-                return dir;
-            }
-        }
-        if !dir.pop() {
-            return start.to_path_buf();
-        }
-    }
-    start.to_path_buf()
-}
 
 /// A resolved module with its AST, exports, and prompt body.
 ///
@@ -50,57 +33,70 @@ const MAX_IMPORT_DEPTH: usize = 64;
 
 /// Maximum directory traversal depth when searching for project root markers.
 ///
-/// Exported as `pub(crate)` so `src/main.rs` can import it for `load_config`'s
-/// upward directory walk — eliminating the duplicate definition there.
+/// Exported as `pub(crate)` so `src/lib.rs` can re-export it, and `fs.rs`
+/// can import it for the `find_project_root` upward directory walk.
 pub(crate) const MAX_TRAVERSAL_DEPTH: usize = 256;
 
 /// Maximum file size (10 MB) to prevent runaway memory use.
 pub(crate) const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
-/// Module cache to avoid re-resolving the same file.
-#[derive(Default)]
+/// Module cache to avoid re-resolving the same file or virtual key.
+///
+/// Supports multiple filesystem backends via the [`FileSystem`] trait.
 pub struct ModuleCache {
-    modules: HashMap<PathBuf, Arc<ResolvedModule>>,
+    fs: Box<dyn FileSystem>,
+    modules: HashMap<String, Arc<ResolvedModule>>,
     /// Tracks modules currently being resolved. IndexSet provides both O(1)
     /// membership test (like HashSet) and insertion-ordered iteration (like Vec),
     /// so a separate `resolving_stack` is no longer needed.
-    resolving: IndexSet<PathBuf>,
-    /// Root directory for path-traversal prevention (set on first resolve).
-    root_dir: Option<PathBuf>,
+    resolving: IndexSet<String>,
+}
+
+impl std::fmt::Debug for ModuleCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModuleCache")
+            .field("modules_count", &self.modules.len())
+            .field("resolving_count", &self.resolving.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ModuleCache {
+    /// Create a new `ModuleCache` backed by the native OS filesystem.
+    ///
+    /// Equivalent to [`ModuleCache::native`].
     pub fn new() -> Self {
-        Self::default()
+        Self::native()
     }
 
-    /// Canonicalize `path` and detect symlinks without a TOCTOU window.
-    ///
-    /// Strategy: canonicalize parent dir (resolves dir-level symlinks), then
-    /// canonicalize the full path. If they differ, the final component is a symlink.
-    /// Returns the canonical path on success.
-    fn check_symlink(path: &Path) -> Result<PathBuf, MdsError> {
-        let file_name = path
-            .file_name()
-            .ok_or_else(|| MdsError::file_not_found(path.display().to_string()))?;
-
-        let parent = path.parent().unwrap_or(Path::new("."));
-        let canonical_parent = parent
-            .canonicalize()
-            .map_err(|_| MdsError::file_not_found(path.display().to_string()))?;
-        let canonical_without_following_last = canonical_parent.join(file_name);
-
-        let canonical = canonical_without_following_last
-            .canonicalize()
-            .map_err(|_| MdsError::file_not_found(path.display().to_string()))?;
-
-        if canonical != canonical_without_following_last {
-            return Err(MdsError::import_error(format!(
-                "symlinks are not allowed in imports: {}",
-                path.display()
-            )));
+    /// Create a `ModuleCache` backed by the native OS filesystem.
+    pub fn native() -> Self {
+        Self {
+            fs: Box::new(NativeFs::new()),
+            modules: HashMap::new(),
+            resolving: IndexSet::new(),
         }
-        Ok(canonical)
+    }
+
+    /// Create a `ModuleCache` backed by an in-memory virtual filesystem.
+    ///
+    /// Useful for testing and WASM environments where OS filesystem access
+    /// is unavailable.
+    pub fn virtual_fs(modules: HashMap<String, String>) -> Self {
+        Self {
+            fs: Box::new(VirtualFs::new(modules)),
+            modules: HashMap::new(),
+            resolving: IndexSet::new(),
+        }
+    }
+
+    /// Create a `ModuleCache` with a custom [`FileSystem`] implementation.
+    pub fn with_fs(fs: Box<dyn FileSystem>) -> Self {
+        Self {
+            fs,
+            modules: HashMap::new(),
+            resolving: IndexSet::new(),
+        }
     }
 
     /// Guard against excessively deep import chains.
@@ -113,140 +109,118 @@ impl ModuleCache {
         Ok(())
     }
 
-    /// Prevent path traversal: canonical path must stay within root_dir.
-    fn check_path_traversal(&self, canonical: &Path) -> Result<(), MdsError> {
-        if let Some(ref root) = self.root_dir {
-            if !canonical.starts_with(root) {
-                return Err(MdsError::import_error(format!(
-                    "import path escapes project directory: {}",
-                    canonical.display()
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    /// Canonicalize `path` and run all security checks, returning `(canonical, is_md)`.
+    /// Resolve a module from an OS filesystem path.
     ///
-    /// This is the first half of the old `validate_and_read_file`.  It performs every
-    /// check that does NOT require reading the file — symlink detection, root_dir
-    /// initialisation, import-depth guard, and path-traversal prevention.  The caller
-    /// must check the cache before calling `read_validated_file`; that way cache hits
-    /// pay only the cost of two `canonicalize` syscalls and no I/O.
-    fn canonicalize_and_check(&mut self, path: &Path) -> Result<(PathBuf, bool), MdsError> {
-        let canonical = Self::check_symlink(path)?;
-
-        // Set root_dir on first resolve (project root, not just entry point directory)
-        if self.root_dir.is_none() {
-            let entry_dir = canonical.parent().unwrap_or(Path::new("."));
-            self.root_dir = Some(find_project_root(entry_dir));
-        }
-
-        self.check_import_depth()?;
-        self.check_path_traversal(&canonical)?;
-
-        let is_md = canonical.extension().and_then(|e| e.to_str()) == Some("md");
-        Ok((canonical, is_md))
-    }
-
-    /// Read and decode the file at `canonical` (already security-checked).
-    ///
-    /// This is the second half of the old `validate_and_read_file`.  It is called only
-    /// on cache misses, so the expensive I/O never runs for files that are already cached.
-    fn read_validated_file(canonical: &Path) -> Result<String, MdsError> {
-        // Read the file as bytes first, then check size (avoids TOCTOU race between
-        // a separate metadata call and the actual read).
-        let bytes = std::fs::read(canonical)
-            .map_err(|e| MdsError::io(format!("cannot read {}: {e}", canonical.display())))?;
-        if bytes.len() as u64 > MAX_FILE_SIZE {
-            return Err(MdsError::resource_limit(format!(
-                "file too large ({} bytes, max {} bytes): {}",
-                bytes.len(),
-                MAX_FILE_SIZE,
-                canonical.display()
-            )));
-        }
-        String::from_utf8(bytes)
-            .map_err(|e| MdsError::io(format!("invalid UTF-8 in {}: {e}", canonical.display())))
-    }
-
-    /// Resolve a module from file path. Handles caching and cycle detection.
-    pub fn resolve(
+    /// Normalizes `path` to a canonical key via the underlying [`FileSystem`],
+    /// then resolves through the module cache with cycle detection and depth guarding.
+    pub fn resolve_path(
         &mut self,
         path: &Path,
         runtime_vars: &HashMap<String, Value>,
         warnings: &mut Vec<String>,
     ) -> Result<Arc<ResolvedModule>, MdsError> {
-        // Step 1: canonicalize + security checks (no file read yet).
-        let (canonical, is_md) = self.canonicalize_and_check(path)?;
+        let path_str = path.display().to_string();
+        let key = self.fs.normalize("", &path_str)?;
+        self.resolve_by_key(&key, runtime_vars, warnings)
+    }
 
-        // Step 2: cache hit — return immediately without reading the file.
-        if let Some(cached) = self.modules.get(&canonical) {
+    /// Resolve a module by its normalized key.
+    ///
+    /// This is the core resolution loop: cache check → depth check →
+    /// cycle detection → read → validate type → process → cache insert.
+    fn resolve_by_key(
+        &mut self,
+        key: &str,
+        runtime_vars: &HashMap<String, Value>,
+        warnings: &mut Vec<String>,
+    ) -> Result<Arc<ResolvedModule>, MdsError> {
+        // Step 1: cache hit — return immediately without reading.
+        if let Some(cached) = self.modules.get(key) {
             return Ok(Arc::clone(cached));
         }
 
-        // Step 3: cycle detection — must happen before we push to `resolving`.
-        if self.resolving.contains(&canonical) {
-            let cycle = build_cycle_string(&self.resolving, &canonical);
+        // Step 2: cycle detection — must happen before we push to `resolving`.
+        if self.resolving.contains(key) {
+            let cycle = build_cycle_string(&self.resolving, key);
             return Err(MdsError::circular_import(cycle));
         }
 
+        // Step 3: depth guard.
+        self.check_import_depth()?;
+
         // Step 4: read the file only on a cache miss.
-        let source = Self::read_validated_file(&canonical)?;
+        let source = self.fs.read(key)?;
 
-        // Validate file type (uses already-read source for .md frontmatter check)
-        validate_file_type(&canonical, &source)?;
+        // Step 5: determine if markdown (for frontmatter type-key handling).
+        let is_md = self.fs.is_markdown(key);
 
-        let file_str = canonical.display().to_string();
-        let base_dir = canonical.parent().unwrap_or(Path::new(".")).to_path_buf();
+        // Step 6: validate file type.
+        validate_file_type(key, &source)?;
 
         // Mark as resolving before recursing into process_module.
         // IndexSet preserves insertion order, so it serves as both the set (O(1) lookup)
         // and the ordered stack (for cycle path reconstruction).
-        self.resolving.insert(canonical.clone());
+        self.resolving.insert(key.to_string());
 
-        let resolved =
-            self.process_module(&source, &file_str, &base_dir, is_md, runtime_vars, warnings);
+        let ctx = ModuleCtx {
+            file_str: key,
+            source: &source,
+            base_key: key,
+            runtime_vars,
+        };
+        let resolved = self.process_module(&ctx, is_md, warnings);
 
         // Unmark regardless of success or failure. resolve/unmark is strictly LIFO
         // (we always remove the last element we inserted), so pop() is O(1).
         // Safety-critical LIFO invariant: a mismatched pop would silently corrupt
-        // cycle-detection state and allow unbounded recursion. Return an error
-        // rather than panicking.
-        //
-        // Check LIFO regardless of whether process_module succeeded or failed —
-        // both errors must be surfaced. On double-fault, prefer the module processing
-        // error (user-facing root cause) over the LIFO violation (internal compiler bug).
+        // cycle-detection state and allow unbounded recursion.
         let popped = self.resolving.pop();
-        let lifo_result = if popped.as_ref() == Some(&canonical) {
-            Ok(())
-        } else {
-            Err(MdsError::syntax(format!(
-                "internal error: resolving stack LIFO invariant violated \
-                 (expected {expected}, got {got}) — this is a compiler bug, please report it",
-                expected = canonical.display(),
-                got = popped
-                    .as_deref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "<empty>".to_string()),
-            )))
-        };
-
-        let resolved = match (resolved, lifo_result) {
-            (Err(module_err), _) => return Err(module_err),
-            (Ok(_), Err(lifo_err)) => return Err(lifo_err),
-            (Ok(resolved), Ok(())) => resolved,
-        };
+        let resolved = Self::check_lifo_pop(resolved, popped, key)?;
 
         // Wrap in Arc, store in cache, and return a clone of the Arc (O(1)).
+        let key_owned = key.to_string();
         let arc = Arc::new(resolved);
-        self.modules.insert(canonical, Arc::clone(&arc));
+        self.modules.insert(key_owned, Arc::clone(&arc));
 
         Ok(arc)
     }
 
+    /// Resolve an import from within a module identified by `base_key`.
+    ///
+    /// Validates the import path, normalizes it via the filesystem, then
+    /// delegates to [`ModuleCache::resolve_by_key`].
+    fn resolve_import_from(
+        &mut self,
+        base_key: &str,
+        relative: &str,
+        runtime_vars: &HashMap<String, Value>,
+        warnings: &mut Vec<String>,
+    ) -> Result<Arc<ResolvedModule>, MdsError> {
+        validate_import_path(relative)?;
+        let key = self.fs.normalize(base_key, relative)?;
+        self.resolve_by_key(&key, runtime_vars, warnings)
+    }
+
+    /// Resolve a module by its normalized key.
+    ///
+    /// This is the entry point for virtual filesystems where there is no OS path.
+    /// Use this with [`ModuleCache::virtual_fs`] or a custom [`FileSystem`] backend.
+    pub fn resolve_key(
+        &mut self,
+        key: &str,
+        runtime_vars: &HashMap<String, Value>,
+        warnings: &mut Vec<String>,
+    ) -> Result<Arc<ResolvedModule>, MdsError> {
+        self.resolve_by_key(key, runtime_vars, warnings)
+    }
+
     /// Resolve a module from an in-memory source string.
+    ///
     /// Imports within the source are resolved relative to `base_dir`.
+    ///
+    /// **NativeFs-only**: this method takes a `&Path` and calls `canonicalize()` and
+    /// `fs.set_root()`, which only make sense for OS-backed filesystems. For virtual or
+    /// WASM environments use [`ModuleCache::resolve_key`] instead.
     pub fn resolve_source(
         &mut self,
         source: &str,
@@ -254,62 +228,101 @@ impl ModuleCache {
         runtime_vars: &HashMap<String, Value>,
         warnings: &mut Vec<String>,
     ) -> Result<Arc<ResolvedModule>, MdsError> {
-        // Set root_dir on first use so path-traversal checks work for imports.
-        // Canonicalize to match the canonical paths used by resolve(), ensuring
-        // starts_with checks are consistent even when base_dir contains `.` or `..`.
-        if self.root_dir.is_none() {
-            self.root_dir = Some(base_dir.canonicalize().map_err(|e| {
-                MdsError::io(format!(
-                    "cannot resolve base directory {}: {e}",
-                    base_dir.display()
-                ))
-            })?);
+        // Canonicalize base_dir and set the filesystem root so import traversal
+        // checks work correctly even when base_dir contains '.' or '..' components.
+        let canonical = base_dir.canonicalize().map_err(|e| {
+            MdsError::io(format!(
+                "cannot resolve base directory {}: {e}",
+                base_dir.display()
+            ))
+        })?;
+        let canonical_str = canonical.display().to_string();
+        self.fs.set_root(&canonical_str)?;
+
+        // The base_key must look like a file path so that normalize() can call
+        // parent() on it to get the directory. Append a synthetic filename to
+        // the canonical directory so imports resolve relative to that directory
+        // (not its parent).
+        let base_key = format!("{canonical_str}/<source>");
+
+        // Guard against re-entrant or cyclic calls that could form a cycle
+        // back through this root module. Mirrors the resolving bookkeeping in
+        // resolve_by_key so that cycle detection and depth checks apply to the
+        // root module as well.
+        self.check_import_depth()?;
+        self.resolving.insert(base_key.clone());
+
+        let ctx = ModuleCtx {
+            file_str: "<source>",
+            source,
+            base_key: &base_key,
+            runtime_vars,
+        };
+        let resolved = self.process_module(&ctx, false, warnings);
+
+        let popped = self.resolving.pop();
+        Self::check_lifo_pop(resolved, popped, &base_key).map(Arc::new)
+    }
+
+    /// Assert the LIFO pop invariant after `process_module`.
+    ///
+    /// On double-fault (module error + LIFO violation), prefer the module error
+    /// (user-facing root cause) over the LIFO violation (internal compiler bug).
+    fn check_lifo_pop<T>(
+        module_result: Result<T, MdsError>,
+        popped: Option<String>,
+        expected: &str,
+    ) -> Result<T, MdsError> {
+        let lifo_result = if popped.as_deref() == Some(expected) {
+            Ok(())
+        } else {
+            Err(MdsError::syntax(format!(
+                "internal error: resolving stack LIFO invariant violated \
+                 (expected {expected}, got {got}) — this is a compiler bug, please report it",
+                got = popped.as_deref().unwrap_or("<empty>"),
+            )))
+        };
+        match (module_result, lifo_result) {
+            (Err(module_err), _) => Err(module_err),
+            (Ok(_), Err(lifo_err)) => Err(lifo_err),
+            (Ok(resolved), Ok(())) => Ok(resolved),
         }
-        self.process_module(source, "<source>", base_dir, false, runtime_vars, warnings)
-            .map(Arc::new)
     }
 
     /// Common module processing: tokenize, parse, build scope, evaluate.
     ///
-    /// Orchestrates the full pipeline in ~25 lines; detailed logic lives in helpers.
+    /// `ctx.file_str` is the display path for error messages (may be `"<source>"`).
+    /// `ctx.base_key` is the normalized key used to resolve relative imports.
+    /// `is_md` controls whether the `type` frontmatter key is treated as a file-type marker.
     fn process_module(
         &mut self,
-        source: &str,
-        file_str: &str,
-        base_dir: &Path,
+        ctx: &ModuleCtx<'_>,
         is_md: bool,
-        runtime_vars: &HashMap<String, Value>,
         warnings: &mut Vec<String>,
     ) -> Result<ResolvedModule, MdsError> {
         // Tokenize and parse
-        let tokens = tokenize(source, file_str)?;
-        let module = parse_with_ctx(&tokens, file_str, source)?;
+        let tokens = tokenize(ctx.source, ctx.file_str)?;
+        let module = parse_with_ctx(&tokens, ctx.file_str, ctx.source)?;
 
         // Capture raw frontmatter before build_scope_from_frontmatter borrows the module.
         let raw_frontmatter = module.frontmatter.as_ref().map(|fm| fm.raw.clone());
 
         // Build scope from frontmatter + runtime vars
         let mut scope =
-            build_scope_from_frontmatter(module.frontmatter.as_ref(), is_md, runtime_vars)?;
+            build_scope_from_frontmatter(module.frontmatter.as_ref(), is_md, ctx.runtime_vars)?;
 
         // Walk the AST: collect @define functions (with closure capture), process imports/exports
-        let ctx = ModuleCtx {
-            file_str,
-            source,
-            base_dir,
-            runtime_vars,
-        };
         let CollectedDefs {
             functions,
             has_explicit_exports,
             explicit_exports,
-        } = self.collect_definitions_and_imports(&module.body, &mut scope, &ctx, warnings)?;
+        } = self.collect_definitions_and_imports(&module.body, &mut scope, ctx, warnings)?;
 
         // Validate that all named exports refer to defined functions or "prompt"
         validate_exports(&explicit_exports, &functions)?;
 
         // Validate semantic correctness before evaluation
-        validator::validate(&module.body, &mut scope, file_str, source)?;
+        validator::validate(&module.body, &mut scope, ctx.file_str, ctx.source)?;
 
         // Evaluate the body to get prompt text
         let prompt_body = evaluate(&module.body, &mut scope, warnings)?;
@@ -376,9 +389,14 @@ impl ModuleCache {
                 // Resolve the source module and bring in the function for
                 // re-export only. Per spec: "@export from does not bring the
                 // symbol into the current file's scope".
-                validate_import_path(import_path)?;
-                let resolved_path = resolve_path(ctx.base_dir, import_path);
-                let source_module = self.resolve(&resolved_path, ctx.runtime_vars, warnings)?;
+                // Note: resolve_import_from calls validate_import_path internally,
+                // so path validation errors surface with correct messages automatically.
+                let source_module = self.resolve_import_from(
+                    ctx.base_key,
+                    import_path,
+                    ctx.runtime_vars,
+                    warnings,
+                )?;
                 let func = source_module.get_export(name).ok_or_else(|| {
                     MdsError::export_error(format!(
                         "cannot re-export '{name}': not exported from \"{import_path}\""
@@ -390,9 +408,14 @@ impl ModuleCache {
             ExportDirective::Wildcard { path: import_path } => {
                 // Re-export all exports from the target module. These are
                 // available to importers but NOT in the current file's scope.
-                validate_import_path(import_path)?;
-                let resolved_path = resolve_path(ctx.base_dir, import_path);
-                let source_module = self.resolve(&resolved_path, ctx.runtime_vars, warnings)?;
+                // Note: resolve_import_from calls validate_import_path internally,
+                // so path validation errors surface with correct messages automatically.
+                let source_module = self.resolve_import_from(
+                    ctx.base_key,
+                    import_path,
+                    ctx.runtime_vars,
+                    warnings,
+                )?;
                 for (name, func) in source_module.get_all_exports() {
                     if defs.functions.contains_key(&name) {
                         return Err(MdsError::name_collision(name));
@@ -414,10 +437,8 @@ impl ModuleCache {
         ctx: &ModuleCtx<'_>,
         warnings: &mut Vec<String>,
     ) -> Result<(), MdsError> {
-        validate_import_path(path)?;
-        let import_path = resolve_path(ctx.base_dir, path);
         let resolved = self
-            .resolve(&import_path, ctx.runtime_vars, warnings)
+            .resolve_import_from(ctx.base_key, path, ctx.runtime_vars, warnings)
             .map_err(|e| attach_import_span(e, path, ctx.file_str, ctx.source, offset))?;
         scope.set_namespace(alias, resolved.to_namespace());
         Ok(())
@@ -431,10 +452,8 @@ impl ModuleCache {
         ctx: &ModuleCtx<'_>,
         warnings: &mut Vec<String>,
     ) -> Result<(), MdsError> {
-        validate_import_path(path)?;
-        let import_path = resolve_path(ctx.base_dir, path);
         let resolved = self
-            .resolve(&import_path, ctx.runtime_vars, warnings)
+            .resolve_import_from(ctx.base_key, path, ctx.runtime_vars, warnings)
             .map_err(|e| attach_import_span(e, path, ctx.file_str, ctx.source, offset))?;
         // Per spec: only functions and the prompt body are imported via merge.
         // Frontmatter variables from the imported module are NOT brought into scope.
@@ -459,10 +478,8 @@ impl ModuleCache {
         ctx: &ModuleCtx<'_>,
         warnings: &mut Vec<String>,
     ) -> Result<(), MdsError> {
-        validate_import_path(path)?;
-        let import_path = resolve_path(ctx.base_dir, path);
         let resolved = self
-            .resolve(&import_path, ctx.runtime_vars, warnings)
+            .resolve_import_from(ctx.base_key, path, ctx.runtime_vars, warnings)
             .map_err(|e| attach_import_span(e, path, ctx.file_str, ctx.source, offset))?;
         let line_len = ctx.source[offset..]
             .find('\n')
@@ -518,6 +535,12 @@ impl ModuleCache {
                 offset,
             } => self.resolve_selective_import(names, path, *offset, scope, ctx, warnings),
         }
+    }
+}
+
+impl Default for ModuleCache {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -597,8 +620,8 @@ struct ModuleCtx<'a> {
     file_str: &'a str,
     /// Raw file content used for source-span diagnostics (offset → line/column lookup).
     source: &'a str,
-    /// Directory that contains the source file; used to resolve relative `@import` paths.
-    base_dir: &'a Path,
+    /// Normalized key of the current module; used to resolve relative `@import` paths.
+    base_key: &'a str,
     /// Variables injected at call-time (e.g. via `--set` or the public API `compile` call).
     runtime_vars: &'a HashMap<String, Value>,
 }
@@ -687,12 +710,6 @@ fn validate_exports(
     Ok(())
 }
 
-/// Resolve a relative path against a base directory.
-/// Per spec: only relative paths are allowed (must start with "./" or "../").
-fn resolve_path(base_dir: &Path, relative: &str) -> PathBuf {
-    base_dir.join(relative)
-}
-
 /// Validate that an import path is safe and relative.
 ///
 /// Rejects absolute paths and paths containing components that could escape
@@ -711,60 +728,73 @@ fn validate_import_path(path: &str) -> Result<(), MdsError> {
 }
 
 /// Validate that a file is a valid MDS file.
+///
 /// Accepts the already-read source content to avoid double-reading for `.md` files.
-fn validate_file_type(path: &Path, source: &str) -> Result<(), MdsError> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+/// Uses the normalized key (string) rather than a Path.
+fn validate_file_type(key: &str, source: &str) -> Result<(), MdsError> {
+    // Extract extension from the key string (split on '/' and '\\' for portability).
+    let filename = key.rsplit(['/', '\\']).next().unwrap_or(key);
+    // Guard against dotfiles: a filename that starts with '.' and contains no
+    // further '.' (e.g. ".mds") has no extension — reject it the same way
+    // Path::extension() would return None for such files.
+    let ext = if filename.starts_with('.') && !filename[1..].contains('.') {
+        None
+    } else {
+        filename.rsplit('.').next().filter(|e| *e != filename)
+    };
 
-    if ext == "mds" {
+    if ext == Some("mds") {
         return Ok(());
     }
 
     // For .md files, accept when frontmatter contains `type: mds`.
-    if ext == "md" {
-        let found = source
-            .strip_prefix("---\n")
-            .or_else(|| source.strip_prefix("---\r\n"))
-            .and_then(|after_fence| after_fence.find("\n---").map(|end| &after_fence[..end]))
-            .is_some_and(|fm| {
-                // Check each line for `type: mds` without a full YAML parse.
-                fm.lines().any(|line| {
-                    line.trim().strip_prefix("type:").is_some_and(|v| {
-                        let v = v.trim();
-                        // Match all three YAML quoting styles, mirroring strip_type_mds.
-                        v == "mds" || v == "\"mds\"" || v == "'mds'"
-                    })
-                })
-            });
-        if found {
-            return Ok(());
-        }
+    if ext == Some("md") && has_type_mds_frontmatter(source) {
+        return Ok(());
     }
 
-    Err(MdsError::not_mds_file(path.display().to_string()))
+    Err(MdsError::not_mds_file(key.to_string()))
+}
+
+/// Return `true` if `source` has a YAML frontmatter block containing `type: mds`.
+///
+/// Checks without a full YAML parse by scanning frontmatter lines for the key.
+/// Recognises all three YAML quoting styles: bare, single-quoted, double-quoted.
+fn has_type_mds_frontmatter(source: &str) -> bool {
+    source
+        .strip_prefix("---\n")
+        .or_else(|| source.strip_prefix("---\r\n"))
+        .and_then(|after_fence| after_fence.find("\n---").map(|end| &after_fence[..end]))
+        .is_some_and(|fm| {
+            fm.lines().any(|line| {
+                line.trim().strip_prefix("type:").is_some_and(|v| {
+                    let v = v.trim();
+                    // Match bare, double-quoted, and single-quoted values,
+                    // mirroring the strip_type_mds helper elsewhere.
+                    v == "mds" || v == "\"mds\"" || v == "'mds'"
+                })
+            })
+        })
 }
 
 /// Format a cycle chain like "a.mds → b.mds → a.mds" from the resolving set.
 ///
 /// `IndexSet` preserves insertion order, so we can use it as both the set
 /// and the ordered stack for cycle path reconstruction.
-fn build_cycle_string(resolving: &IndexSet<PathBuf>, repeated: &Path) -> String {
-    let start = resolving.iter().position(|p| p == repeated).unwrap_or(0);
+fn build_cycle_string(resolving: &IndexSet<String>, repeated: &str) -> String {
+    let start = resolving.iter().position(|k| k == repeated).unwrap_or(0);
     resolving.as_slice()[start..]
         .iter()
-        .map(PathBuf::as_path)
+        .map(String::as_str)
         .chain(std::iter::once(repeated))
-        .map(path_display_name)
+        .map(key_display_name)
         .collect::<Vec<_>>()
         .join(" \u{2192} ")
 }
 
-/// Return a short display name for a path (filename, falling back to full path, then "?").
-fn path_display_name(p: &Path) -> String {
-    p.file_name()
-        .and_then(|n| n.to_str())
-        .or_else(|| p.to_str())
-        .unwrap_or("?")
-        .to_string()
+/// Return a short display name for a normalized key (filename, falling back to the key).
+fn key_display_name(key: &str) -> &str {
+    // Split on both '/' and '\\' for portability across OS and VirtualFs keys.
+    key.rsplit(['/', '\\']).next().unwrap_or(key)
 }
 
 /// If `err` is a `FileNotFound` error with no source span, attach a span pointing
