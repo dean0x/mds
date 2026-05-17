@@ -159,7 +159,7 @@ pub fn check(
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
-    cache.resolve(path, &vars, &mut warnings)?;
+    cache.resolve_path(path, &vars, &mut warnings)?;
     emit_warnings(&warnings);
     Ok(())
 }
@@ -248,7 +248,7 @@ pub fn compile_collecting_warnings(
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
-    let resolved = cache.resolve(path, &vars, &mut warnings)?;
+    let resolved = cache.resolve_path(path, &vars, &mut warnings)?;
     let body = resolved
         .prompt_body
         .as_deref()
@@ -304,7 +304,7 @@ pub fn check_collecting_warnings(
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
-    cache.resolve(path, &vars, &mut warnings)?;
+    cache.resolve_path(path, &vars, &mut warnings)?;
     Ok(((), warnings))
 }
 
@@ -414,6 +414,46 @@ fn clean_output(s: &str) -> String {
     let mut out = trimmed.to_string();
     out.push('\n');
     out
+}
+
+/// Compile a module from an in-memory virtual filesystem.
+///
+/// `modules` is a map of key → source content. `entry` is the key of the
+/// module to compile (e.g. `"main.mds"`).
+///
+/// This is the virtual-filesystem counterpart of [`compile`], suitable for
+/// WASM environments and testing where OS filesystem access is unavailable.
+///
+/// # Examples
+///
+/// ```rust
+/// use std::collections::HashMap;
+///
+/// let mut modules = HashMap::new();
+/// modules.insert("main.mds".to_string(), "---\nname: World\n---\nHello {name}!\n".to_string());
+///
+/// let output = mds::compile_virtual(modules, "main.mds", None)?;
+/// assert_eq!(output, "---\nname: World\n---\nHello World!\n");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use = "the compiled Markdown output should be used"]
+pub fn compile_virtual(
+    modules: HashMap<String, String>,
+    entry: &str,
+    runtime_vars: Option<HashMap<String, Value>>,
+) -> Result<String, MdsError> {
+    let vars = runtime_vars.unwrap_or_default();
+    let mut cache = ModuleCache::virtual_fs(modules);
+    let mut warnings = vec![];
+    let resolved = cache.resolve_key(entry, &vars, &mut warnings)?;
+    let body = resolved
+        .prompt_body
+        .as_deref()
+        .map(clean_output)
+        .unwrap_or_default();
+    let output = prepend_frontmatter(resolved.raw_frontmatter.as_deref(), body);
+    emit_warnings(&warnings);
+    Ok(output)
 }
 
 /// Convenience wrapper around [`compile`] for callers who have a path as `&str`.
