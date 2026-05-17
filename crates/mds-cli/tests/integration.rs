@@ -178,7 +178,7 @@ fn not_mds_file_error() {
     let result = mds::compile(&path, None);
     assert!(result.is_err());
     let err = format!("{}", result.unwrap_err());
-    assert!(err.contains("not an MDS file") || err.contains("not_mds"));
+    assert!(err.contains("not an MDS file"), "expected 'not an MDS file' in error, got: {err}");
 }
 
 #[test]
