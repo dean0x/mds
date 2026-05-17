@@ -1,5 +1,5 @@
 mod common;
-use common::fixture;
+use std::collections::HashMap;
 
 #[test]
 fn dot_notation_object_access_works() {
@@ -123,8 +123,8 @@ fn objects_inside_arrays() {
 #[test]
 fn empty_object_is_falsy() {
     let source = "@if obj:\nTRUTHY\n@else:\nFALSY\n@end\n";
-    let mut vars = std::collections::HashMap::new();
-    vars.insert("obj".to_string(), mds::Value::Object(std::collections::HashMap::new()));
+    let mut vars = HashMap::new();
+    vars.insert("obj".to_string(), mds::Value::Object(HashMap::new()));
     let result = mds::compile_str_with(source, None, Some(vars)).unwrap();
     assert!(result.contains("FALSY"), "empty object should be falsy, got: {result}");
 }
@@ -152,10 +152,10 @@ fn runtime_vars_object_dot_access() {
     // Runtime-supplied objects (via compile_str_with) should be accessible via dot-path.
     // This covers the runtime_vars path, distinct from frontmatter-defined objects.
     let source = "{config.host}:{config.port}\n";
-    let mut inner = std::collections::HashMap::new();
+    let mut inner = HashMap::new();
     inner.insert("host".to_string(), mds::Value::String("localhost".to_string()));
     inner.insert("port".to_string(), mds::Value::String("8080".to_string()));
-    let mut vars = std::collections::HashMap::new();
+    let mut vars = HashMap::new();
     vars.insert("config".to_string(), mds::Value::Object(inner));
     let result = mds::compile_str_with(source, None, Some(vars)).unwrap();
     // No frontmatter in source, so output is body only.

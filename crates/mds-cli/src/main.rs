@@ -377,7 +377,7 @@ fn main() {
 }
 
 /// Load vars from an optional file path, returning None if no file was given.
-fn load_vars_file(
+fn load_optional_vars_file(
     path: Option<PathBuf>,
 ) -> Result<Option<HashMap<String, mds::Value>>> {
     path.map(|p| mds::load_vars_file(&p).map_err(|e| miette::miette!("{e}")))
@@ -389,7 +389,7 @@ fn build_runtime_vars(
     vars: Option<PathBuf>,
     set_vars: Vec<(String, String)>,
 ) -> Result<Option<HashMap<String, mds::Value>>> {
-    let mut runtime_vars = load_vars_file(vars)?;
+    let mut runtime_vars = load_optional_vars_file(vars)?;
     for (key, val) in set_vars {
         runtime_vars
             .get_or_insert_with(HashMap::new)
@@ -536,7 +536,7 @@ fn run_check(
 
     // Resolve the input: explicit path/stdin, or auto-detect from cwd.
     // run_check does not print a banner on auto-detect — check is a silent validation.
-    let (input, _auto_detected) = resolve_input(input)?;
+    let (input, _) = resolve_input(input)?;
 
     reject_directory_input(&input)?;
 
