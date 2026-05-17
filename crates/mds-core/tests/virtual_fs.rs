@@ -127,6 +127,33 @@ fn selective_import() {
 }
 
 #[test]
+fn selective_import_excludes_non_imported() {
+    // selective_import only imports greet from lib.mds; farewell should not be
+    // available in main.mds. Without this negative assertion the positive test
+    // passes even if selective import filtering is a no-op.
+    let mut modules = HashMap::new();
+    modules.insert(
+        "lib.mds".to_string(),
+        "@define greet(x):\nHi {x}!\n@end\n@define farewell(x):\nBye {x}!\n@end\n".to_string(),
+    );
+    modules.insert(
+        "main.mds".to_string(),
+        "@import { greet } from \"./lib.mds\"\n{farewell(\"Bob\")}\n".to_string(),
+    );
+    let err = compile_vfs(modules, "main.mds")
+        .expect_err("calling a non-imported function should fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("farewell")
+            || msg.contains("not defined")
+            || msg.contains("not found")
+            || msg.contains("undefined")
+            || msg.contains("unknown"),
+        "expected an error mentioning the missing symbol, got: {msg}"
+    );
+}
+
+#[test]
 fn export_visibility_exported_function_accessible() {
     // greet is exported — it must be callable from the importer.
     let mut modules = HashMap::new();
@@ -256,7 +283,7 @@ fn resolve_key_directly() {
     // Use get_prompt_value() since prompt_body is pub(crate).
     let body = match resolved.get_prompt_value() {
         Some(Value::String(ref s)) => s.clone(),
-        _ => String::new(),
+        other => panic!("expected Value::String, got: {other:?}"),
     };
     assert!(body.contains("Hello World!"), "got body: {body:?}");
 }

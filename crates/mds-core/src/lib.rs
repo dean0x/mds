@@ -488,6 +488,73 @@ pub fn compile_virtual_collecting_warnings(
     Ok((output, warnings))
 }
 
+/// Check (validate) a module from an in-memory virtual filesystem without rendering output.
+///
+/// `modules` is a map of key → source content. `entry` is the key of the
+/// module to check (e.g. `"main.mds"`).
+///
+/// Returns `Ok(())` if the module is valid, or an error describing the problem.
+/// Warnings (e.g. empty `@include`) are printed to stderr.
+///
+/// This is the virtual-filesystem counterpart of [`check`], suitable for
+/// WASM environments and testing where OS filesystem access is unavailable.
+///
+/// # Examples
+///
+/// ```rust
+/// use std::collections::HashMap;
+///
+/// let mut modules = HashMap::new();
+/// modules.insert("main.mds".to_string(), "---\nname: World\n---\nHello {name}!\n".to_string());
+///
+/// mds::check_virtual(modules, "main.mds", None)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use = "errors should be handled"]
+pub fn check_virtual(
+    modules: HashMap<String, String>,
+    entry: &str,
+    runtime_vars: Option<HashMap<String, Value>>,
+) -> Result<(), MdsError> {
+    let ((), warnings) = check_virtual_collecting_warnings(modules, entry, runtime_vars)?;
+    emit_warnings(&warnings);
+    Ok(())
+}
+
+/// Check (validate) a module from an in-memory virtual filesystem and return any
+/// collected warnings without rendering output.
+///
+/// Unlike [`check_virtual`], this function does not print warnings to stderr.
+/// The caller is responsible for deciding whether to display them (e.g. based
+/// on a quiet flag).
+///
+/// This is the virtual-filesystem counterpart of [`check_collecting_warnings`].
+///
+/// # Examples
+///
+/// ```rust
+/// use std::collections::HashMap;
+///
+/// let mut modules = HashMap::new();
+/// modules.insert("main.mds".to_string(), "---\nname: World\n---\nHello {name}!\n".to_string());
+///
+/// let ((), warnings) = mds::check_virtual_collecting_warnings(modules, "main.mds", None)?;
+/// assert!(warnings.is_empty());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use = "warnings should be used"]
+pub fn check_virtual_collecting_warnings(
+    modules: HashMap<String, String>,
+    entry: &str,
+    runtime_vars: Option<HashMap<String, Value>>,
+) -> Result<((), Vec<String>), MdsError> {
+    let vars = runtime_vars.unwrap_or_default();
+    let mut cache = ModuleCache::virtual_fs(modules);
+    let mut warnings = vec![];
+    cache.resolve_key(entry, &vars, &mut warnings)?;
+    Ok(((), warnings))
+}
+
 /// Convenience wrapper around [`compile`] for callers who have a path as `&str`.
 ///
 /// Warnings (e.g. empty `@include`) are printed to stderr.

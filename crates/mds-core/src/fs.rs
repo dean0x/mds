@@ -757,9 +757,14 @@ mod tests {
 
     #[test]
     fn vfs_normalize_too_many_segments_errors() {
-        // Build a path with MAX_PATH_SEGMENTS + 1 normal (non-dot) segments.
-        let long_path = "a/".repeat(MAX_PATH_SEGMENTS + 1) + "file.mds";
-        let result = vfs().normalize("", &long_path);
+        // Import paths (non-root base) are bounded by MAX_PATH_SEGMENTS.
+        // Use "root.mds" as base so base_dir_segments is empty, then provide
+        // MAX_PATH_SEGMENTS + 1 segments in the relative path to exceed the cap.
+        let long_relative = (0..=MAX_PATH_SEGMENTS)
+            .map(|i| format!("seg{i}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let result = vfs().normalize("root.mds", &long_relative);
         assert!(
             result.is_err(),
             "expected Err for path with too many segments, got {result:?}"
@@ -773,14 +778,14 @@ mod tests {
 
     #[test]
     fn vfs_normalize_exactly_at_segment_limit_ok() {
-        // Exactly MAX_PATH_SEGMENTS normal segments must succeed.
-        // Each segment is 1 char ("a"), separated by "/".
-        // The path is built so that all segments are new (no base dir context).
+        // Exactly MAX_PATH_SEGMENTS segments must succeed.
+        // Use "root.mds" as base so base_dir_segments is empty, then provide
+        // exactly MAX_PATH_SEGMENTS segments in the relative path.
         let exactly = (0..MAX_PATH_SEGMENTS)
             .map(|i| format!("seg{i}"))
             .collect::<Vec<_>>()
             .join("/");
-        let result = vfs().normalize("", &exactly);
+        let result = vfs().normalize("root.mds", &exactly);
         assert!(
             result.is_ok(),
             "expected Ok for path at segment limit, got {result:?}"

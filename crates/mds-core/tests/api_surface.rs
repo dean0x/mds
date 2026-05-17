@@ -11,11 +11,15 @@ fn public_functions_exist() {
     let _ = mds::compile(Path::new("nonexistent.mds"), None);
     let _ = mds::compile_collecting_warnings(Path::new("nonexistent.mds"), None);
     let _ = mds::compile_file("nonexistent.mds");
+    let _ = mds::compile_virtual(HashMap::new(), "main.mds", None);
+    let _ = mds::compile_virtual_collecting_warnings(HashMap::new(), "main.mds", None);
     let _ = mds::check_str("Hello!\n");
     let _ = mds::check_str_with("Hello!\n", None, None);
     let _ = mds::check_str_collecting_warnings("Hello!\n", None, None);
     let _ = mds::check(Path::new("nonexistent.mds"), None);
     let _ = mds::check_collecting_warnings(Path::new("nonexistent.mds"), None);
+    let _ = mds::check_virtual(HashMap::new(), "main.mds", None);
+    let _ = mds::check_virtual_collecting_warnings(HashMap::new(), "main.mds", None);
     let _ = mds::load_vars_file(Path::new("nonexistent.json"));
 }
 
@@ -248,6 +252,76 @@ fn compile_virtual_exists() {
     let result = mds::compile_virtual(modules, "main.mds", None);
     assert!(result.is_ok(), "compile_virtual should succeed: {result:?}");
     assert_eq!(result.unwrap(), "Hello!\n");
+}
+
+#[test]
+fn compile_virtual_collecting_warnings_direct() {
+    // Direct call to compile_virtual_collecting_warnings: assert on both the
+    // output string and the warnings vector.
+    let mut modules = HashMap::new();
+    modules.insert(
+        "main.mds".to_string(),
+        "---\nname: World\n---\nHello {name}!\n".to_string(),
+    );
+    let result = mds::compile_virtual_collecting_warnings(modules, "main.mds", None);
+    assert!(
+        result.is_ok(),
+        "compile_virtual_collecting_warnings should succeed: {result:?}"
+    );
+    let (output, warnings) = result.unwrap();
+    assert!(
+        output.contains("Hello World!"),
+        "expected rendered output, got: {output}"
+    );
+    assert!(
+        warnings.is_empty(),
+        "expected no warnings, got: {warnings:?}"
+    );
+}
+
+#[test]
+fn check_virtual_exists() {
+    // check_virtual is callable with a trivial module.
+    let mut modules = HashMap::new();
+    modules.insert("main.mds".to_string(), "Hello!\n".to_string());
+    let result = mds::check_virtual(modules, "main.mds", None);
+    assert!(result.is_ok(), "check_virtual should succeed: {result:?}");
+}
+
+#[test]
+fn check_virtual_collecting_warnings_direct() {
+    // Direct call to check_virtual_collecting_warnings: assert on both the
+    // unit result and the warnings vector.
+    let mut modules = HashMap::new();
+    modules.insert(
+        "main.mds".to_string(),
+        "---\nname: World\n---\nHello {name}!\n".to_string(),
+    );
+    let result = mds::check_virtual_collecting_warnings(modules, "main.mds", None);
+    assert!(
+        result.is_ok(),
+        "check_virtual_collecting_warnings should succeed: {result:?}"
+    );
+    let ((), warnings) = result.unwrap();
+    assert!(
+        warnings.is_empty(),
+        "expected no warnings, got: {warnings:?}"
+    );
+}
+
+#[test]
+fn check_virtual_rejects_invalid_module() {
+    // check_virtual returns an error for an invalid template.
+    let mut modules = HashMap::new();
+    modules.insert(
+        "main.mds".to_string(),
+        "Hello {undefined_var}!\n".to_string(),
+    );
+    let result = mds::check_virtual(modules, "main.mds", None);
+    assert!(
+        result.is_err(),
+        "check_virtual should fail for undefined variable"
+    );
 }
 
 /// Verify that `compile_str_with` resolves `@import` paths relative to the
