@@ -140,8 +140,8 @@ fn selective_import_excludes_non_imported() {
         "main.mds".to_string(),
         "@import { greet } from \"./lib.mds\"\n{farewell(\"Bob\")}\n".to_string(),
     );
-    let err = compile_vfs(modules, "main.mds")
-        .expect_err("calling a non-imported function should fail");
+    let err =
+        compile_vfs(modules, "main.mds").expect_err("calling a non-imported function should fail");
     let msg = err.to_string();
     assert!(
         msg.contains("farewell")
@@ -186,8 +186,8 @@ fn export_visibility_non_exported_function_inaccessible() {
         // Attempt to call the non-exported function.
         "@import \"./lib.mds\"\n{internal()}\n".to_string(),
     );
-    let err = compile_vfs(modules, "main.mds")
-        .expect_err("calling a non-exported function should fail");
+    let err =
+        compile_vfs(modules, "main.mds").expect_err("calling a non-exported function should fail");
     // The error must indicate the symbol is unknown/not found, not a compile
     // success that silently produces wrong output.
     let msg = err.to_string();
@@ -244,7 +244,10 @@ fn module_not_found() {
     );
     let err = compile_vfs(modules, "main.mds").expect_err("should fail: file not found");
     assert!(
-        matches!(err, MdsError::FileNotFound { .. } | MdsError::ImportError { .. }),
+        matches!(
+            err,
+            MdsError::FileNotFound { .. } | MdsError::ImportError { .. }
+        ),
         "expected FileNotFound or ImportError, got {err:?}"
     );
 }

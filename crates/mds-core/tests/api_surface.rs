@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use mds::{FileSystem, MdsError, ModuleCache, NativeFs, Value, VirtualFs, MAX_FILE_SIZE, MAX_TRAVERSAL_DEPTH};
+use mds::{
+    FileSystem, MdsError, ModuleCache, NativeFs, Value, VirtualFs, MAX_FILE_SIZE,
+    MAX_TRAVERSAL_DEPTH,
+};
 
 #[test]
 fn public_functions_exist() {
@@ -330,11 +333,15 @@ fn compile_str_with_import_resolves_relative_to_base_dir() {
     let dir = tempfile::TempDir::new().unwrap();
     let lib_path = dir.path().join("lib.mds");
     let mut f = std::fs::File::create(&lib_path).unwrap();
-    f.write_all(b"@define greet(x):\nHello {x}!\n@end\n").unwrap();
+    f.write_all(b"@define greet(x):\nHello {x}!\n@end\n")
+        .unwrap();
 
     let source = "@import \"./lib.mds\"\n{greet(\"World\")}\n";
     let result = mds::compile_str_with(source, Some(dir.path()), None);
-    assert!(result.is_ok(), "compile_str_with should succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "compile_str_with should succeed: {result:?}"
+    );
     let output = result.unwrap();
     assert!(
         output.contains("Hello World!"),

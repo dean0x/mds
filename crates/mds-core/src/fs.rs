@@ -95,7 +95,10 @@ impl FileSystem for VirtualFs {
 
         if base.is_empty() {
             // Root entry point — use key as-is, but still enforce the segment limit.
-            let segment_count = relative.split('/').filter(|s| !s.is_empty() && *s != ".").count();
+            let segment_count = relative
+                .split('/')
+                .filter(|s| !s.is_empty() && *s != ".")
+                .count();
             if segment_count > MAX_PATH_SEGMENTS {
                 return Err(MdsError::resource_limit(format!(
                     "import path exceeds maximum segment count ({MAX_PATH_SEGMENTS}): \"{relative}\""
@@ -162,10 +165,7 @@ impl FileSystem for VirtualFs {
     }
 
     fn is_markdown(&self, normalized: &str) -> bool {
-        Path::new(normalized)
-            .extension()
-            .and_then(|e| e.to_str())
-            == Some("md")
+        Path::new(normalized).extension().and_then(|e| e.to_str()) == Some("md")
     }
 }
 
@@ -319,10 +319,7 @@ impl FileSystem for NativeFs {
     }
 
     fn is_markdown(&self, normalized: &str) -> bool {
-        Path::new(normalized)
-            .extension()
-            .and_then(|e| e.to_str())
-            == Some("md")
+        Path::new(normalized).extension().and_then(|e| e.to_str()) == Some("md")
     }
 
     fn set_root(&self, base: &str) -> Result<(), MdsError> {
@@ -420,7 +417,10 @@ mod tests {
 
     #[test]
     fn vfs_read_existing_key() {
-        let fs = VirtualFs::new(HashMap::from([("main.mds".to_string(), "hello".to_string())]));
+        let fs = VirtualFs::new(HashMap::from([(
+            "main.mds".to_string(),
+            "hello".to_string(),
+        )]));
         assert_eq!(fs.read("main.mds").unwrap(), "hello");
     }
 
@@ -791,5 +791,4 @@ mod tests {
             "expected Ok for path at segment limit, got {result:?}"
         );
     }
-
 }
