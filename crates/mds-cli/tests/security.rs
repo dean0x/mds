@@ -1,5 +1,5 @@
 mod common;
-use common::mds_bin;
+use common::{fixture, mds_bin};
 use std::collections::HashMap;
 
 #[test]
@@ -128,11 +128,7 @@ fn for_loop_iteration_limit_rejects_huge_array() {
     let mut vars = HashMap::new();
     vars.insert("items".to_string(), mds::Value::Array(huge_array));
 
-    let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("loop.mds");
-    let result = mds::compile(fixture_path, Some(vars));
+    let result = mds::compile(fixture("loop.mds"), Some(vars));
     assert!(result.is_err(), "loop over 100_001 items must be rejected");
     let err = format!("{}", result.unwrap_err());
     assert!(

@@ -1,5 +1,5 @@
 mod common;
-use common::fixture;
+use common::{fixture, mds_bin};
 use std::collections::HashMap;
 
 #[test]
@@ -196,7 +196,7 @@ fn error_format_includes_file_line_col() {
     let input = dir.path().join("err_test.mds");
     std::fs::write(&input, "---\nname: Alice\n---\nHello {undefined_var}!\n").unwrap();
 
-    let output = common::mds_bin()
+    let output = mds_bin()
         .args(["build", input.to_str().unwrap()])
         .output()
         .unwrap();

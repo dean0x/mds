@@ -1,5 +1,6 @@
 mod common;
 use common::fixture;
+use std::collections::HashMap;
 
 #[test]
 fn frontmatter_preserved_in_str_output() {
@@ -47,7 +48,7 @@ fn frontmatter_empty_no_fences() {
 fn frontmatter_runtime_override_doesnt_alter_output() {
     // The frontmatter in the output reflects original values; the body uses overridden values.
     let source = "---\nname: Alice\n---\nHello {name}!\n";
-    let mut vars = std::collections::HashMap::new();
+    let mut vars = HashMap::new();
     vars.insert("name".to_string(), mds::Value::String("Bob".to_string()));
     let result = mds::compile_str_with(source, None, Some(vars)).unwrap();
     assert!(
