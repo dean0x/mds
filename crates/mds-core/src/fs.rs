@@ -461,13 +461,9 @@ mod tests {
         let base_key = fs
             .normalize("", &entry.display().to_string())
             .expect("entry point");
-        // Try to import the outside file by absolute path.
-        let result = fs.normalize(&base_key, &outside.display().to_string());
-        // This will fail because the outside path is absolute and won't start with "./"
-        // Actually in NativeFs, we join relative to base_dir — for absolute paths this
-        // still passes through check_symlink which succeeds, but traversal check fails.
-        // We test via a relative traversal instead.
-        drop(result); // may or may not error depending on path
+        // Absolute path injection — may or may not error depending on platform path depth;
+        // the real traversal check is exercised via the relative escape below.
+        let _ = fs.normalize(&base_key, &outside.display().to_string());
 
         // Use relative traversal to escape the project dir.
         // Construct a relative path that would escape: ../../secret.mds relative to project.

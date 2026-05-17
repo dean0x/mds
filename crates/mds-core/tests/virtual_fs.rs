@@ -205,13 +205,9 @@ fn resolve_key_directly() {
         .resolve_key("greeting.mds", &HashMap::new(), &mut warnings)
         .expect("should resolve");
     // Use get_prompt_value() since prompt_body is pub(crate).
-    let prompt = resolved.get_prompt_value();
-    let body = prompt.as_ref().and_then(|v| {
-        if let mds::Value::String(s) = v {
-            Some(s.as_str())
-        } else {
-            None
-        }
-    }).unwrap_or("");
+    let body = match resolved.get_prompt_value() {
+        Some(Value::String(ref s)) => s.clone(),
+        _ => String::new(),
+    };
     assert!(body.contains("Hello World!"), "got body: {body:?}");
 }

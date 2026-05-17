@@ -240,9 +240,12 @@ impl ModuleCache {
         let canonical_str = canonical.display().to_string();
         self.fs.set_root(&canonical_str)?;
 
-        // The base_key for a string source is the canonical directory itself,
-        // so that relative imports from the source are resolved against it.
-        self.process_module(source, "<source>", &canonical_str, false, runtime_vars, warnings)
+        // The base_key must look like a file path so that normalize() can call
+        // parent() on it to get the directory. Append a synthetic filename to
+        // the canonical directory so imports resolve relative to that directory
+        // (not its parent).
+        let base_key = format!("{canonical_str}/<source>");
+        self.process_module(source, "<source>", &base_key, false, runtime_vars, warnings)
             .map(Arc::new)
     }
 
@@ -354,20 +357,14 @@ impl ModuleCache {
                 // Resolve the source module and bring in the function for
                 // re-export only. Per spec: "@export from does not bring the
                 // symbol into the current file's scope".
-                let source_module = self
-                    .resolve_import_from(
-                        ctx.base_key,
-                        import_path,
-                        ctx.runtime_vars,
-                        warnings,
-                    )
-                    .map_err(|e| {
-                        // Validate import path first for better error messages.
-                        if let Err(v) = validate_import_path(import_path) {
-                            return v;
-                        }
-                        e
-                    })?;
+                // Note: resolve_import_from calls validate_import_path internally,
+                // so path validation errors surface with correct messages automatically.
+                let source_module = self.resolve_import_from(
+                    ctx.base_key,
+                    import_path,
+                    ctx.runtime_vars,
+                    warnings,
+                )?;
                 let func = source_module.get_export(name).ok_or_else(|| {
                     MdsError::export_error(format!(
                         "cannot re-export '{name}': not exported from \"{import_path}\""
@@ -379,19 +376,14 @@ impl ModuleCache {
             ExportDirective::Wildcard { path: import_path } => {
                 // Re-export all exports from the target module. These are
                 // available to importers but NOT in the current file's scope.
-                let source_module = self
-                    .resolve_import_from(
-                        ctx.base_key,
-                        import_path,
-                        ctx.runtime_vars,
-                        warnings,
-                    )
-                    .map_err(|e| {
-                        if let Err(v) = validate_import_path(import_path) {
-                            return v;
-                        }
-                        e
-                    })?;
+                // Note: resolve_import_from calls validate_import_path internally,
+                // so path validation errors surface with correct messages automatically.
+                let source_module = self.resolve_import_from(
+                    ctx.base_key,
+                    import_path,
+                    ctx.runtime_vars,
+                    warnings,
+                )?;
                 for (name, func) in source_module.get_all_exports() {
                     if defs.functions.contains_key(&name) {
                         return Err(MdsError::name_collision(name));

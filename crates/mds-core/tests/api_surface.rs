@@ -249,3 +249,25 @@ fn compile_virtual_exists() {
     assert!(result.is_ok(), "compile_virtual should succeed: {result:?}");
     assert_eq!(result.unwrap(), "Hello!\n");
 }
+
+/// Verify that `compile_str_with` resolves `@import` paths relative to the
+/// supplied `base_dir`, not its parent. Regression test for the base_key
+/// sentinel fix in `resolve_source`.
+#[test]
+fn compile_str_with_import_resolves_relative_to_base_dir() {
+    use std::io::Write;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let lib_path = dir.path().join("lib.mds");
+    let mut f = std::fs::File::create(&lib_path).unwrap();
+    f.write_all(b"@define greet(x):\nHello {x}!\n@end\n").unwrap();
+
+    let source = "@import \"./lib.mds\"\n{greet(\"World\")}\n";
+    let result = mds::compile_str_with(source, Some(dir.path()), None);
+    assert!(result.is_ok(), "compile_str_with should succeed: {result:?}");
+    let output = result.unwrap();
+    assert!(
+        output.contains("Hello World!"),
+        "expected 'Hello World!' in output, got: {output}"
+    );
+}
