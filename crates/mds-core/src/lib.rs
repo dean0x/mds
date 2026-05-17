@@ -40,7 +40,7 @@
 pub(crate) mod ast;
 pub(crate) mod error;
 pub(crate) mod evaluator;
-pub mod fs;
+pub(crate) mod fs;
 pub(crate) mod lexer;
 pub(crate) mod limits;
 pub(crate) mod parser;
@@ -442,6 +442,39 @@ pub fn compile_virtual(
     entry: &str,
     runtime_vars: Option<HashMap<String, Value>>,
 ) -> Result<String, MdsError> {
+    let (output, warnings) = compile_virtual_collecting_warnings(modules, entry, runtime_vars)?;
+    emit_warnings(&warnings);
+    Ok(output)
+}
+
+/// Compile a module from an in-memory virtual filesystem and return the output
+/// along with any collected warnings.
+///
+/// Unlike [`compile_virtual`], this function does not print warnings to stderr.
+/// The caller is responsible for deciding whether to display them (e.g. based
+/// on a quiet flag).
+///
+/// This is the virtual-filesystem counterpart of [`compile_collecting_warnings`].
+///
+/// # Examples
+///
+/// ```rust
+/// use std::collections::HashMap;
+///
+/// let mut modules = HashMap::new();
+/// modules.insert("main.mds".to_string(), "---\nname: World\n---\nHello {name}!\n".to_string());
+///
+/// let (output, warnings) = mds::compile_virtual_collecting_warnings(modules, "main.mds", None)?;
+/// assert_eq!(output, "---\nname: World\n---\nHello World!\n");
+/// assert!(warnings.is_empty());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use = "the compiled Markdown output and warnings should be used"]
+pub fn compile_virtual_collecting_warnings(
+    modules: HashMap<String, String>,
+    entry: &str,
+    runtime_vars: Option<HashMap<String, Value>>,
+) -> Result<(String, Vec<String>), MdsError> {
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::virtual_fs(modules);
     let mut warnings = vec![];
@@ -452,8 +485,7 @@ pub fn compile_virtual(
         .map(clean_output)
         .unwrap_or_default();
     let output = prepend_frontmatter(resolved.raw_frontmatter.as_deref(), body);
-    emit_warnings(&warnings);
-    Ok(output)
+    Ok((output, warnings))
 }
 
 /// Convenience wrapper around [`compile`] for callers who have a path as `&str`.
