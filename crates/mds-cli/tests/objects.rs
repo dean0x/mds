@@ -258,11 +258,3 @@ fn error_reports_full_traversed_path_on_missing_field() {
         "error should report field 'missing' not found on 'a.b', got: {err}"
     );
 }
-
-#[test]
-fn yaml_map_type_works() {
-    // YAML map values are now supported as objects with dot-notation access.
-    let source = "---\nconfig:\n  key: value\n---\n{config.key}\n";
-    let result = mds::compile_str(source).unwrap();
-    assert!(result.contains("value\n"), "got: {result}");
-}

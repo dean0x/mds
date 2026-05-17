@@ -554,6 +554,12 @@ fn md_file_with_type_mds_compiles() {
 }
 
 #[test]
+fn function_calls_function() {
+    let result = mds::compile(fixture("fn_calls_fn.mds"), None).unwrap();
+    assert!(result.contains("[Alice]"));
+}
+
+#[test]
 fn recursion_detected() {
     let result = mds::compile(fixture("recursive.mds"), None);
     assert!(result.is_err());
