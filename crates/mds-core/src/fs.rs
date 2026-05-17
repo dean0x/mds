@@ -20,14 +20,14 @@ use crate::resolver::{MAX_FILE_SIZE, MAX_TRAVERSAL_DEPTH};
 ///
 /// # Security Contract
 ///
-/// Custom implementations provided via [`crate::resolver::ModuleResolver::with_fs`]
+/// Custom implementations provided via [`crate::resolver::ModuleCache::with_fs`]
 /// MUST uphold the following minimum obligations:
 ///
 /// - **Path traversal prevention**: `normalize` must reject paths that escape
 ///   the intended root (e.g., `../../../etc/passwd`).
 /// - **Null-byte rejection**: `normalize` must reject paths containing `\0`.
 /// - **File size limits**: `read` must refuse content larger than
-///   [`crate::resolver::MAX_FILE_SIZE`] bytes (10 MB) to prevent resource exhaustion.
+///   [`crate::MAX_FILE_SIZE`] bytes (10 MB) to prevent resource exhaustion.
 /// - **Input sanitization**: `normalize` must reject empty paths.
 ///
 /// Failing to implement these controls silently bypasses the security enforced
@@ -461,8 +461,7 @@ mod tests {
     fn native_normalize_import_from_base() {
         let dir = TempDir::new().unwrap();
         let file = make_temp_file(&dir, "main.mds", "hello");
-        let sibling = make_temp_file(&dir, "sibling.mds", "world");
-        let _ = sibling; // ensure it exists
+        make_temp_file(&dir, "sibling.mds", "world");
 
         let fs = NativeFs::new();
         // First normalize the entry point to establish the root and get its key.

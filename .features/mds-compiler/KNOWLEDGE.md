@@ -17,6 +17,7 @@ referencedFiles:
   - crates/mds-core/src/error.rs
   - crates/mds-core/src/limits.rs
   - crates/mds-cli/src/main.rs
+  - crates/mds-core/tests/api_surface.rs
 created: 2026-05-12
 updated: 2026-05-17
 ---
@@ -30,6 +31,8 @@ MDS (Markdown Script) is a Rust compiler that transforms `.mds` files — Markdo
 The compilation pipeline is strictly sequential: **lexer → parser → validator → resolver → evaluator → render**. Each layer has a single responsibility and communicates through typed interfaces rather than shared mutable state. The `resolver` is the orchestrator — it drives all other stages and manages the module cache used for imports.
 
 ## System Context
+
+**Cargo workspace**: The project is a Cargo workspace. `mds-core` (library crate, publishes as `mds`) lives at `crates/mds-core/`; `mds-cli` (binary crate, provides the `mds` CLI) lives at `crates/mds-cli/`. The workspace root `Cargo.toml` and shared `Cargo.lock` are at the repo root.
 
 The binary is a CLI tool (`mds build`, `mds check`, `mds init`) backed by a library crate. The library exposes these public functions:
 
@@ -630,6 +633,7 @@ The `exit_code(err: &miette::Error) -> i32` function in `crates/mds-cli/src/main
 - `crates/mds-core/src/value.rs` — runtime value enum (`#[non_exhaustive]`); `Value::Object(HashMap<String, Value>)` variant with alphabetical-sort `Display`; `from_yaml`/`from_json` are `pub(crate)` and convert YAML mappings/JSON objects to `Value::Object`; `From<HashMap<String, Value>>` impl
 - `crates/mds-core/src/error.rs` — `MdsError` enum (`#[non_exhaustive]`); all constructor methods are `pub(crate)`; all major variants have `_at` constructors; `ResourceLimit` variant for evaluator/value depth guards
 - `crates/mds-cli/tests/` — end-to-end tests split into 10 categorized files: `language.rs` (~55 tests, core language features), `objects.rs` (~25 tests, object/map access and dot-notation), `imports.rs` (~35 tests, module system and import variants), `errors.rs` (~20 tests, error diagnostics), `cli_build.rs` (~25 tests, build command behavior), `cli_commands.rs` (~15 tests, check/init/flags/exit codes), `security.rs` (~20 tests, security and resource limits), `frontmatter.rs` (~14 tests, frontmatter output), `warnings.rs` (~7 tests, warning collection and suppression), and `common/mod.rs` (shared `fixture()` and `mds_bin()` helpers)
+- `crates/mds-core/tests/api_surface.rs` — API surface regression test (compiled by rustc, run with `cargo test -p mds`): verifies all public functions (`compile*`, `check*`, `load_vars_file`), all `Value` and `MdsError` variants, trait impls (`Display`, `Debug`, `Clone`, `std::error::Error`, `miette::Diagnostic`), and exported constants (`MAX_FILE_SIZE`, `MAX_TRAVERSAL_DEPTH`); catches accidental API removals during internal refactors. The exhaustive `match` on `MdsError` variants uses `#[allow(unreachable_patterns)]` — `#[non_exhaustive]` requires a wildcard arm in external crates even when all known variants are listed
 
 ## Related
 
@@ -642,3 +646,4 @@ The `exit_code(err: &miette::Error) -> i32` function in `crates/mds-cli/src/main
 - `crates/mds-core/src/error.rs` — canonical reference for `#[non_exhaustive]` on `MdsError`, `pub(crate)` constructor pattern, `help(...)` diagnostic attribute placement, and available `_at` constructors
 - `crates/mds-core/src/value.rs` — canonical reference for `#[non_exhaustive]` on `Value`, `pub(crate)` converters, `Value::Object` semantics, and the JSON/YAML parsing boundary
 - `crates/mds-cli/tests/` — covers all directive combinations including object access, key-value iteration, dot-path conditions, frontmatter preservation, nested function calls, CLI stdin/quiet mode, auto-detect, error help-text, scope/export visibility rules, re-export error scenarios, default file output, `--out-dir`, `mds.json` config behavior, and all resource limit scenarios; tests are split across 9 categorized modules with shared helpers in `common/mod.rs`
+- `crates/mds-core/tests/api_surface.rs` — public API regression test; update here whenever a new public function, `Value` variant, or `MdsError` variant is added to `crates/mds-core/src/lib.rs`

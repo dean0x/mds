@@ -522,10 +522,10 @@ pub fn load_vars_file(path: &Path) -> Result<HashMap<String, Value>, MdsError> {
     // Read bytes first, then check size (same TOCTOU-safe pattern as resolver.rs).
     let bytes = std::fs::read(path)
         .map_err(|e| MdsError::io(format!("cannot read vars file {}: {e}", path.display())))?;
-    if bytes.len() as u64 > resolver::MAX_FILE_SIZE {
+    if bytes.len() as u64 > MAX_FILE_SIZE {
         return Err(MdsError::resource_limit(format!(
             "vars file exceeds maximum size of {} bytes: {}",
-            resolver::MAX_FILE_SIZE,
+            MAX_FILE_SIZE,
             path.display()
         )));
     }
