@@ -525,16 +525,13 @@ pub fn compile_with_deps(
     let resolved = cache.resolve_path(path, &vars, &mut warnings)?;
     let output = build_output(&resolved);
     // The entry module is inserted into the cache last (post-order DFS: all imports
-    // are resolved and cached before the entry itself is stored). Use the last key
-    // from cache.dependencies() as the canonical entry key — this delegates to the
-    // FileSystem abstraction (NativeFs calls canonicalize()) and avoids duplicating
-    // that logic here.
+    // are resolved and cached before the entry itself is stored). split_last() gives
+    // us the entry key and the dependency slice without an extra clone.
     let deps = cache.dependencies();
-    let entry_key = deps.last().cloned();
-    let dependencies = deps
-        .into_iter()
-        .filter(|k| Some(k) != entry_key.as_ref())
-        .collect();
+    let dependencies = match deps.split_last() {
+        Some((_entry, rest)) => rest.to_vec(),
+        None => vec![],
+    };
     Ok(CompileOutput { output, warnings, dependencies })
 }
 

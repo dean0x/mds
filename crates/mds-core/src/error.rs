@@ -981,7 +981,7 @@ mod tests {
         }
     }
 
-    // ── I3: serialize() tests for UndefinedFunction, ImportError, NameCollision ─
+    // ── serialize() — remaining span-bearing variants ─────────────────────────
 
     #[test]
     fn serialize_undefined_fn_with_span() {
@@ -1029,7 +1029,7 @@ mod tests {
         assert_eq!(span.column, Some(1));
     }
 
-    // ── I4: serialize() test for ExportError ──────────────────────────────────
+    // ── serialize() — ExportError ─────────────────────────────────────────────
 
     #[test]
     fn serialize_export_error_with_span() {
@@ -1045,7 +1045,7 @@ mod tests {
         assert_eq!(span.column, Some(1));
     }
 
-    // ── I5: span=Some but src=None produces offset/length but not line/column ──
+    // ── serialize() — span=Some but src=None ──────────────────────────────────
 
     #[test]
     fn serialize_span_some_src_none_omits_line_column() {
@@ -1066,7 +1066,7 @@ mod tests {
         assert_eq!(span.column, None, "column should be None when src is None");
     }
 
-    // ── I6: compute_line_column at offset == source.len() (boundary) ──────────
+    // ── compute_line_column — boundary: offset == source.len() ───────────────
 
     #[test]
     fn line_col_at_end_of_source() {

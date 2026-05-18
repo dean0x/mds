@@ -344,11 +344,19 @@ impl FileSystem for NativeFs {
         // Use check_symlink() rather than std::fs::canonicalize() directly so that
         // symlinked directories are rejected before they can re-anchor the security
         // root to an attacker-controlled location (issue #21).
+        //
+        // check_symlink() returns ImportError (symlink detected) or FileNotFound
+        // (path does not exist). ImportError passes through; FileNotFound is
+        // re-wrapped as Io because canonicalize is a resolution operation, not
+        // an import step.
         Self::check_symlink(Path::new(path))
             .map(|p| p.display().to_string())
             .map_err(|e| match e {
                 MdsError::ImportError { .. } => e,
-                _ => MdsError::io(format!("cannot resolve path {path}: {e}")),
+                MdsError::FileNotFound { .. } => {
+                    MdsError::io(format!("cannot resolve path {path}: {e}"))
+                }
+                other => other,
             })
     }
 }
