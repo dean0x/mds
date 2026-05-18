@@ -524,14 +524,13 @@ pub fn compile_with_deps(
     let mut warnings = vec![];
     let resolved = cache.resolve_path(path, &vars, &mut warnings)?;
     let output = build_output(&resolved);
-    // The entry module is inserted into the cache last (post-order DFS: all imports
-    // are resolved and cached before the entry itself is stored). split_last() gives
-    // us the entry key and the dependency slice without an extra clone.
+    // The entry module is the last key inserted into the cache (post-order DFS:
+    // all imports are resolved and cached before the entry itself is stored).
+    // We capture it by value and filter by equality, matching the approach used
+    // by compile_virtual_with_deps — explicit intent over positional coupling.
     let deps = cache.dependencies();
-    let dependencies = match deps.split_last() {
-        Some((_entry, rest)) => rest.to_vec(),
-        None => vec![],
-    };
+    let entry_key = deps.last().cloned().unwrap_or_default();
+    let dependencies = deps.into_iter().filter(|k| k != &entry_key).collect();
     Ok(CompileOutput { output, warnings, dependencies })
 }
 
