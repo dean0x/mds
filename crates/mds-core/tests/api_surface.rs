@@ -320,15 +320,12 @@ fn module_cache_dependencies_exists() {
 #[test]
 fn compile_with_deps_output_matches_compile() {
     // Same input → same output string as compile_virtual.
-    let mut modules_a = HashMap::new();
-    modules_a.insert(
+    let modules = HashMap::from([(
         "main.mds".to_string(),
         "---\nname: World\n---\nHello {name}!\n".to_string(),
-    );
-    let mut modules_b = modules_a.clone();
-
-    let baseline = mds::compile_virtual(modules_a, "main.mds", None).expect("baseline");
-    let result = mds::compile_virtual_with_deps(modules_b, "main.mds", None).expect("with deps");
+    )]);
+    let baseline = mds::compile_virtual(modules.clone(), "main.mds", None).expect("baseline");
+    let result = mds::compile_virtual_with_deps(modules, "main.mds", None).expect("with deps");
     assert_eq!(result.output, baseline);
 }
 

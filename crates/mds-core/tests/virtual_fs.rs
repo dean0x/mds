@@ -374,8 +374,8 @@ fn deps_diamond_no_duplicates() {
     let result = mds::compile_virtual_with_deps(modules, "main.mds", None).expect("should compile");
     assert!(result.output.contains("hello"), "got: {}", result.output);
     // shared must appear exactly once
-    assert_eq!(result.dependencies.iter().filter(|d| *d == "shared.mds").count(), 1,
-        "shared appeared {} times: {:?}", result.dependencies.iter().filter(|d| *d == "shared.mds").count(), result.dependencies);
+    let shared_count = result.dependencies.iter().filter(|d| *d == "shared.mds").count();
+    assert_eq!(shared_count, 1, "shared appeared {shared_count} times: {:?}", result.dependencies);
     // All three deps present
     assert!(result.dependencies.contains(&"a.mds".to_string()), "missing a.mds: {:?}", result.dependencies);
     assert!(result.dependencies.contains(&"b.mds".to_string()), "missing b.mds: {:?}", result.dependencies);
