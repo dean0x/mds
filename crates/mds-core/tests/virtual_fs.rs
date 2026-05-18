@@ -290,3 +290,128 @@ fn resolve_key_directly() {
     };
     assert!(body.contains("Hello World!"), "got body: {body:?}");
 }
+
+// ── Dependency tracking tests ─────────────────────────────────────────────────
+
+#[test]
+fn deps_single_file() {
+    // A single entry file with no imports → deps = []
+    let mut modules = HashMap::new();
+    modules.insert(
+        "main.mds".to_string(),
+        "---\nname: World\n---\nHello {name}!\n".to_string(),
+    );
+    let result = mds::compile_virtual_with_deps(modules, "main.mds", None).expect("should compile");
+    assert_eq!(result.output, "---\nname: World\n---\nHello World!\n");
+    assert_eq!(result.dependencies, Vec::<String>::new());
+}
+
+#[test]
+fn deps_two_files() {
+    // main imports lib → deps = ["lib.mds"]
+    let mut modules = HashMap::new();
+    modules.insert(
+        "lib.mds".to_string(),
+        "@define greet(x):\nHello {x}!\n@end\n".to_string(),
+    );
+    modules.insert(
+        "main.mds".to_string(),
+        "@import \"./lib.mds\"\n{greet(\"Alice\")}\n".to_string(),
+    );
+    let result = mds::compile_virtual_with_deps(modules, "main.mds", None).expect("should compile");
+    assert!(result.output.contains("Hello Alice!"), "got: {}", result.output);
+    assert_eq!(result.dependencies, vec!["lib.mds".to_string()]);
+}
+
+#[test]
+fn deps_three_file_chain() {
+    // a → b → c: deps of a = ["b.mds", "c.mds"] in DFS order
+    let mut modules = HashMap::new();
+    modules.insert(
+        "c.mds".to_string(),
+        "@define shout(x):\n{x}!!!\n@end\n".to_string(),
+    );
+    modules.insert(
+        "b.mds".to_string(),
+        "@import \"./c.mds\"\n@define greet(x):\n{shout(x)}\n@end\n".to_string(),
+    );
+    modules.insert(
+        "a.mds".to_string(),
+        "@import \"./b.mds\"\n{greet(\"World\")}\n".to_string(),
+    );
+    let result = mds::compile_virtual_with_deps(modules, "a.mds", None).expect("should compile");
+    assert!(result.output.contains("World!!!"), "got: {}", result.output);
+    // Resolution is post-order DFS: c is inserted first (leaf), then b, then a (entry, excluded).
+    assert_eq!(result.dependencies, vec!["c.mds".to_string(), "b.mds".to_string()]);
+}
+
+#[test]
+fn deps_diamond_no_duplicates() {
+    // Diamond: main→a,b; a,b→shared → shared must appear exactly once.
+    // Post-order DFS: when resolving main, it imports a first → a imports shared →
+    // shared is inserted (leaf), then a is inserted. Then main imports b → b imports
+    // shared (cache hit, not re-inserted), then b is inserted.
+    // Final deps (excluding main): ["shared.mds", "a.mds", "b.mds"]
+    let mut modules = HashMap::new();
+    modules.insert(
+        "shared.mds".to_string(),
+        "@define tag(x):\n[{x}]\n@end\n".to_string(),
+    );
+    // a and b each import shared; their output is just text (no calls to tag)
+    modules.insert(
+        "a.mds".to_string(),
+        "@import \"./shared.mds\"\nfrom-a\n".to_string(),
+    );
+    modules.insert(
+        "b.mds".to_string(),
+        "@import \"./shared.mds\"\nfrom-b\n".to_string(),
+    );
+    // main imports a and b (which transitively pull in shared); uses a literal body
+    modules.insert(
+        "main.mds".to_string(),
+        "@import \"./a.mds\"\n@import \"./b.mds\"\nhello\n".to_string(),
+    );
+    let result = mds::compile_virtual_with_deps(modules, "main.mds", None).expect("should compile");
+    assert!(result.output.contains("hello"), "got: {}", result.output);
+    // shared must appear exactly once
+    assert_eq!(result.dependencies.iter().filter(|d| *d == "shared.mds").count(), 1,
+        "shared appeared {} times: {:?}", result.dependencies.iter().filter(|d| *d == "shared.mds").count(), result.dependencies);
+    // All three deps present
+    assert!(result.dependencies.contains(&"a.mds".to_string()), "missing a.mds: {:?}", result.dependencies);
+    assert!(result.dependencies.contains(&"b.mds".to_string()), "missing b.mds: {:?}", result.dependencies);
+    assert!(result.dependencies.contains(&"shared.mds".to_string()), "missing shared.mds: {:?}", result.dependencies);
+    // 3 deps total, no duplicates
+    assert_eq!(result.dependencies.len(), 3, "expected 3 deps, got: {:?}", result.dependencies);
+}
+
+#[test]
+fn deps_str_with_deps_basic() {
+    // compile_str_with_deps: inline source that imports a virtual module.
+    // Use a base_dir so the import resolution works; but with NativeFs that
+    // would look for real files. Skip this variant here — covered in api_surface.rs.
+    // Instead test the no-import case:
+    let result = mds::compile_str_with_deps(
+        "---\nname: Alice\n---\nHi {name}!\n",
+        None,
+        None,
+    ).expect("should compile");
+    assert!(result.output.contains("Hi Alice!"), "got: {}", result.output);
+    // No imports → no deps
+    assert_eq!(result.dependencies, Vec::<String>::new());
+}
+
+#[test]
+fn deps_error_returns_err() {
+    // Undefined variable → Err, no partial deps
+    let mut modules = HashMap::new();
+    modules.insert(
+        "main.mds".to_string(),
+        "Hello {undefined_var}!\n".to_string(),
+    );
+    let err = mds::compile_virtual_with_deps(modules, "main.mds", None)
+        .expect_err("should fail with undefined variable");
+    assert!(
+        matches!(err, MdsError::UndefinedVariable { .. }),
+        "expected UndefinedVariable, got: {err:?}"
+    );
+}

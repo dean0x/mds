@@ -58,6 +58,23 @@ use std::path::{Path, PathBuf};
 pub use error::{MdsError, SerializedError, SerializedSpan};
 pub use value::Value;
 
+/// The result of compiling an MDS template with full dependency tracking.
+///
+/// Returned by `compile_with_deps`, `compile_str_with_deps`, and
+/// `compile_virtual_with_deps`. The `dependencies` list is in depth-first
+/// resolution order and excludes the entry module itself — it contains only
+/// the files imported (transitively) by the entry.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CompileOutput {
+    /// The rendered Markdown output.
+    pub output: String,
+    /// Warnings emitted during compilation (e.g. empty `@include`).
+    pub warnings: Vec<String>,
+    /// Normalized keys of all modules imported during compilation, in
+    /// first-resolution (depth-first) order. Excludes the entry module.
+    pub dependencies: Vec<String>,
+}
+
 /// Maximum file size accepted for compilation (10 MB).
 ///
 /// This is the single source of truth shared by the file resolver and the
@@ -486,6 +503,109 @@ pub fn compile_virtual_collecting_warnings(
         .unwrap_or_default();
     let output = prepend_frontmatter(resolved.raw_frontmatter.as_deref(), body);
     Ok((output, warnings))
+}
+
+/// Compile an MDS file and return a [`CompileOutput`] with dependency tracking.
+///
+/// Like [`compile_collecting_warnings`] but also returns the list of imported
+/// modules (direct and transitive) in depth-first resolution order. The entry
+/// file itself is excluded from `dependencies`.
+///
+/// Warnings are not printed to stderr; they are returned in `CompileOutput::warnings`.
+#[must_use = "the CompileOutput should be used"]
+pub fn compile_with_deps(
+    path: impl AsRef<Path>,
+    runtime_vars: Option<HashMap<String, Value>>,
+) -> Result<CompileOutput, MdsError> {
+    let path = path.as_ref();
+    let vars = runtime_vars.unwrap_or_default();
+    let mut cache = ModuleCache::new();
+    let mut warnings = vec![];
+    let resolved = cache.resolve_path(path, &vars, &mut warnings)?;
+    let body = resolved
+        .prompt_body
+        .as_deref()
+        .map(clean_output)
+        .unwrap_or_default();
+    let output = prepend_frontmatter(resolved.raw_frontmatter.as_deref(), body);
+    // The NativeFs normalizer calls canonicalize() to build the cache key.
+    // Replicate the same transformation here so the entry key comparison is exact.
+    // If canonicalize fails we fall back to the raw display string, which may
+    // result in the entry being included in deps — an acceptable degradation for
+    // paths that don't exist (they would have already errored during resolve_path).
+    let entry_key = path
+        .canonicalize()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string());
+    let dependencies = cache
+        .dependencies()
+        .into_iter()
+        .filter(|k| k != &entry_key)
+        .collect();
+    Ok(CompileOutput { output, warnings, dependencies })
+}
+
+/// Compile MDS source code from a string and return a [`CompileOutput`] with
+/// dependency tracking.
+///
+/// Like [`compile_str_collecting_warnings`] but also returns the list of imported
+/// modules in depth-first resolution order. Because the source is not a file,
+/// there is no entry key to exclude — all resolved imports appear in `dependencies`.
+///
+/// Warnings are not printed to stderr; they are returned in `CompileOutput::warnings`.
+#[must_use = "the CompileOutput should be used"]
+pub fn compile_str_with_deps(
+    source: &str,
+    base_dir: Option<&Path>,
+    runtime_vars: Option<HashMap<String, Value>>,
+) -> Result<CompileOutput, MdsError> {
+    let vars = runtime_vars.unwrap_or_default();
+    let dir = resolve_base_dir(base_dir)?;
+    let mut cache = ModuleCache::new();
+    let mut warnings = vec![];
+    let resolved = cache.resolve_source(source, &dir, &vars, &mut warnings)?;
+    let body = resolved
+        .prompt_body
+        .as_deref()
+        .map(clean_output)
+        .unwrap_or_default();
+    let output = prepend_frontmatter(resolved.raw_frontmatter.as_deref(), body);
+    // resolve_source does not insert the inline source into the modules cache,
+    // so cache.dependencies() contains only imported files — no filtering needed.
+    let dependencies = cache.dependencies();
+    Ok(CompileOutput { output, warnings, dependencies })
+}
+
+/// Compile a module from an in-memory virtual filesystem and return a
+/// [`CompileOutput`] with dependency tracking.
+///
+/// Like [`compile_virtual_collecting_warnings`] but also returns the list of
+/// imported modules in depth-first resolution order. The entry module itself is
+/// excluded from `dependencies`.
+///
+/// Warnings are not printed to stderr; they are returned in `CompileOutput::warnings`.
+#[must_use = "the CompileOutput should be used"]
+pub fn compile_virtual_with_deps(
+    modules: HashMap<String, String>,
+    entry: &str,
+    runtime_vars: Option<HashMap<String, Value>>,
+) -> Result<CompileOutput, MdsError> {
+    let vars = runtime_vars.unwrap_or_default();
+    let mut cache = ModuleCache::virtual_fs(modules);
+    let mut warnings = vec![];
+    let resolved = cache.resolve_key(entry, &vars, &mut warnings)?;
+    let body = resolved
+        .prompt_body
+        .as_deref()
+        .map(clean_output)
+        .unwrap_or_default();
+    let output = prepend_frontmatter(resolved.raw_frontmatter.as_deref(), body);
+    let dependencies = cache
+        .dependencies()
+        .into_iter()
+        .filter(|k| k != entry)
+        .collect();
+    Ok(CompileOutput { output, warnings, dependencies })
 }
 
 /// Check (validate) a module from an in-memory virtual filesystem without rendering output.

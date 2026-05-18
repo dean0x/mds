@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use mds::{
-    FileSystem, MdsError, ModuleCache, NativeFs, Value, VirtualFs, MAX_FILE_SIZE,
+    CompileOutput, FileSystem, MdsError, ModuleCache, NativeFs, Value, VirtualFs, MAX_FILE_SIZE,
     MAX_TRAVERSAL_DEPTH,
 };
 
@@ -241,6 +241,116 @@ fn module_cache_with_fs_constructor() {
 #[test]
 fn module_cache_new_still_works() {
     let _cache = ModuleCache::new();
+}
+
+// ── CompileOutput / dependency graph API (Stage 2) ────────────────────────────
+
+#[test]
+fn compile_output_type_importable() {
+    // CompileOutput must be constructible and implement Debug + Clone + PartialEq.
+    let co = CompileOutput {
+        output: "hello\n".to_string(),
+        warnings: vec!["warn".to_string()],
+        dependencies: vec!["lib.mds".to_string()],
+    };
+    let cloned = co.clone();
+    assert_eq!(co, cloned);
+    let _ = format!("{co:?}");
+}
+
+#[test]
+fn compile_output_to_json() {
+    // CompileOutput must serialize to JSON with "output", "warnings", "dependencies" keys.
+    let co = CompileOutput {
+        output: "hello\n".to_string(),
+        warnings: vec![],
+        dependencies: vec!["dep.mds".to_string()],
+    };
+    let json = serde_json::to_string(&co).expect("should serialize");
+    assert!(json.contains("\"output\""), "missing output key: {json}");
+    assert!(json.contains("\"warnings\""), "missing warnings key: {json}");
+    assert!(json.contains("\"dependencies\""), "missing dependencies key: {json}");
+    assert!(json.contains("\"dep.mds\""), "missing dep value: {json}");
+}
+
+#[test]
+fn compile_with_deps_exists() {
+    // compile_with_deps is callable (will error on nonexistent file, which is fine).
+    let _ = mds::compile_with_deps(Path::new("nonexistent.mds"), None);
+}
+
+#[test]
+fn compile_str_with_deps_exists() {
+    // compile_str_with_deps compiles successfully.
+    let result = mds::compile_str_with_deps(
+        "---\nname: World\n---\nHello {name}!\n",
+        None,
+        None,
+    ).expect("should compile");
+    assert_eq!(result.output, "---\nname: World\n---\nHello World!\n");
+    assert_eq!(result.dependencies, Vec::<String>::new());
+}
+
+#[test]
+fn compile_virtual_with_deps_exists() {
+    // compile_virtual_with_deps compiles successfully.
+    let mut modules = HashMap::new();
+    modules.insert(
+        "main.mds".to_string(),
+        "---\nname: World\n---\nHello {name}!\n".to_string(),
+    );
+    let result = mds::compile_virtual_with_deps(modules, "main.mds", None)
+        .expect("should compile");
+    assert_eq!(result.output, "---\nname: World\n---\nHello World!\n");
+    assert_eq!(result.dependencies, Vec::<String>::new());
+}
+
+#[test]
+fn module_cache_dependencies_exists() {
+    // ModuleCache::dependencies() is callable.
+    let mut modules = HashMap::new();
+    modules.insert("main.mds".to_string(), "Hello!\n".to_string());
+    let mut cache = ModuleCache::virtual_fs(modules);
+    let mut warnings = vec![];
+    let _ = cache.resolve_key("main.mds", &HashMap::new(), &mut warnings).expect("should resolve");
+    let deps = cache.dependencies();
+    assert!(deps.contains(&"main.mds".to_string()));
+}
+
+#[test]
+fn compile_with_deps_output_matches_compile() {
+    // Same input → same output string as compile_virtual.
+    let mut modules_a = HashMap::new();
+    modules_a.insert(
+        "main.mds".to_string(),
+        "---\nname: World\n---\nHello {name}!\n".to_string(),
+    );
+    let mut modules_b = modules_a.clone();
+
+    let baseline = mds::compile_virtual(modules_a, "main.mds", None).expect("baseline");
+    let result = mds::compile_virtual_with_deps(modules_b, "main.mds", None).expect("with deps");
+    assert_eq!(result.output, baseline);
+}
+
+// ── Regression: existing functions unchanged ──────────────────────────────────
+
+#[test]
+fn compile_virtual_unchanged() {
+    // compile_virtual still returns Result<String, MdsError>, not CompileOutput.
+    let mut modules = HashMap::new();
+    modules.insert(
+        "main.mds".to_string(),
+        "Hello!\n".to_string(),
+    );
+    let result: Result<String, MdsError> = mds::compile_virtual(modules, "main.mds", None);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn compile_str_unchanged() {
+    // compile_str still returns Result<String, MdsError>, not CompileOutput.
+    let result: Result<String, MdsError> = mds::compile_str("Hello!\n");
+    assert!(result.is_ok());
 }
 
 #[test]
