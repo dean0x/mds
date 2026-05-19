@@ -2,9 +2,12 @@
 name = "mds-wasm"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "MDS compiler WebAssembly bindings"
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
+keywords.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -21,4 +24,8 @@ js-sys = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 
 [package.metadata.wasm-pack.profile.release]
+# wasm-opt disabled: Binaryen is not guaranteed to be installed in all build
+# environments and no CI is configured yet. Re-enable once CI installs Binaryen
+# (e.g. wasm-pack CI action) to recover ~10-20% binary size reduction.
+# Enable with: wasm-opt = ["-Oz"]
 wasm-opt = false

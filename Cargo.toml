@@ -26,12 +26,17 @@ serde-wasm-bindgen = "0.6"
 wasm-bindgen-test = "0.3"
 js-sys = "0.3"
 
+# panic = "unwind" is required workspace-wide because mds-wasm uses catch_unwind
+# at the WASM boundary to convert panics into structured JS errors. Cargo does
+# not support per-package panic strategy overrides for workspace profiles.
+# Note: "unwind" is already Rust's default for dev, so the dev setting is
+# explicit documentation only.
 [profile.dev]
 panic = "unwind"
 
 [profile.release]
 lto = true
-panic = "unwind"
+panic = "unwind" # required by mds-wasm catch_unwind; see comment above
 
 [profile.release.package.mds-wasm]
 opt-level = "z"
