@@ -4,6 +4,20 @@
 //! All compilation runs against an in-memory virtual filesystem — no
 //! OS file access occurs inside the WASM boundary.
 //!
+//! ## Error codes
+//!
+//! Errors thrown at the WASM boundary carry a `code` property. Codes that
+//! originate inside `mds-core` (e.g. `"mds::syntax"`) are defined by
+//! [`mds::MdsError`]. The following codes are **WASM-only** — they are
+//! synthesised here and do not exist in the core crate:
+//!
+//! | Code                      | Meaning                                          |
+//! |---------------------------|--------------------------------------------------|
+//! | `mds::internal`           | Unexpected panic caught at the WASM boundary     |
+//! | `mds::invalid_options`    | Malformed or type-incorrect options object       |
+//! | `mds::resource_limit`     | Input exceeds an enforced size limit             |
+//! | `mds::filename_collision` | `options.modules` key collides with `filename`   |
+//!
 //! ## Usage (JavaScript)
 //!
 //! ```js
@@ -28,6 +42,39 @@ use mds::Value;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
+// ── JS interop primitives ─────────────────────────────────────────────────────
+
+/// Set a property on a JS object, asserting success in debug builds.
+///
+/// `Reflect::set` can only fail when the target is a non-extensible or
+/// frozen object. We never set properties on such objects, so failure is a
+/// programming error rather than a runtime condition. Silent discard is wrong
+/// because it would produce incomplete error objects with no diagnostic trace;
+/// a debug assertion surfaces the bug immediately during development.
+#[inline]
+fn set_prop(target: &JsValue, key: &str, value: &JsValue) {
+    let ok = Reflect::set(target, &JsValue::from_str(key), value)
+        .unwrap_or(false);
+    debug_assert!(ok, "Reflect::set failed for key {key:?}");
+}
+
+/// Build a JS `Error` with a `code` property attached.
+///
+/// Every error thrown at the WASM boundary must carry `code` so callers can
+/// branch programmatically (e.g. `if (err.code === "mds::syntax") …`).
+#[inline]
+fn js_error(message: &str, code: &str) -> JsValue {
+    let err = js_sys::Error::new(message);
+    set_prop(&err, "code", &JsValue::from_str(code));
+    err.into()
+}
+
+/// Shorthand for a `js_error` with `code = "mds::invalid_options"`.
+#[inline]
+fn options_error(message: &str) -> JsValue {
+    js_error(message, "mds::invalid_options")
+}
+
 // ── Error conversion helpers ──────────────────────────────────────────────────
 
 /// Convert an [`mds::MdsError`] into a JS `Error` with structured metadata.
@@ -40,46 +87,35 @@ fn mds_error_to_js(err: mds::MdsError) -> JsValue {
     let serialized = err.serialize();
 
     let js_err = js_sys::Error::new(&serialized.message);
+    set_prop(&js_err, "code", &JsValue::from_str(&serialized.code));
 
-    // Set code — always present.
-    let _ = Reflect::set(&js_err, &JsValue::from_str("code"), &JsValue::from_str(&serialized.code));
-
-    // Set help — only when present.
     if let Some(help) = &serialized.help {
-        let _ = Reflect::set(&js_err, &JsValue::from_str("help"), &JsValue::from_str(help));
+        set_prop(&js_err, "help", &JsValue::from_str(help));
     }
 
-    // Set span — only when present.
     if let Some(span) = &serialized.span {
-        let span_obj = js_sys::Object::new();
-        let _ = Reflect::set(
-            &span_obj,
-            &JsValue::from_str("offset"),
-            &JsValue::from_f64(span.offset as f64),
-        );
-        let _ = Reflect::set(
-            &span_obj,
-            &JsValue::from_str("length"),
-            &JsValue::from_f64(span.length as f64),
-        );
-        if let Some(line) = span.line {
-            let _ = Reflect::set(
-                &span_obj,
-                &JsValue::from_str("line"),
-                &JsValue::from_f64(line as f64),
-            );
-        }
-        if let Some(column) = span.column {
-            let _ = Reflect::set(
-                &span_obj,
-                &JsValue::from_str("column"),
-                &JsValue::from_f64(column as f64),
-            );
-        }
-        let _ = Reflect::set(&js_err, &JsValue::from_str("span"), &span_obj);
+        let span_obj = span_to_js(span);
+        set_prop(&js_err, "span", &span_obj);
     }
 
     js_err.into()
+}
+
+/// Serialise a [`mds::SerializedSpan`] into a plain JS object.
+///
+/// Always sets `offset` and `length`; sets `line` and `column` only when
+/// the compiler was able to resolve them from the source text.
+fn span_to_js(span: &mds::SerializedSpan) -> js_sys::Object {
+    let obj = js_sys::Object::new();
+    set_prop(&obj, "offset", &JsValue::from_f64(span.offset as f64));
+    set_prop(&obj, "length", &JsValue::from_f64(span.length as f64));
+    if let Some(line) = span.line {
+        set_prop(&obj, "line", &JsValue::from_f64(line as f64));
+    }
+    if let Some(column) = span.column {
+        set_prop(&obj, "column", &JsValue::from_f64(column as f64));
+    }
+    obj
 }
 
 /// Wrap a fallible closure in `catch_unwind` to prevent panics from aborting
@@ -102,13 +138,7 @@ where
             "internal compiler panic: unknown internal error".to_string()
         };
 
-        let js_err = js_sys::Error::new(&msg);
-        let _ = Reflect::set(
-            &js_err,
-            &JsValue::from_str("code"),
-            &JsValue::from_str("mds::internal"),
-        );
-        Err(js_err.into())
+        Err(js_error(&msg, "mds::internal"))
     })
 }
 
@@ -138,24 +168,11 @@ fn parse_options(options: JsValue) -> Result<ParsedOptions, JsValue> {
     }
 
     // Deserialize options object → serde_json::Value for structured access.
-    let opts_json: serde_json::Value = serde_wasm_bindgen::from_value(options).map_err(|e| {
-        let js_err = js_sys::Error::new(&format!("invalid options: {e}"));
-        let _ = Reflect::set(
-            &js_err,
-            &JsValue::from_str("code"),
-            &JsValue::from_str("mds::invalid_options"),
-        );
-        JsValue::from(js_err)
-    })?;
+    let opts_json: serde_json::Value = serde_wasm_bindgen::from_value(options)
+        .map_err(|e| options_error(&format!("invalid options: {e}")))?;
 
     let serde_json::Value::Object(map) = &opts_json else {
-        let js_err = js_sys::Error::new("options must be a plain object");
-        let _ = Reflect::set(
-            &js_err,
-            &JsValue::from_str("code"),
-            &JsValue::from_str("mds::invalid_options"),
-        );
-        return Err(js_err.into());
+        return Err(options_error("options must be a plain object"));
     };
 
     // Extract filename (string, default "input.mds").
@@ -163,28 +180,16 @@ fn parse_options(options: JsValue) -> Result<ParsedOptions, JsValue> {
         Some(serde_json::Value::String(s)) => s.clone(),
         None => "input.mds".to_string(),
         Some(other) => {
-            let js_err = js_sys::Error::new(&format!(
+            return Err(options_error(&format!(
                 "options.filename must be a string, got {}",
                 json_type_name(other)
-            ));
-            let _ = Reflect::set(
-                &js_err,
-                &JsValue::from_str("code"),
-                &JsValue::from_str("mds::invalid_options"),
-            );
-            return Err(js_err.into());
+            )));
         }
     };
 
     // Validate filename is non-empty.
     if filename.trim().is_empty() {
-        let js_err = js_sys::Error::new("options.filename must be a non-empty string");
-        let _ = Reflect::set(
-            &js_err,
-            &JsValue::from_str("code"),
-            &JsValue::from_str("mds::invalid_options"),
-        );
-        return Err(js_err.into());
+        return Err(options_error("options.filename must be a non-empty string"));
     }
 
     // Extract modules (Record<string, string>, default empty).
@@ -197,16 +202,10 @@ fn parse_options(options: JsValue) -> Result<ParsedOptions, JsValue> {
                         result.insert(key.clone(), s.clone());
                     }
                     other => {
-                        let js_err = js_sys::Error::new(&format!(
+                        return Err(options_error(&format!(
                             "options.modules[\"{key}\"] must be a string, got {}",
                             json_type_name(other)
-                        ));
-                        let _ = Reflect::set(
-                            &js_err,
-                            &JsValue::from_str("code"),
-                            &JsValue::from_str("mds::invalid_options"),
-                        );
-                        return Err(js_err.into());
+                        )));
                     }
                 }
             }
@@ -214,16 +213,10 @@ fn parse_options(options: JsValue) -> Result<ParsedOptions, JsValue> {
         }
         None => HashMap::new(),
         Some(other) => {
-            let js_err = js_sys::Error::new(&format!(
+            return Err(options_error(&format!(
                 "options.modules must be a plain object, got {}",
                 json_type_name(other)
-            ));
-            let _ = Reflect::set(
-                &js_err,
-                &JsValue::from_str("code"),
-                &JsValue::from_str("mds::invalid_options"),
-            );
-            return Err(js_err.into());
+            )));
         }
     };
 
@@ -239,16 +232,10 @@ fn parse_options(options: JsValue) -> Result<ParsedOptions, JsValue> {
         }
         None => None,
         Some(other) => {
-            let js_err = js_sys::Error::new(&format!(
+            return Err(options_error(&format!(
                 "options.vars must be a plain object, got {}",
                 json_type_name(other)
-            ));
-            let _ = Reflect::set(
-                &js_err,
-                &JsValue::from_str("code"),
-                &JsValue::from_str("mds::invalid_options"),
-            );
-            return Err(js_err.into());
+            )));
         }
     };
 
@@ -277,15 +264,12 @@ fn build_modules(
     extra_modules: HashMap<String, String>,
 ) -> Result<HashMap<String, String>, JsValue> {
     if extra_modules.contains_key(filename) {
-        let js_err = js_sys::Error::new(&format!(
-            "options.modules already contains key \"{filename}\"; this would shadow the source — use a different filename"
+        return Err(js_error(
+            &format!(
+                "options.modules already contains key \"{filename}\"; this would shadow the source — use a different filename"
+            ),
+            "mds::filename_collision",
         ));
-        let _ = Reflect::set(
-            &js_err,
-            &JsValue::from_str("code"),
-            &JsValue::from_str("mds::filename_collision"),
-        );
-        return Err(js_err.into());
     }
 
     let mut modules = extra_modules;
@@ -308,10 +292,7 @@ struct CheckOutput {
 fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
     value
         .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
-        .map_err(|e| {
-            let js_err = js_sys::Error::new(&format!("failed to serialize result: {e}"));
-            JsValue::from(js_err)
-        })
+        .map_err(|e| js_error(&format!("failed to serialize result: {e}"), "mds::internal"))
 }
 
 // ── Public WASM exports ───────────────────────────────────────────────────────
