@@ -50,6 +50,18 @@ use wasm_bindgen::prelude::*;
 /// so the limit must be re-enforced here to prevent memory exhaustion.
 const MAX_SOURCE_SIZE: usize = mds::MAX_FILE_SIZE as usize;
 
+/// Maximum number of module entries in `options.modules`.
+///
+/// Prevents a caller from exhausting WASM linear memory by passing thousands
+/// of small modules. 256 modules is well above any realistic template graph.
+const MAX_MODULE_COUNT: usize = 256;
+
+/// Maximum aggregate byte size of all module values combined (same as source limit).
+///
+/// Uses saturating_add when accumulating to prevent integer overflow. If the
+/// sum saturates to `usize::MAX` the guard triggers correctly.
+const MAX_MODULES_AGGREGATE_SIZE: usize = MAX_SOURCE_SIZE;
+
 // ── JS interop primitives ─────────────────────────────────────────────────────
 
 /// Set a property on a JS object, asserting success in debug builds.
@@ -139,17 +151,25 @@ where
     std::panic::catch_unwind(f).unwrap_or_else(|payload| {
         let err = js_error("internal compiler error", "mds::internal");
 
-        // Attach the raw panic payload as `detail` for debugging. This is
-        // intentionally not part of the main message to prevent leaking
-        // internal file paths or assertion details to untrusted callers.
-        let detail = if let Some(s) = payload.downcast_ref::<&str>() {
-            JsValue::from_str(s)
-        } else if let Some(s) = payload.downcast_ref::<String>() {
-            JsValue::from_str(s)
-        } else {
-            JsValue::from_str("unknown panic payload")
-        };
-        set_prop(&err, "detail", &detail);
+        // The raw panic payload may contain absolute filesystem paths from Rust
+        // source locations or assertion messages. Only expose it when the
+        // `debug-panics` feature is enabled so that production WASM builds
+        // never leak internal paths to untrusted JS callers.
+        #[cfg(feature = "debug-panics")]
+        {
+            let detail = if let Some(s) = payload.downcast_ref::<&str>() {
+                JsValue::from_str(s)
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                JsValue::from_str(s)
+            } else {
+                JsValue::from_str("unknown panic payload")
+            };
+            set_prop(&err, "detail", &detail);
+        }
+
+        // Suppress unused-variable warning in non-debug builds.
+        #[cfg(not(feature = "debug-panics"))]
+        let _ = payload;
 
         Err(err)
     })
@@ -162,6 +182,16 @@ struct ParsedOptions {
     filename: String,
     extra_modules: HashMap<String, String>,
     vars: Option<HashMap<String, Value>>,
+}
+
+impl Default for ParsedOptions {
+    fn default() -> Self {
+        ParsedOptions {
+            filename: "input.mds".to_string(),
+            extra_modules: HashMap::new(),
+            vars: None,
+        }
+    }
 }
 
 /// Extract and validate the `filename` field from the options map.
@@ -186,16 +216,56 @@ fn parse_filename(map: &mut serde_json::Map<String, serde_json::Value>) -> Resul
 
 /// Extract and validate the `modules` field from the options map.
 ///
+/// Enforces three resource limits to prevent WASM linear-memory exhaustion:
+/// 1. **Module count**: at most [`MAX_MODULE_COUNT`] entries.
+/// 2. **Per-module size**: each value must not exceed [`MAX_SOURCE_SIZE`] bytes.
+/// 3. **Aggregate size**: the sum of all module values must not exceed
+///    [`MAX_MODULES_AGGREGATE_SIZE`] bytes (tracked with `saturating_add` to
+///    prevent integer overflow).
+///
 /// Takes ownership via `remove` to avoid cloning string values.
 fn parse_modules(
     map: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<HashMap<String, String>, JsValue> {
     match map.remove("modules") {
         Some(serde_json::Value::Object(mods)) => {
+            if mods.len() > MAX_MODULE_COUNT {
+                return Err(js_error(
+                    &format!(
+                        "options.modules exceeds maximum module count of {} ({} provided)",
+                        MAX_MODULE_COUNT,
+                        mods.len()
+                    ),
+                    "mds::resource_limit",
+                ));
+            }
+
             let mut result = HashMap::with_capacity(mods.len());
+            let mut aggregate_size: usize = 0;
+
             for (key, val) in mods {
                 match val {
                     serde_json::Value::String(s) => {
+                        if s.len() > MAX_SOURCE_SIZE {
+                            return Err(js_error(
+                                &format!(
+                                    "options.modules[\"{key}\"] exceeds maximum size of {} bytes ({} bytes provided)",
+                                    MAX_SOURCE_SIZE,
+                                    s.len()
+                                ),
+                                "mds::resource_limit",
+                            ));
+                        }
+                        aggregate_size = aggregate_size.saturating_add(s.len());
+                        if aggregate_size > MAX_MODULES_AGGREGATE_SIZE {
+                            return Err(js_error(
+                                &format!(
+                                    "options.modules aggregate size exceeds maximum of {} bytes",
+                                    MAX_MODULES_AGGREGATE_SIZE
+                                ),
+                                "mds::resource_limit",
+                            ));
+                        }
                         result.insert(key, s);
                     }
                     other => {
@@ -248,11 +318,7 @@ fn parse_vars(
 fn parse_options(options: JsValue) -> Result<ParsedOptions, JsValue> {
     // null / undefined → all defaults
     if options.is_null() || options.is_undefined() {
-        return Ok(ParsedOptions {
-            filename: "input.mds".to_string(),
-            extra_modules: HashMap::new(),
-            vars: None,
-        });
+        return Ok(ParsedOptions::default());
     }
 
     // Deserialize options object → serde_json::Value for structured access.

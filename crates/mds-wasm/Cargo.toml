@@ -8,6 +8,13 @@ license.workspace = true
 readme.workspace = true
 repository.workspace = true
 keywords.workspace = true
+categories = ["wasm", "template-engine"]
+
+[features]
+# Expose the raw Rust panic payload as `err.detail` on mds::internal errors.
+# Enable during local development to diagnose unexpected panics. NEVER enable
+# in production builds — panic messages contain absolute filesystem paths.
+debug-panics = []
 
 [lib]
 crate-type = ["cdylib", "rlib"]
