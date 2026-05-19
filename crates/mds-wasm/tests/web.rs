@@ -97,6 +97,33 @@ fn compile_has_dependencies_field() {
 }
 
 #[wasm_bindgen_test]
+fn compile_dependencies_contains_imported_module() {
+    // When a module is imported, its resolved path must appear in the dependencies array.
+    let source = "@import \"./lib.mds\"\n{greet(\"World\")}\n";
+    let opts = modules_opts(&serde_json::json!({
+        "lib.mds": "@define greet(x):\nHello {x}!\n@end\n"
+    }));
+    let result = mds_wasm::compile(source, opts).unwrap();
+    let deps_val = get_prop(&result, "dependencies");
+    let deps = js_sys::Array::from(&deps_val);
+    assert!(deps.length() > 0, "dependencies must contain the imported module");
+    // Verify that "lib.mds" (the resolved path) appears somewhere in the array.
+    let found = (0..deps.length()).any(|i| {
+        deps.get(i)
+            .as_string()
+            .map(|s| s.contains("lib.mds"))
+            .unwrap_or(false)
+    });
+    assert!(
+        found,
+        "dependencies must contain 'lib.mds'; got: {:?}",
+        (0..deps.length())
+            .map(|i| deps.get(i).as_string().unwrap_or_default())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[wasm_bindgen_test]
 fn compile_custom_filename() {
     let source = "Hello!\n";
     let opts = filename_opts("my-template.mds");
@@ -142,6 +169,85 @@ fn compile_error_is_js_error() {
     );
 }
 
+#[wasm_bindgen_test]
+fn compile_error_has_span_with_offset_and_length() {
+    // UndefinedVariable is emitted with a source span pointing at the variable reference.
+    // The source "Hello {undefined_var}!\n" has "{undefined_var}" starting at byte 6.
+    let err = mds_wasm::compile("Hello {undefined_var}!\n", JsValue::NULL).unwrap_err();
+    let span = get_prop(&err, "span");
+    assert!(
+        !span.is_undefined() && !span.is_null(),
+        "error.span must be present for an UndefinedVariable error"
+    );
+    let offset = get_prop(&span, "offset");
+    assert!(
+        offset.as_f64().is_some(),
+        "span.offset must be a number, got: {offset:?}"
+    );
+    let length = get_prop(&span, "length");
+    assert!(
+        length.as_f64().is_some(),
+        "span.length must be a number, got: {length:?}"
+    );
+    // Both values must be non-negative (f64 >= 0.0).
+    assert!(
+        offset.as_f64().unwrap() >= 0.0,
+        "span.offset must be >= 0, got: {}",
+        offset.as_f64().unwrap()
+    );
+    assert!(
+        length.as_f64().unwrap() > 0.0,
+        "span.length must be > 0, got: {}",
+        length.as_f64().unwrap()
+    );
+}
+
+#[wasm_bindgen_test]
+fn compile_error_span_has_line_and_column() {
+    // When a source span is present and src is available, line and column are resolved.
+    let err = mds_wasm::compile("Hello {undefined_var}!\n", JsValue::NULL).unwrap_err();
+    let span = get_prop(&err, "span");
+    assert!(!span.is_undefined(), "span must be present");
+    let line = get_prop(&span, "line");
+    let column = get_prop(&span, "column");
+    assert!(
+        line.as_f64().is_some(),
+        "span.line must be a number when source is available, got: {line:?}"
+    );
+    assert!(
+        column.as_f64().is_some(),
+        "span.column must be a number when source is available, got: {column:?}"
+    );
+    // Line 1, column must be >= 1 (1-indexed byte offsets).
+    assert_eq!(
+        line.as_f64().unwrap() as usize,
+        1,
+        "span.line should be 1 for single-line source"
+    );
+    assert!(
+        column.as_f64().unwrap() >= 1.0,
+        "span.column must be >= 1"
+    );
+}
+
+#[wasm_bindgen_test]
+fn compile_error_has_help_for_undefined_variable() {
+    // UndefinedVariable carries a static help hint from the diagnostic attribute.
+    let err = mds_wasm::compile("Hello {undefined_var}!\n", JsValue::NULL).unwrap_err();
+    let code = get_str(&err, "code");
+    assert_eq!(code, "mds::undefined_var", "expected undefined_var error: {code}");
+    let help = get_prop(&err, "help");
+    assert!(
+        help.as_string().is_some(),
+        "error.help must be a string for UndefinedVariable, got: {help:?}"
+    );
+    let help_str = help.as_string().unwrap();
+    assert!(
+        !help_str.is_empty(),
+        "error.help must not be empty"
+    );
+}
+
 // ── check tests ───────────────────────────────────────────────────────────────
 
 #[wasm_bindgen_test]
@@ -171,6 +277,36 @@ fn check_error_has_code_property() {
     let err = mds_wasm::check("{undefined}\n", JsValue::NULL).unwrap_err();
     let code = get_str(&err, "code");
     assert!(code.starts_with("mds::"), "code must start with 'mds::': {code}");
+}
+
+#[wasm_bindgen_test]
+fn check_with_modules_import() {
+    // check() exercises check_virtual_collecting_warnings, a different code path
+    // from compile_virtual_with_deps; module resolution must work through it too.
+    let source = "@import \"./lib.mds\"\n{greet(\"World\")}\n";
+    let opts = modules_opts(&serde_json::json!({
+        "lib.mds": "@define greet(x):\nHello {x}!\n@end\n"
+    }));
+    let result = mds_wasm::check(source, opts).unwrap();
+    let warnings = get_prop(&result, "warnings");
+    assert!(
+        js_sys::Array::is_array(&warnings),
+        "check() with modules must return a warnings array"
+    );
+}
+
+#[wasm_bindgen_test]
+fn check_with_runtime_vars() {
+    // Verify the vars option flows through the check() path correctly.
+    let source = "Hello {name}!\n";
+    let opts = vars_opts(&serde_json::json!({ "name": "Rust" }));
+    let result = mds_wasm::check(source, opts).unwrap();
+    let warnings_arr = js_sys::Array::from(&get_prop(&result, "warnings"));
+    assert_eq!(
+        warnings_arr.length(),
+        0,
+        "check() with valid vars should produce no warnings"
+    );
 }
 
 // ── options validation tests ──────────────────────────────────────────────────
@@ -219,4 +355,17 @@ fn check_undefined_options() {
     let result = mds_wasm::check("Hello!\n", JsValue::UNDEFINED).unwrap();
     let warnings = get_prop(&result, "warnings");
     assert!(js_sys::Array::is_array(&warnings));
+}
+
+#[wasm_bindgen_test]
+fn check_empty_filename_returns_error() {
+    // Validates that the same options validation path is exercised via check().
+    // Empty filename is rejected before any compilation attempt.
+    let opts = filename_opts("");
+    let err = mds_wasm::check("Hello!\n", opts).unwrap_err();
+    let code = get_str(&err, "code");
+    assert_eq!(
+        code, "mds::invalid_options",
+        "check() empty filename must return mds::invalid_options, got: {code}"
+    );
 }
