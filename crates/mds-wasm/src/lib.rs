@@ -42,6 +42,15 @@ use mds::Value;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
+// ── Resource limits ───────────────────────────────────────────────────────────
+
+/// Maximum source string size accepted at the WASM boundary.
+///
+/// Matches `MAX_FILE_SIZE` in `mds-core` (10 MiB). The WASM boundary bypasses
+/// the file layer, so we enforce the limit here to prevent memory exhaustion
+/// from callers passing arbitrarily large strings.
+const MAX_SOURCE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
+
 // ── JS interop primitives ─────────────────────────────────────────────────────
 
 /// Set a property on a JS object, asserting success in debug builds.
@@ -125,20 +134,30 @@ fn span_to_js(span: &mds::SerializedSpan) -> js_sys::Object {
 /// `AssertUnwindSafe` is required because the closure captures data that is
 /// not `UnwindSafe` by default (e.g. `String`, `HashMap`). Callers ensure
 /// this is safe by cloning all captured data before calling `catch_panic`.
+///
+/// The public error message is deliberately generic to avoid leaking internal
+/// paths or assertion details. The raw panic payload is attached as `detail`
+/// for debugging purposes only — callers should not rely on its format.
 fn catch_panic<F, T>(f: F) -> Result<T, JsValue>
 where
     F: std::panic::UnwindSafe + FnOnce() -> Result<T, JsValue>,
 {
     std::panic::catch_unwind(f).unwrap_or_else(|payload| {
-        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-            format!("internal compiler panic: {s}")
-        } else if let Some(s) = payload.downcast_ref::<String>() {
-            format!("internal compiler panic: {s}")
-        } else {
-            "internal compiler panic: unknown internal error".to_string()
-        };
+        let err = js_error("internal compiler error", "mds::internal");
 
-        Err(js_error(&msg, "mds::internal"))
+        // Attach the raw panic payload as `detail` for debugging. This is
+        // intentionally not part of the main message to prevent leaking
+        // internal file paths or assertion details to untrusted callers.
+        let detail = if let Some(s) = payload.downcast_ref::<&str>() {
+            JsValue::from_str(s)
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            JsValue::from_str(s)
+        } else {
+            JsValue::from_str("unknown panic payload")
+        };
+        set_prop(&err, "detail", &detail);
+
+        Err(err)
     })
 }
 
@@ -149,6 +168,81 @@ struct ParsedOptions {
     filename: String,
     extra_modules: HashMap<String, String>,
     vars: Option<HashMap<String, Value>>,
+}
+
+/// Extract and validate the `filename` field from the options map.
+///
+/// Takes ownership via `remove` to avoid cloning the string value.
+fn parse_filename(map: &mut serde_json::Map<String, serde_json::Value>) -> Result<String, JsValue> {
+    match map.remove("filename") {
+        Some(serde_json::Value::String(s)) => {
+            if s.trim().is_empty() {
+                Err(options_error("options.filename must be a non-empty string"))
+            } else {
+                Ok(s)
+            }
+        }
+        None => Ok("input.mds".to_string()),
+        Some(other) => Err(options_error(&format!(
+            "options.filename must be a string, got {}",
+            json_type_name(&other)
+        ))),
+    }
+}
+
+/// Extract and validate the `modules` field from the options map.
+///
+/// Takes ownership via `remove` to avoid cloning string values.
+fn parse_modules(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<HashMap<String, String>, JsValue> {
+    match map.remove("modules") {
+        Some(serde_json::Value::Object(mods)) => {
+            let mut result = HashMap::with_capacity(mods.len());
+            for (key, val) in mods {
+                match val {
+                    serde_json::Value::String(s) => {
+                        result.insert(key, s);
+                    }
+                    other => {
+                        return Err(options_error(&format!(
+                            "options.modules[\"{key}\"] must be a string, got {}",
+                            json_type_name(&other)
+                        )));
+                    }
+                }
+            }
+            Ok(result)
+        }
+        None => Ok(HashMap::new()),
+        Some(other) => Err(options_error(&format!(
+            "options.modules must be a plain object, got {}",
+            json_type_name(&other)
+        ))),
+    }
+}
+
+/// Extract and validate the `vars` field from the options map.
+///
+/// Takes ownership via `remove` to avoid cloning JSON values.
+fn parse_vars(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<HashMap<String, Value>>, JsValue> {
+    match map.remove("vars") {
+        Some(serde_json::Value::Object(vars_map)) => {
+            let mut result = HashMap::with_capacity(vars_map.len());
+            for (key, val) in vars_map {
+                let mds_val = Value::from_json(val).map_err(mds_error_to_js)?;
+                result.insert(key, mds_val);
+            }
+            Ok(Some(result))
+        }
+        None => Ok(None),
+        Some(other) => Err(options_error(&format!(
+            "options.vars must be a plain object, got {}",
+            json_type_name(&other)
+        ))),
+    }
 }
 
 /// Parse the JS options argument into structured Rust data.
@@ -171,73 +265,13 @@ fn parse_options(options: JsValue) -> Result<ParsedOptions, JsValue> {
     let opts_json: serde_json::Value = serde_wasm_bindgen::from_value(options)
         .map_err(|e| options_error(&format!("invalid options: {e}")))?;
 
-    let serde_json::Value::Object(map) = &opts_json else {
+    let serde_json::Value::Object(mut map) = opts_json else {
         return Err(options_error("options must be a plain object"));
     };
 
-    // Extract filename (string, default "input.mds").
-    let filename = match map.get("filename") {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        None => "input.mds".to_string(),
-        Some(other) => {
-            return Err(options_error(&format!(
-                "options.filename must be a string, got {}",
-                json_type_name(other)
-            )));
-        }
-    };
-
-    // Validate filename is non-empty.
-    if filename.trim().is_empty() {
-        return Err(options_error("options.filename must be a non-empty string"));
-    }
-
-    // Extract modules (Record<string, string>, default empty).
-    let extra_modules = match map.get("modules") {
-        Some(serde_json::Value::Object(mods)) => {
-            let mut result = HashMap::with_capacity(mods.len());
-            for (key, val) in mods {
-                match val {
-                    serde_json::Value::String(s) => {
-                        result.insert(key.clone(), s.clone());
-                    }
-                    other => {
-                        return Err(options_error(&format!(
-                            "options.modules[\"{key}\"] must be a string, got {}",
-                            json_type_name(other)
-                        )));
-                    }
-                }
-            }
-            result
-        }
-        None => HashMap::new(),
-        Some(other) => {
-            return Err(options_error(&format!(
-                "options.modules must be a plain object, got {}",
-                json_type_name(other)
-            )));
-        }
-    };
-
-    // Extract vars (Record<string, any>, default None).
-    let vars = match map.get("vars") {
-        Some(serde_json::Value::Object(vars_map)) => {
-            let mut result = HashMap::with_capacity(vars_map.len());
-            for (key, val) in vars_map {
-                let mds_val = Value::from_json(val.clone()).map_err(mds_error_to_js)?;
-                result.insert(key.clone(), mds_val);
-            }
-            Some(result)
-        }
-        None => None,
-        Some(other) => {
-            return Err(options_error(&format!(
-                "options.vars must be a plain object, got {}",
-                json_type_name(other)
-            )));
-        }
-    };
+    let filename = parse_filename(&mut map)?;
+    let extra_modules = parse_modules(&mut map)?;
+    let vars = parse_vars(&mut map)?;
 
     Ok(ParsedOptions { filename, extra_modules, vars })
 }
@@ -324,6 +358,17 @@ fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
 /// ```
 #[wasm_bindgen]
 pub fn compile(source: &str, options: JsValue) -> Result<JsValue, JsValue> {
+    if source.len() > MAX_SOURCE_SIZE {
+        return Err(js_error(
+            &format!(
+                "source exceeds maximum size of {} bytes ({} bytes provided)",
+                MAX_SOURCE_SIZE,
+                source.len()
+            ),
+            "mds::resource_limit",
+        ));
+    }
+
     // source must be cloned into an owned String so the closure is UnwindSafe.
     let source = source.to_string();
 
@@ -359,6 +404,17 @@ pub fn compile(source: &str, options: JsValue) -> Result<JsValue, JsValue> {
 /// ```
 #[wasm_bindgen]
 pub fn check(source: &str, options: JsValue) -> Result<JsValue, JsValue> {
+    if source.len() > MAX_SOURCE_SIZE {
+        return Err(js_error(
+            &format!(
+                "source exceeds maximum size of {} bytes ({} bytes provided)",
+                MAX_SOURCE_SIZE,
+                source.len()
+            ),
+            "mds::resource_limit",
+        ));
+    }
+
     // source must be cloned into an owned String so the closure is UnwindSafe.
     let source = source.to_string();
 
