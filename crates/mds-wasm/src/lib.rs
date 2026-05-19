@@ -57,10 +57,12 @@ const MAX_SOURCE_SIZE: usize = mds::MAX_FILE_SIZE as usize;
 const MAX_MODULE_COUNT: usize = 256;
 
 /// Maximum aggregate byte size of all module values combined (same as source limit).
-///
-/// Uses saturating_add when accumulating to prevent integer overflow. If the
-/// sum saturates to `usize::MAX` the guard triggers correctly.
 const MAX_MODULES_AGGREGATE_SIZE: usize = MAX_SOURCE_SIZE;
+
+// ── Defaults ─────────────────────────────────────────────────────────────────
+
+/// Default filename used when the caller does not supply `options.filename`.
+const DEFAULT_FILENAME: &str = "input.mds";
 
 // ── JS interop primitives ─────────────────────────────────────────────────────
 
@@ -187,7 +189,7 @@ struct ParsedOptions {
 impl Default for ParsedOptions {
     fn default() -> Self {
         ParsedOptions {
-            filename: "input.mds".to_string(),
+            filename: DEFAULT_FILENAME.to_string(),
             extra_modules: HashMap::new(),
             vars: None,
         }
@@ -206,7 +208,7 @@ fn parse_filename(map: &mut serde_json::Map<String, serde_json::Value>) -> Resul
                 Ok(s)
             }
         }
-        None => Ok("input.mds".to_string()),
+        None => Ok(DEFAULT_FILENAME.to_string()),
         Some(other) => Err(options_error(&format!(
             "options.filename must be a string, got {}",
             json_type_name(&other)

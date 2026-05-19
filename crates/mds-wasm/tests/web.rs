@@ -187,29 +187,15 @@ fn compile_error_has_span_with_offset_and_length() {
         !span.is_undefined() && !span.is_null(),
         "error.span must be present for an UndefinedVariable error"
     );
-    let offset = get_prop(&span, "offset");
-    assert!(
-        offset.as_f64().is_some(),
-        "span.offset must be a number, got: {offset:?}"
-    );
-    let length = get_prop(&span, "length");
-    assert!(
-        length.as_f64().is_some(),
-        "span.length must be a number, got: {length:?}"
-    );
+    let offset = get_prop(&span, "offset")
+        .as_f64()
+        .expect("span.offset must be a number") as usize;
+    let length = get_prop(&span, "length")
+        .as_f64()
+        .expect("span.length must be a number") as usize;
     // Assert exact byte positions so regressions in span calculation are caught.
-    assert_eq!(
-        offset.as_f64().unwrap() as usize,
-        6,
-        "span.offset must be 6 (start of '{{undefined_var}}' in source), got: {}",
-        offset.as_f64().unwrap()
-    );
-    assert_eq!(
-        length.as_f64().unwrap() as usize,
-        13,
-        "span.length must be 13 (byte length of 'undefined_var' identifier), got: {}",
-        length.as_f64().unwrap()
-    );
+    assert_eq!(offset, 6, "span.offset must be 6 (start of '{{undefined_var}}' in source)");
+    assert_eq!(length, 13, "span.length must be 13 (byte length of 'undefined_var' identifier)");
 }
 
 #[wasm_bindgen_test]
@@ -218,26 +204,15 @@ fn compile_error_span_has_line_and_column() {
     let err = compile_undefined_var_err();
     let span = get_prop(&err, "span");
     assert!(!span.is_undefined(), "span must be present");
-    let line = get_prop(&span, "line");
-    let column = get_prop(&span, "column");
-    assert!(
-        line.as_f64().is_some(),
-        "span.line must be a number when source is available, got: {line:?}"
-    );
-    assert!(
-        column.as_f64().is_some(),
-        "span.column must be a number when source is available, got: {column:?}"
-    );
-    // Line 1, column must be >= 1 (1-indexed byte offsets).
-    assert_eq!(
-        line.as_f64().unwrap() as usize,
-        1,
-        "span.line should be 1 for single-line source"
-    );
-    assert!(
-        column.as_f64().unwrap() >= 1.0,
-        "span.column must be >= 1"
-    );
+    let line = get_prop(&span, "line")
+        .as_f64()
+        .expect("span.line must be a number when source is available") as usize;
+    let column = get_prop(&span, "column")
+        .as_f64()
+        .expect("span.column must be a number when source is available");
+    // Line and column are 1-indexed.
+    assert_eq!(line, 1, "span.line should be 1 for single-line source");
+    assert!(column >= 1.0, "span.column must be >= 1");
 }
 
 #[wasm_bindgen_test]
@@ -246,16 +221,10 @@ fn compile_error_has_help_for_undefined_variable() {
     let err = compile_undefined_var_err();
     let code = get_str(&err, "code");
     assert_eq!(code, "mds::undefined_var", "expected undefined_var error: {code}");
-    let help = get_prop(&err, "help");
-    assert!(
-        help.as_string().is_some(),
-        "error.help must be a string for UndefinedVariable, got: {help:?}"
-    );
-    let help_str = help.as_string().unwrap();
-    assert!(
-        !help_str.is_empty(),
-        "error.help must not be empty"
-    );
+    let help = get_prop(&err, "help")
+        .as_string()
+        .expect("error.help must be a string for UndefinedVariable");
+    assert!(!help.is_empty(), "error.help must not be empty");
 }
 
 #[wasm_bindgen_test]
@@ -376,14 +345,14 @@ fn compile_invalid_vars_type_returns_error() {
 fn check_null_options() {
     let result = mds_wasm::check("Hello!\n", JsValue::NULL).unwrap();
     let warnings = get_prop(&result, "warnings");
-    assert!(js_sys::Array::is_array(&warnings));
+    assert!(js_sys::Array::is_array(&warnings), "warnings must be an array");
 }
 
 #[wasm_bindgen_test]
 fn check_undefined_options() {
     let result = mds_wasm::check("Hello!\n", JsValue::UNDEFINED).unwrap();
     let warnings = get_prop(&result, "warnings");
-    assert!(js_sys::Array::is_array(&warnings));
+    assert!(js_sys::Array::is_array(&warnings), "warnings must be an array");
 }
 
 #[wasm_bindgen_test]
