@@ -24,6 +24,7 @@ fn public_functions_exist() {
     let _ = mds::check_virtual(HashMap::new(), "main.mds", None);
     let _ = mds::check_virtual_collecting_warnings(HashMap::new(), "main.mds", None);
     let _ = mds::load_vars_file(Path::new("nonexistent.json"));
+    let _ = mds::load_vars_str("{}");
 }
 
 #[test]
