@@ -247,7 +247,11 @@ fn emit_warnings(warnings: &[String]) {
 ///
 /// Cleans the prompt body and prepends YAML frontmatter when present.
 fn build_output(resolved: &resolver::ResolvedModule) -> String {
-    let body = resolved.prompt_body.as_deref().map(clean_output).unwrap_or_default();
+    let body = resolved
+        .prompt_body
+        .as_deref()
+        .map(clean_output)
+        .unwrap_or_default();
     prepend_frontmatter(resolved.raw_frontmatter.as_deref(), body)
 }
 
@@ -532,7 +536,11 @@ pub fn compile_with_deps(
         .into_iter()
         .filter(|k| Some(k) != entry_key.as_ref())
         .collect();
-    Ok(CompileOutput { output, warnings, dependencies })
+    Ok(CompileOutput {
+        output,
+        warnings,
+        dependencies,
+    })
 }
 
 /// Compile MDS source code from a string and return a [`CompileOutput`] with
@@ -571,7 +579,11 @@ pub fn compile_str_with_deps(
     // resolve_source does not insert the inline source into the modules cache,
     // so cache.dependencies() contains only imported files — no filtering needed.
     let dependencies = cache.dependencies();
-    Ok(CompileOutput { output, warnings, dependencies })
+    Ok(CompileOutput {
+        output,
+        warnings,
+        dependencies,
+    })
 }
 
 /// Compile a module from an in-memory virtual filesystem and return a
@@ -607,8 +619,16 @@ pub fn compile_virtual_with_deps(
     let mut warnings = vec![];
     let resolved = cache.resolve_key(entry, &vars, &mut warnings)?;
     let output = build_output(&resolved);
-    let dependencies = cache.dependencies().into_iter().filter(|k| k != entry).collect();
-    Ok(CompileOutput { output, warnings, dependencies })
+    let dependencies = cache
+        .dependencies()
+        .into_iter()
+        .filter(|k| k != entry)
+        .collect();
+    Ok(CompileOutput {
+        output,
+        warnings,
+        dependencies,
+    })
 }
 
 /// Check (validate) a module from an in-memory virtual filesystem without rendering output.
@@ -737,6 +757,42 @@ pub fn load_vars_file(path: &Path) -> Result<HashMap<String, Value>, MdsError> {
         .collect()
 }
 
+/// Load runtime variables from a JSON string.
+///
+/// The string must contain a JSON object; each key becomes a variable name.
+///
+/// # Examples
+///
+/// ```rust
+/// let vars = mds::load_vars_str(r#"{"name": "World", "count": 42}"#)?;
+/// let output = mds::compile_virtual(
+///     std::collections::HashMap::from([
+///         ("main.mds".to_string(), "Hello {name}!\n".to_string()),
+///     ]),
+///     "main.mds",
+///     Some(vars),
+/// )?;
+/// assert_eq!(output, "Hello World!\n");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use = "the loaded variables should be used"]
+pub fn load_vars_str(json: &str) -> Result<HashMap<String, Value>, MdsError> {
+    if json.len() as u64 > MAX_FILE_SIZE {
+        return Err(MdsError::resource_limit(format!(
+            "vars string exceeds maximum size of {} bytes",
+            MAX_FILE_SIZE,
+        )));
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| MdsError::json_error(e.to_string()))?;
+    let serde_json::Value::Object(map) = parsed else {
+        return Err(MdsError::json_error("vars must be a JSON object"));
+    };
+    map.into_iter()
+        .map(|(key, val)| Value::from_json(val).map(|v| (key, v)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,5 +895,28 @@ mod tests {
             Some("config:\n  type: \"mds\"\n  theme: dark\n".to_string()),
             "indented quoted type:mds should be preserved, got: {result:?}"
         );
+    }
+
+    // ── load_vars_str: size limit ─────────────────────────────────────────────
+
+    #[test]
+    fn load_vars_str_rejects_oversized_input() {
+        // Construct a string that exceeds MAX_FILE_SIZE (10 MB).
+        let oversized = "x".repeat((MAX_FILE_SIZE as usize) + 1);
+        let result = load_vars_str(&oversized);
+        assert!(result.is_err(), "expected error for oversized input");
+        let err = result.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("exceeds maximum size"),
+            "error message should mention size limit, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_vars_str_accepts_valid_json_within_limit() {
+        let json = r#"{"name": "World", "count": 42}"#;
+        let vars = load_vars_str(json).expect("valid JSON within size limit should succeed");
+        assert_eq!(vars.len(), 2);
     }
 }

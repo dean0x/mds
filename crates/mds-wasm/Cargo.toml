@@ -1,0 +1,39 @@
+[package]
+name = "mds-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "MDS compiler WebAssembly bindings"
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories = ["wasm", "template-engine"]
+
+[features]
+# Expose the raw Rust panic payload as `err.detail` on mds::internal errors.
+# Enable during local development to diagnose unexpected panics. NEVER enable
+# in production builds — panic messages contain absolute filesystem paths.
+debug-panics = []
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mds = { package = "mds-core", path = "../mds-core" }
+wasm-bindgen = { workspace = true }
+serde-wasm-bindgen = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+js-sys = { workspace = true }
+
+[dev-dependencies]
+mds = { package = "mds-core", path = "../mds-core" }
+wasm-bindgen-test = { workspace = true }
+
+[package.metadata.wasm-pack.profile.release]
+# wasm-opt disabled: Binaryen is not guaranteed to be installed in all build
+# environments and no CI is configured yet. Re-enable once CI installs Binaryen
+# (e.g. wasm-pack CI action) to recover ~10-20% binary size reduction.
+# Enable with: wasm-opt = ["-Oz"]
+wasm-opt = false

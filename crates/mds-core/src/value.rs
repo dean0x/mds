@@ -98,7 +98,7 @@ impl Value {
     }
 
     /// Convert a serde_json::Value into our Value enum.
-    pub(crate) fn from_json(json: serde_json::Value) -> Result<Value, MdsError> {
+    pub fn from_json(json: serde_json::Value) -> Result<Value, MdsError> {
         Self::from_json_inner(json, 0)
     }
 
