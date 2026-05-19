@@ -737,6 +737,36 @@ pub fn load_vars_file(path: &Path) -> Result<HashMap<String, Value>, MdsError> {
         .collect()
 }
 
+/// Load runtime variables from a JSON string.
+///
+/// The string must contain a JSON object; each key becomes a variable name.
+///
+/// # Examples
+///
+/// ```rust
+/// let vars = mds::load_vars_str(r#"{"name": "World", "count": 42}"#)?;
+/// let output = mds::compile_virtual(
+///     std::collections::HashMap::from([
+///         ("main.mds".to_string(), "Hello {name}!\n".to_string()),
+///     ]),
+///     "main.mds",
+///     Some(vars),
+/// )?;
+/// assert_eq!(output, "Hello World!\n");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use = "the loaded variables should be used"]
+pub fn load_vars_str(json: &str) -> Result<HashMap<String, Value>, MdsError> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| MdsError::json_error(e.to_string()))?;
+    let serde_json::Value::Object(map) = parsed else {
+        return Err(MdsError::json_error("vars must be a JSON object"));
+    };
+    map.into_iter()
+        .map(|(key, val)| Value::from_json(val).map(|v| (key, v)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

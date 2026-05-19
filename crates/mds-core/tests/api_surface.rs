@@ -548,3 +548,107 @@ fn compile_str_with_import_resolves_relative_to_base_dir() {
         "expected 'Hello World!' in output, got: {output}"
     );
 }
+
+// ── WASM support: Value::from_json + load_vars_str ──────────────────────────
+
+#[test]
+fn value_from_json_null() {
+    let result = Value::from_json(serde_json::Value::Null).unwrap();
+    assert_eq!(result, Value::Null);
+}
+
+#[test]
+fn value_from_json_string() {
+    let result = Value::from_json(serde_json::json!("hello")).unwrap();
+    assert_eq!(result, Value::String("hello".to_string()));
+}
+
+#[test]
+fn value_from_json_number() {
+    let result = Value::from_json(serde_json::json!(42)).unwrap();
+    assert_eq!(result, Value::Number(42.0));
+}
+
+#[test]
+fn value_from_json_boolean() {
+    let result = Value::from_json(serde_json::json!(true)).unwrap();
+    assert_eq!(result, Value::Boolean(true));
+}
+
+#[test]
+fn value_from_json_array() {
+    let result = Value::from_json(serde_json::json!([1, "two", null])).unwrap();
+    assert_eq!(
+        result,
+        Value::Array(vec![
+            Value::Number(1.0),
+            Value::String("two".to_string()),
+            Value::Null,
+        ])
+    );
+}
+
+#[test]
+fn value_from_json_object() {
+    let result = Value::from_json(serde_json::json!({"a": 1, "b": "c"})).unwrap();
+    match result {
+        Value::Object(map) => {
+            assert_eq!(map.get("a"), Some(&Value::Number(1.0)));
+            assert_eq!(map.get("b"), Some(&Value::String("c".to_string())));
+        }
+        other => panic!("expected Object, got {other:?}"),
+    }
+}
+
+#[test]
+fn value_from_json_depth_limit() {
+    // Build 65-level nested array: [[[...[null]...]]]
+    let mut val = serde_json::Value::Null;
+    for _ in 0..65 {
+        val = serde_json::Value::Array(vec![val]);
+    }
+    let err = Value::from_json(val).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("nesting exceeds maximum depth"), "got: {msg}");
+}
+
+#[test]
+fn load_vars_str_valid_object() {
+    let vars = mds::load_vars_str(r#"{"name": "World", "count": 42}"#).unwrap();
+    assert_eq!(vars.get("name"), Some(&Value::String("World".to_string())));
+    assert_eq!(vars.get("count"), Some(&Value::Number(42.0)));
+}
+
+#[test]
+fn load_vars_str_nested_values() {
+    let vars = mds::load_vars_str(r#"{"items": [1,2], "config": {"debug": true}}"#).unwrap();
+    assert!(matches!(vars.get("items"), Some(Value::Array(_))));
+    assert!(matches!(vars.get("config"), Some(Value::Object(_))));
+}
+
+#[test]
+fn load_vars_str_non_object_json() {
+    let err = mds::load_vars_str("[1,2,3]").unwrap_err();
+    assert!(err.to_string().contains("vars must be a JSON object"));
+}
+
+#[test]
+fn load_vars_str_malformed_json() {
+    let err = mds::load_vars_str("not json").unwrap_err();
+    assert!(err.to_string().contains("JSON"));
+}
+
+#[test]
+fn load_vars_str_empty_object() {
+    let vars = mds::load_vars_str("{}").unwrap();
+    assert!(vars.is_empty());
+}
+
+#[test]
+fn load_vars_str_feeds_compile_virtual() {
+    let vars = mds::load_vars_str(r#"{"name": "Test"}"#).unwrap();
+    let mut modules = HashMap::new();
+    modules.insert("main.mds".to_string(), "Hello {name}!\n".to_string());
+    let output = mds::compile_virtual(modules, "main.mds", Some(vars)).unwrap();
+    assert_eq!(output, "Hello Test!\n");
+}

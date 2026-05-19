@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mds-core", "crates/mds-cli"]
+members = ["crates/mds-core", "crates/mds-cli", "crates/mds-wasm"]
 resolver = "2"
 
 [workspace.package]
@@ -21,3 +21,19 @@ miette = { version = "7" }
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen-test = "0.3"
+js-sys = "0.3"
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+lto = true
+panic = "unwind"
+
+[profile.release.package.mds-wasm]
+opt-level = "z"
+strip = true
+codegen-units = 1

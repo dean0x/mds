@@ -1,3 +1,2 @@
-.memory/
-.docs/
 /target
+crates/mds-wasm/pkg/
