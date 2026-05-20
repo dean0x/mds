@@ -298,10 +298,9 @@ fn parse_vars_field(
 ///
 /// Valid keys: `basePath`, `vars`.
 /// Returns `(base_path, vars)`.
-fn parse_compile_opts(
-    env: &Env,
-    opts: Option<Object>,
-) -> napi::Result<(Option<PathBuf>, Option<HashMap<String, Value>>)> {
+type CompileOpts = (Option<PathBuf>, Option<HashMap<String, Value>>);
+
+fn parse_compile_opts(env: &Env, opts: Option<Object>) -> napi::Result<CompileOpts> {
     let Some(opts_obj) = opts else {
         return Ok((None, None));
     };
