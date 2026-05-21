@@ -121,19 +121,28 @@ describe('compileFile', () => {
   });
 
   test('F-CF6: relative path resolves from cwd', () => {
-    // A relative path that resolves from cwd — use a path relative to the repo root.
-    const relativePath = 'crates/mds-napi/__test__/fixtures/simple.mds';
-    // This should work when run from the workspace root.
-    try {
+    // Derive a relative path from the known absolute fixtures directory so this
+    // test is deterministic regardless of which directory the test runner uses.
+    const cwd = process.cwd();
+    const relativePath = path.relative(cwd, SIMPLE_MDS);
+    // If the relative path escapes cwd with "../" segments, the fixture is
+    // not reachable as a relative path — assert deterministically instead.
+    if (relativePath.startsWith('..')) {
+      // The fixture is not reachable as a relative path from this cwd.  The
+      // file_not_found error must be thrown (not silently swallowed).
+      assert.throws(
+        () => compileFile(relativePath),
+        (err) => {
+          assert.ok(
+            err.code === 'mds::file_not_found' || err.code === 'mds::io',
+            `expected file_not_found or io, got: ${err.code}`,
+          );
+          return true;
+        },
+      );
+    } else {
       const result = compileFile(relativePath);
       assert.ok(result.output.includes('Hello Alice!'), `got: ${result.output}`);
-    } catch (e) {
-      // If cwd is different, file_not_found is acceptable — skip with a note.
-      if (e.code === 'mds::file_not_found' || e.code === 'mds::io') {
-        // Acceptable: relative resolution depends on cwd at test time.
-        return;
-      }
-      throw e;
     }
   });
 });
@@ -201,6 +210,19 @@ describe('check', () => {
       },
     );
   });
+
+  test('F-K10: checkFile with vars', () => {
+    const result = checkFile(VAR_MDS, { vars: { name: 'World' } });
+    assert.ok(Array.isArray(result.warnings), 'warnings should be an array');
+    assert.deepEqual(result.warnings, []);
+  });
+
+  test('F-K11: check result has only warnings property (no output or dependencies)', () => {
+    const result = check('Hello World!\n');
+    assert.ok(Array.isArray(result.warnings), 'warnings should be an array');
+    assert.equal(result.output, undefined, 'check result must not have output');
+    assert.equal(result.dependencies, undefined, 'check result must not have dependencies');
+  });
 });
 
 // ── Error shape tests ─────────────────────────────────────────────────────────
@@ -252,10 +274,10 @@ describe('error shape', () => {
     assert.throws(
       () => compile('Hello {undefined_var}!\n'),
       (err) => {
-        // help may or may not be present depending on the error variant.
-        if ('help' in err) {
-          assert.ok(typeof err.help === 'string', `help should be string, got: ${typeof err.help}`);
-        }
+        // undefined_var always carries a help message from the diagnostic annotation.
+        assert.ok('help' in err, 'undefined_var errors should include a help property');
+        assert.ok(typeof err.help === 'string', `help should be string, got: ${typeof err.help}`);
+        assert.ok(err.help.length > 0, 'help should not be empty');
         return true;
       },
     );
@@ -285,11 +307,12 @@ describe('error shape', () => {
     assert.throws(
       () => compile('Hello {undefined_var}!\n'),
       (err) => {
-        if (err.span !== undefined) {
-          assert.ok(typeof err.span === 'object' && err.span !== null, 'span should be object');
-          assert.ok(typeof err.span.offset === 'number', 'span.offset should be number');
-          assert.ok(typeof err.span.length === 'number', 'span.length should be number');
-        }
+        // undefined_var errors produced via compile() go through the validator which
+        // always attaches a source span (offset + length of the variable name).
+        assert.ok(err.span !== undefined, 'undefined_var errors should have a span');
+        assert.ok(typeof err.span === 'object' && err.span !== null, 'span should be object');
+        assert.ok(typeof err.span.offset === 'number', 'span.offset should be number');
+        assert.ok(typeof err.span.length === 'number', 'span.length should be number');
         return true;
       },
     );
