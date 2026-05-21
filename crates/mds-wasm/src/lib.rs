@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 
 use js_sys::Reflect;
-use mds::Value;
+use mds::{Value, json_type_name, parse_json_vars, VarsError};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -195,119 +195,178 @@ impl Default for ParsedOptions {
     }
 }
 
-/// Extract and validate the `filename` field from the options map.
+/// Reject any JS object key that is not in the `known` list.
 ///
-/// Takes ownership via `remove` to avoid cloning the string value.
-fn parse_filename(map: &mut serde_json::Map<String, serde_json::Value>) -> Result<String, JsValue> {
-    match map.remove("filename") {
-        Some(serde_json::Value::String(s)) => {
-            if s.trim().is_empty() {
-                Err(options_error("options.filename must be a non-empty string"))
-            } else {
-                Ok(s)
+/// Iterates `js_sys::Object::keys(obj)` and collects all unknowns before
+/// returning, so the error message names every offending key at once.
+fn reject_unknown_wasm_keys(obj: &js_sys::Object, known: &[&str]) -> Result<(), JsValue> {
+    let key_array = js_sys::Object::keys(obj);
+    let mut unknowns: Vec<String> = Vec::new();
+    for i in 0..key_array.length() {
+        if let Some(k) = key_array.get(i).as_string() {
+            if !known.contains(&k.as_str()) {
+                unknowns.push(k);
             }
         }
-        None => Ok(DEFAULT_FILENAME.to_string()),
-        Some(other) => Err(options_error(&format!(
+    }
+    if unknowns.is_empty() {
+        return Ok(());
+    }
+    let recognised = known.join(", ");
+    let msg = if unknowns.len() == 1 {
+        format!(
+            "unknown option key \"{}\"; recognised keys are: {}",
+            unknowns[0], recognised
+        )
+    } else {
+        let listed: Vec<String> = unknowns.iter().map(|k| format!("\"{k}\"")).collect();
+        format!(
+            "unknown option keys: {}; recognised keys are: {}",
+            listed.join(", "),
+            recognised
+        )
+    };
+    Err(options_error(&msg))
+}
+
+/// Get a property from a JS object via Reflect, returning `JsValue::UNDEFINED` on failure.
+fn get_prop_js(obj: &js_sys::Object, key: &str) -> JsValue {
+    Reflect::get(obj, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED)
+}
+
+/// Extract and validate the `filename` field from the options object.
+fn extract_filename(obj: &js_sys::Object) -> Result<String, JsValue> {
+    let val = get_prop_js(obj, "filename");
+    if val.is_undefined() || val.is_null() {
+        return Ok(DEFAULT_FILENAME.to_string());
+    }
+    match val.as_string() {
+        Some(s) if s.trim().is_empty() => {
+            Err(options_error("options.filename must be a non-empty string"))
+        }
+        Some(s) => Ok(s),
+        None => Err(options_error(&format!(
             "options.filename must be a string, got {}",
-            json_type_name(&other)
+            js_type_name(&val)
         ))),
     }
 }
 
-/// Extract and validate the `modules` field from the options map.
-///
-/// Enforces three resource limits to prevent WASM linear-memory exhaustion:
-/// 1. **Module count**: at most [`MAX_MODULE_COUNT`] entries.
-/// 2. **Per-module size**: each value must not exceed [`MAX_SOURCE_SIZE`] bytes.
-/// 3. **Aggregate size**: the sum of all module values must not exceed
-///    [`MAX_MODULES_AGGREGATE_SIZE`] bytes (tracked with `saturating_add` to
-///    prevent integer overflow).
-///
-/// Takes ownership via `remove` to avoid cloning string values.
-fn parse_modules(
-    map: &mut serde_json::Map<String, serde_json::Value>,
-) -> Result<HashMap<String, String>, JsValue> {
-    match map.remove("modules") {
-        Some(serde_json::Value::Object(mods)) => {
-            if mods.len() > MAX_MODULE_COUNT {
-                return Err(js_error(
-                    &format!(
-                        "options.modules exceeds maximum module count of {} ({} provided)",
-                        MAX_MODULE_COUNT,
-                        mods.len()
-                    ),
-                    "mds::resource_limit",
-                ));
-            }
+/// Return a human-readable JS value type name for error diagnostics.
+fn js_type_name(v: &JsValue) -> &'static str {
+    if v.is_null() {
+        "null"
+    } else if v.is_undefined() {
+        "undefined"
+    } else if v.as_bool().is_some() {
+        "boolean"
+    } else if v.as_f64().is_some() {
+        "number"
+    } else if v.as_string().is_some() {
+        "string"
+    } else if js_sys::Array::is_array(v) {
+        "array"
+    } else {
+        "object"
+    }
+}
 
-            let mut result = HashMap::with_capacity(mods.len());
-            let mut aggregate_size: usize = 0;
-
-            for (key, val) in mods {
-                match val {
-                    serde_json::Value::String(s) => {
-                        if s.len() > MAX_SOURCE_SIZE {
-                            return Err(js_error(
-                                &format!(
-                                    "options.modules[\"{key}\"] exceeds maximum size of {} bytes ({} bytes provided)",
-                                    MAX_SOURCE_SIZE,
-                                    s.len()
-                                ),
-                                "mds::resource_limit",
-                            ));
-                        }
-                        aggregate_size = aggregate_size.saturating_add(s.len());
-                        if aggregate_size > MAX_MODULES_AGGREGATE_SIZE {
-                            return Err(js_error(
-                                &format!(
-                                    "options.modules aggregate size exceeds maximum of {} bytes",
-                                    MAX_MODULES_AGGREGATE_SIZE
-                                ),
-                                "mds::resource_limit",
-                            ));
-                        }
-                        result.insert(key, s);
-                    }
-                    other => {
-                        return Err(options_error(&format!(
-                            "options.modules[\"{key}\"] must be a string, got {}",
-                            json_type_name(&other)
-                        )));
-                    }
-                }
-            }
-            Ok(result)
-        }
-        None => Ok(HashMap::new()),
-        Some(other) => Err(options_error(&format!(
+/// Extract and validate the `modules` field from the options object.
+///
+/// Deserializes only the modules sub-value via serde_wasm_bindgen for
+/// structured access. Enforces module count and size limits.
+fn extract_modules(obj: &js_sys::Object) -> Result<HashMap<String, String>, JsValue> {
+    let val = get_prop_js(obj, "modules");
+    if val.is_undefined() || val.is_null() {
+        return Ok(HashMap::new());
+    }
+    // Deserialize only the modules sub-object.
+    let modules_json: serde_json::Value = serde_wasm_bindgen::from_value(val)
+        .map_err(|e| options_error(&format!("invalid options.modules: {e}")))?;
+    // Reuse the existing parse_modules logic on the deserialized sub-map.
+    let serde_json::Value::Object(mods_map) = modules_json else {
+        return Err(options_error(&format!(
             "options.modules must be a plain object, got {}",
-            json_type_name(&other)
-        ))),
-    }
+            json_type_name(&modules_json)
+        )));
+    };
+    parse_modules_from_map(mods_map)
 }
 
-/// Extract and validate the `vars` field from the options map.
+/// Parse a modules map (after deserialization) into HashMap<String, String>.
 ///
-/// Takes ownership via `remove` to avoid cloning JSON values.
-fn parse_vars(
-    map: &mut serde_json::Map<String, serde_json::Value>,
-) -> Result<Option<HashMap<String, Value>>, JsValue> {
-    match map.remove("vars") {
-        Some(serde_json::Value::Object(vars_map)) => {
-            let mut result = HashMap::with_capacity(vars_map.len());
-            for (key, val) in vars_map {
-                let mds_val = Value::from_json(val).map_err(mds_error_to_js)?;
-                result.insert(key, mds_val);
-            }
-            Ok(Some(result))
-        }
-        None => Ok(None),
-        Some(other) => Err(options_error(&format!(
-            "options.vars must be a plain object, got {}",
-            json_type_name(&other)
-        ))),
+/// Extracted from the original `parse_modules` to allow reuse by `extract_modules`.
+fn parse_modules_from_map(
+    mods: serde_json::Map<String, serde_json::Value>,
+) -> Result<HashMap<String, String>, JsValue> {
+    if mods.len() > MAX_MODULE_COUNT {
+        return Err(js_error(
+            &format!(
+                "options.modules exceeds maximum module count of {} ({} provided)",
+                MAX_MODULE_COUNT,
+                mods.len()
+            ),
+            "mds::resource_limit",
+        ));
     }
+
+    let mut result = HashMap::with_capacity(mods.len());
+    let mut aggregate_size: usize = 0;
+
+    for (key, val) in mods {
+        match val {
+            serde_json::Value::String(s) => {
+                if s.len() > MAX_SOURCE_SIZE {
+                    return Err(js_error(
+                        &format!(
+                            "options.modules[\"{key}\"] exceeds maximum size of {} bytes ({} bytes provided)",
+                            MAX_SOURCE_SIZE,
+                            s.len()
+                        ),
+                        "mds::resource_limit",
+                    ));
+                }
+                aggregate_size = aggregate_size.saturating_add(s.len());
+                if aggregate_size > MAX_MODULES_AGGREGATE_SIZE {
+                    return Err(js_error(
+                        &format!(
+                            "options.modules aggregate size exceeds maximum of {} bytes",
+                            MAX_MODULES_AGGREGATE_SIZE
+                        ),
+                        "mds::resource_limit",
+                    ));
+                }
+                result.insert(key, s);
+            }
+            other => {
+                return Err(options_error(&format!(
+                    "options.modules[\"{key}\"] must be a string, got {}",
+                    json_type_name(&other)
+                )));
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Extract and validate the `vars` field from the options object.
+///
+/// Deserializes only the vars sub-value via serde_wasm_bindgen, then
+/// delegates to the shared `parse_json_vars` from mds-core.
+fn extract_vars(obj: &js_sys::Object) -> Result<Option<HashMap<String, Value>>, JsValue> {
+    let val = get_prop_js(obj, "vars");
+    if val.is_undefined() || val.is_null() {
+        return Ok(None);
+    }
+    // Deserialize only the vars sub-value.
+    let vars_json: serde_json::Value = serde_wasm_bindgen::from_value(val)
+        .map_err(|e| options_error(&format!("invalid options.vars: {e}")))?;
+    parse_json_vars(vars_json)
+        .map(Some)
+        .map_err(|e| match e {
+            VarsError::InvalidType(msg) => options_error(&msg),
+            VarsError::Conversion(mds_err) => mds_error_to_js(mds_err),
+        })
 }
 
 /// Parse the JS options argument into structured Rust data.
@@ -322,43 +381,25 @@ fn parse_options(options: JsValue) -> Result<ParsedOptions, JsValue> {
         return Ok(ParsedOptions::default());
     }
 
-    // Deserialize options object → serde_json::Value for structured access.
-    let opts_json: serde_json::Value = serde_wasm_bindgen::from_value(options)
-        .map_err(|e| options_error(&format!("invalid options: {e}")))?;
-
-    let serde_json::Value::Object(mut map) = opts_json else {
+    // Reject non-objects (including arrays).
+    if !options.is_object() || js_sys::Array::is_array(&options) {
         return Err(options_error("options must be a plain object"));
-    };
-
-    let filename = parse_filename(&mut map)?;
-    let extra_modules = parse_modules(&mut map)?;
-    let vars = parse_vars(&mut map)?;
-
-    // Reject unrecognised keys so callers catch typos (e.g. `varss` instead of
-    // `vars`) early rather than silently producing unexpected output.
-    if let Some(unknown_key) = map.keys().next() {
-        return Err(options_error(&format!(
-            "unknown option key \"{unknown_key}\"; recognised keys are: filename, modules, vars"
-        )));
     }
+
+    // SAFETY: we verified options.is_object() above.
+    let obj: js_sys::Object = options.unchecked_into();
+
+    reject_unknown_wasm_keys(&obj, &["filename", "modules", "vars"])?;
+
+    let filename = extract_filename(&obj)?;
+    let extra_modules = extract_modules(&obj)?;
+    let vars = extract_vars(&obj)?;
 
     Ok(ParsedOptions {
         filename,
         extra_modules,
         vars,
     })
-}
-
-/// Return a human-readable JSON value type name for error diagnostics.
-fn json_type_name(v: &serde_json::Value) -> &'static str {
-    match v {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "boolean",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    }
 }
 
 /// Build the virtual filesystem module map.
