@@ -82,6 +82,11 @@ pub struct CheckResult {
 /// mechanism for structured errors.
 ///
 /// Returns the raw `napi_value` of the created error object, or null on failure.
+///
+/// # Safety
+///
+/// `env` must be a valid `napi_env` obtained from an active napi callback frame.
+/// The function must be called from within a valid napi callback scope.
 unsafe fn raw_create_error(
     env: sys::napi_env,
     code: &str,
@@ -91,24 +96,39 @@ unsafe fn raw_create_error(
     let mut msg_val: sys::napi_value = ptr::null_mut();
     let mut err_val: sys::napi_value = ptr::null_mut();
 
-    let _ = sys::napi_create_string_utf8(
+    // SAFETY: env is valid, code is a valid UTF-8 str so pointer and length are correct.
+    if sys::napi_create_string_utf8(
         env,
         code.as_ptr().cast(),
         code.len() as isize,
         &mut code_val,
-    );
-    let _ = sys::napi_create_string_utf8(
+    ) != sys::Status::napi_ok
+    {
+        return ptr::null_mut();
+    }
+
+    // SAFETY: env is valid, message is a valid UTF-8 str so pointer and length are correct.
+    if sys::napi_create_string_utf8(
         env,
         message.as_ptr().cast(),
         message.len() as isize,
         &mut msg_val,
-    );
+    ) != sys::Status::napi_ok
+    {
+        return ptr::null_mut();
+    }
+
     let _ = sys::napi_create_error(env, code_val, msg_val, &mut err_val);
 
     err_val
 }
 
 /// Set a string property on a raw JS object using raw N-API.
+///
+/// # Safety
+///
+/// `env` must be a valid `napi_env` obtained from an active napi callback frame.
+/// `obj` must be a valid `napi_value` representing a JS object in the current scope.
 unsafe fn raw_set_string_prop(env: sys::napi_env, obj: sys::napi_value, key: &str, value: &str) {
     let Ok(ckey) = CString::new(key) else { return };
     let mut val: sys::napi_value = ptr::null_mut();
@@ -124,6 +144,11 @@ unsafe fn raw_set_string_prop(env: sys::napi_env, obj: sys::napi_value, key: &st
 }
 
 /// Set a uint32 property on a raw JS object using raw N-API.
+///
+/// # Safety
+///
+/// `env` must be a valid `napi_env` obtained from an active napi callback frame.
+/// `obj` must be a valid `napi_value` representing a JS object in the current scope.
 unsafe fn raw_set_uint32_prop(env: sys::napi_env, obj: sys::napi_value, key: &str, value: u32) {
     let Ok(ckey) = CString::new(key) else { return };
     let mut val: sys::napi_value = ptr::null_mut();
@@ -134,6 +159,34 @@ unsafe fn raw_set_uint32_prop(env: sys::napi_env, obj: sys::napi_value, key: &st
 }
 
 // ── Error conversion helpers ──────────────────────────────────────────────────
+
+/// Build a JS span object `{ offset, length, line?, column? }` from a serialized span.
+///
+/// Returns the `napi_value` for the new object, or `null` if object creation fails.
+///
+/// # Safety
+///
+/// `env` must be a valid `napi_env` obtained from an active napi callback frame.
+/// The caller must be within a valid napi callback scope.
+unsafe fn raw_create_span_obj(
+    env: sys::napi_env,
+    span: &mds::SerializedSpan,
+) -> sys::napi_value {
+    let mut span_obj: sys::napi_value = ptr::null_mut();
+    if sys::napi_create_object(env, &mut span_obj) != sys::Status::napi_ok {
+        return ptr::null_mut();
+    }
+    // Use try_from to make u64→u32 truncation explicit; saturate at u32::MAX.
+    raw_set_uint32_prop(env, span_obj, "offset", u32::try_from(span.offset).unwrap_or(u32::MAX));
+    raw_set_uint32_prop(env, span_obj, "length", u32::try_from(span.length).unwrap_or(u32::MAX));
+    if let Some(line) = span.line {
+        raw_set_uint32_prop(env, span_obj, "line", line as u32);
+    }
+    if let Some(column) = span.column {
+        raw_set_uint32_prop(env, span_obj, "column", column as u32);
+    }
+    span_obj
+}
 
 /// Convert an [`mds::MdsError`] into a thrown JS exception with structured metadata.
 ///
@@ -147,30 +200,23 @@ fn throw_mds_error(env: &Env, err: mds::MdsError) -> napi::Error {
     let serialized = err.serialize();
     let raw_env = env.raw();
 
+    // SAFETY: raw_env is obtained from a valid napi-rs Env that is alive for this
+    // callback invocation. All napi_value handles are created and consumed within
+    // the same callback scope.
     unsafe {
         let err_obj = raw_create_error(raw_env, &serialized.code, &serialized.message);
         if !err_obj.is_null() {
             if let Some(help) = &serialized.help {
                 raw_set_string_prop(raw_env, err_obj, "help", help);
             }
-
             if let Some(span) = &serialized.span {
-                let mut span_obj: sys::napi_value = ptr::null_mut();
-                if sys::napi_create_object(raw_env, &mut span_obj) == sys::Status::napi_ok {
-                    raw_set_uint32_prop(raw_env, span_obj, "offset", span.offset as u32);
-                    raw_set_uint32_prop(raw_env, span_obj, "length", span.length as u32);
-                    if let Some(line) = span.line {
-                        raw_set_uint32_prop(raw_env, span_obj, "line", line as u32);
-                    }
-                    if let Some(column) = span.column {
-                        raw_set_uint32_prop(raw_env, span_obj, "column", column as u32);
-                    }
+                let span_obj = raw_create_span_obj(raw_env, span);
+                if !span_obj.is_null() {
                     if let Ok(ckey) = CString::new("span") {
                         let _ = sys::napi_set_named_property(raw_env, err_obj, ckey.as_ptr(), span_obj);
                     }
                 }
             }
-
             let _ = sys::napi_throw(raw_env, err_obj);
         } else {
             // Fallback: use throw_error (no extra properties but always works).
@@ -194,6 +240,9 @@ fn throw_resource_limit(env: &Env, msg: &str) -> napi::Error {
 /// Create a coded JS Error, throw it, and return `PendingException`.
 fn throw_coded_error(env: &Env, msg: &str, code: &str) -> napi::Error {
     let raw_env = env.raw();
+    // SAFETY: raw_env is obtained from a valid napi-rs Env that is alive for this
+    // callback invocation. All napi_value handles are created and consumed within
+    // the same callback scope.
     unsafe {
         let err_obj = raw_create_error(raw_env, code, msg);
         if !err_obj.is_null() {
@@ -217,22 +266,37 @@ where
         Ok(Err(mds_err)) => Err(throw_mds_error(env, mds_err)),
         Err(payload) => {
             #[cfg(feature = "debug-panics")]
-            let msg = {
+            {
                 let detail = if let Some(s) = payload.downcast_ref::<&str>() {
-                    *s
+                    (*s).to_owned()
                 } else if let Some(s) = payload.downcast_ref::<String>() {
-                    s.as_str()
+                    s.clone()
                 } else {
-                    "unknown panic payload"
+                    "unknown panic payload".to_owned()
                 };
-                format!("internal compiler error (panic): {detail}")
-            };
+                // Match mds-wasm: message is the generic string; detail is a
+                // separate property on the error object so consumers can use
+                // a consistent `err.detail` pattern across both binding layers.
+                let raw_env = env.raw();
+                // SAFETY: raw_env is obtained from a valid napi-rs Env that is alive for
+                // this callback invocation. All napi_value handles are created and consumed
+                // within the same callback scope.
+                let err_obj = unsafe { raw_create_error(raw_env, "mds::internal", "internal compiler error") };
+                if !err_obj.is_null() {
+                    unsafe { raw_set_string_prop(raw_env, err_obj, "detail", &detail) };
+                    unsafe {
+                        let _ = sys::napi_throw(raw_env, err_obj);
+                    }
+                    return Err(napi::Error::new(Status::PendingException, ""));
+                }
+                // Fallback if object creation failed.
+                Err(throw_coded_error(env, "internal compiler error", "mds::internal"))
+            }
             #[cfg(not(feature = "debug-panics"))]
-            let _ = payload;
-            #[cfg(not(feature = "debug-panics"))]
-            let msg = "internal compiler error".to_string();
-
-            Err(throw_coded_error(env, &msg, "mds::internal"))
+            {
+                let _ = payload;
+                Err(throw_coded_error(env, "internal compiler error", "mds::internal"))
+            }
         }
     }
 }
