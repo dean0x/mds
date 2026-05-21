@@ -43,7 +43,7 @@ pub(crate) mod evaluator;
 pub(crate) mod fs;
 pub(crate) mod lexer;
 pub(crate) mod limits;
-pub mod options;
+pub(crate) mod options;
 pub(crate) mod parser;
 pub(crate) mod resolver;
 pub(crate) mod scope;
