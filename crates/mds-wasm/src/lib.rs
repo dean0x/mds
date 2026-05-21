@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 
 use js_sys::Reflect;
-use mds::{Value, json_type_name, parse_json_vars, VarsError};
+use mds::{Value, format_unknown_keys_error, json_type_name, parse_json_vars, VarsError};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -201,32 +201,16 @@ impl Default for ParsedOptions {
 /// returning, so the error message names every offending key at once.
 fn reject_unknown_wasm_keys(obj: &js_sys::Object, known: &[&str]) -> Result<(), JsValue> {
     let key_array = js_sys::Object::keys(obj);
-    let mut unknowns: Vec<String> = Vec::new();
-    for i in 0..key_array.length() {
-        if let Some(k) = key_array.get(i).as_string() {
-            if !known.contains(&k.as_str()) {
-                unknowns.push(k);
-            }
-        }
-    }
-    if unknowns.is_empty() {
+    // Collect owned strings first; as_string() returns Option<String>.
+    let unknown_owned: Vec<String> = (0..key_array.length())
+        .filter_map(|i| key_array.get(i).as_string())
+        .filter(|k| !known.contains(&k.as_str()))
+        .collect();
+    if unknown_owned.is_empty() {
         return Ok(());
     }
-    let recognised = known.join(", ");
-    let msg = if unknowns.len() == 1 {
-        format!(
-            "unknown option key \"{}\"; recognised keys are: {}",
-            unknowns[0], recognised
-        )
-    } else {
-        let listed: Vec<String> = unknowns.iter().map(|k| format!("\"{k}\"")).collect();
-        format!(
-            "unknown option keys: {}; recognised keys are: {}",
-            listed.join(", "),
-            recognised
-        )
-    };
-    Err(options_error(&msg))
+    let unknowns: Vec<&str> = unknown_owned.iter().map(String::as_str).collect();
+    Err(options_error(&format_unknown_keys_error(&unknowns, known)))
 }
 
 /// Get a property from a JS object via Reflect, returning `JsValue::UNDEFINED` on failure.

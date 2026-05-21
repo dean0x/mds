@@ -51,7 +51,10 @@ pub(crate) mod validator;
 pub(crate) mod value;
 
 pub use fs::{FileSystem, NativeFs, VirtualFs};
-pub use options::{json_type_name, parse_json_vars, reject_unknown_json_keys, VarsError};
+pub use options::{
+    format_unknown_keys_error, json_type_name, parse_json_vars, reject_unknown_json_keys,
+    VarsError,
+};
 pub use resolver::ModuleCache;
 
 use std::collections::HashMap;

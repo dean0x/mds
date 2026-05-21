@@ -116,19 +116,50 @@ pub fn parse_json_vars(vars_value: serde_json::Value) -> Result<HashMap<String, 
     Ok(result)
 }
 
+// ── format_unknown_keys_error ─────────────────────────────────────────────────
+
+/// Build the "unknown option key(s)" error message from a list of offending keys.
+///
+/// Shared by [`reject_unknown_json_keys`] in this module and by the NAPI/WASM
+/// binding crates, which collect unknown keys from their own runtime types before
+/// delegating message construction here.
+///
+/// # Format
+///
+/// - Single unknown key:
+///   `unknown option key "foo"; recognised keys are: basePath, vars`
+/// - Multiple unknown keys:
+///   `unknown option keys: "foo", "bar"; recognised keys are: basePath, vars`
+///
+/// # Panics
+///
+/// Panics (in debug builds) if `unknowns` is empty — callers must only call
+/// this when at least one unknown key was found.
+#[must_use]
+pub fn format_unknown_keys_error(unknowns: &[&str], known: &[&str]) -> String {
+    debug_assert!(!unknowns.is_empty(), "called with empty unknowns list");
+    let recognised = known.join(", ");
+    if unknowns.len() == 1 {
+        format!(
+            "unknown option key \"{}\"; recognised keys are: {}",
+            unknowns[0], recognised
+        )
+    } else {
+        let listed: Vec<String> = unknowns.iter().map(|k| format!("\"{k}\"")).collect();
+        format!(
+            "unknown option keys: {}; recognised keys are: {}",
+            listed.join(", "),
+            recognised
+        )
+    }
+}
+
 // ── reject_unknown_json_keys ──────────────────────────────────────────────────
 
 /// Reject any key in `map` that is not in the `known` list.
 ///
 /// Collects **all** unknown keys before returning so that the error message
 /// names every offending key at once, not just the first one encountered.
-///
-/// # Error format
-///
-/// - Single unknown key:
-///   `unknown option key "foo"; recognised keys are: basePath, vars`
-/// - Multiple unknown keys:
-///   `unknown option keys: "foo", "bar"; recognised keys are: basePath, vars`
 ///
 /// Returns `Ok(())` when every key in `map` appears in `known`.
 ///
@@ -158,23 +189,7 @@ pub fn reject_unknown_json_keys(
         return Ok(());
     }
 
-    let recognised = known.join(", ");
-
-    let msg = if unknowns.len() == 1 {
-        format!(
-            "unknown option key \"{}\"; recognised keys are: {}",
-            unknowns[0], recognised
-        )
-    } else {
-        let listed: Vec<String> = unknowns.iter().map(|k| format!("\"{k}\"")).collect();
-        format!(
-            "unknown option keys: {}; recognised keys are: {}",
-            listed.join(", "),
-            recognised
-        )
-    };
-
-    Err(msg)
+    Err(format_unknown_keys_error(&unknowns, known))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

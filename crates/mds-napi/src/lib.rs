@@ -38,7 +38,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::ptr;
 
-use mds::{Value, parse_json_vars, VarsError};
+use mds::{Value, format_unknown_keys_error, parse_json_vars, VarsError};
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::Env;
@@ -367,22 +367,7 @@ fn reject_unknown_napi_keys(
         return Ok(());
     }
 
-    let recognised = known.join(", ");
-    let msg = if unknowns.len() == 1 {
-        format!(
-            "unknown option key \"{}\"; recognised keys are: {}",
-            unknowns[0], recognised
-        )
-    } else {
-        let listed: Vec<String> = unknowns.iter().map(|k| format!("\"{k}\"")).collect();
-        format!(
-            "unknown option keys: {}; recognised keys are: {}",
-            listed.join(", "),
-            recognised
-        )
-    };
-
-    Err(throw_options_error(env, &msg))
+    Err(throw_options_error(env, &format_unknown_keys_error(&unknowns, known)))
 }
 
 /// Extract and validate the `basePath` option using direct property access.
