@@ -625,7 +625,7 @@ fn parse_interpolation_expr(
     let first_dot = content.find('.');
     let first_paren = content.find('(');
     if let (Some(dot_pos), paren_opt) = (first_dot, first_paren) {
-        if paren_opt.map_or(true, |p| dot_pos < p) {
+        if paren_opt.is_none_or(|p| dot_pos < p) {
             return parse_dot_expr(content, dot_pos, offset, len, file, source);
         }
     }
