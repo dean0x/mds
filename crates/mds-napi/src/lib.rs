@@ -359,6 +359,37 @@ fn parse_vars_field(
     }
 }
 
+/// Extract and validate the `basePath` entry from a deserialized options map.
+///
+/// Removes the key from `map` so the caller can detect unknown keys afterward.
+/// Returns `None` for absent or `null` values; errors on empty strings or
+/// non-string types.
+fn extract_base_path(
+    env: &Env,
+    map: &mut serde_json::Map<String, serde_json::Value>,
+) -> napi::Result<Option<PathBuf>> {
+    match map.remove("basePath") {
+        Some(serde_json::Value::String(s)) => {
+            if s.is_empty() {
+                return Err(throw_options_error(
+                    env,
+                    "options.basePath must be a non-empty string",
+                ));
+            }
+            Ok(Some(PathBuf::from(s)))
+        }
+        // null/undefined treated as absent (omitted).
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(other) => Err(throw_options_error(
+            env,
+            &format!(
+                "options.basePath must be a string, got {}",
+                json_type_name(&other)
+            ),
+        )),
+    }
+}
+
 /// Parse options for `compile` and `check` (source-string variants).
 ///
 /// Valid keys: `basePath`, `vars`.
@@ -377,31 +408,7 @@ fn parse_compile_opts(env: &Env, opts: Option<Object>) -> napi::Result<CompileOp
         return Err(throw_options_error(env, "options must be a plain object"));
     };
 
-    // Extract basePath.
-    let base_path = match map.remove("basePath") {
-        Some(serde_json::Value::String(s)) => {
-            if s.is_empty() {
-                return Err(throw_options_error(
-                    env,
-                    "options.basePath must be a non-empty string",
-                ));
-            }
-            Some(PathBuf::from(s))
-        }
-        None => None,
-        // null/undefined treated as None (omitted).
-        Some(serde_json::Value::Null) => None,
-        Some(other) => {
-            return Err(throw_options_error(
-                env,
-                &format!(
-                    "options.basePath must be a string, got {}",
-                    json_type_name(&other)
-                ),
-            ))
-        }
-    };
-
+    let base_path = extract_base_path(env, &mut map)?;
     let vars = parse_vars_field(env, &mut map)?;
 
     // Reject unknown keys so callers catch typos early.
