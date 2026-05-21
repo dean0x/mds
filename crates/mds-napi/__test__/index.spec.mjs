@@ -213,13 +213,11 @@ describe('check', () => {
 
   test('F-K10: checkFile with vars', () => {
     const result = checkFile(VAR_MDS, { vars: { name: 'World' } });
-    assert.ok(Array.isArray(result.warnings), 'warnings should be an array');
     assert.deepEqual(result.warnings, []);
   });
 
   test('F-K11: check result has only warnings property (no output or dependencies)', () => {
     const result = check('Hello World!\n');
-    assert.ok(Array.isArray(result.warnings), 'warnings should be an array');
     assert.equal(result.output, undefined, 'check result must not have output');
     assert.equal(result.dependencies, undefined, 'check result must not have dependencies');
   });

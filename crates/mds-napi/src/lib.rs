@@ -96,7 +96,6 @@ unsafe fn raw_create_error(
     let mut msg_val: sys::napi_value = ptr::null_mut();
     let mut err_val: sys::napi_value = ptr::null_mut();
 
-    // SAFETY: env is valid, code is a valid UTF-8 str so pointer and length are correct.
     if sys::napi_create_string_utf8(
         env,
         code.as_ptr().cast(),
@@ -107,7 +106,6 @@ unsafe fn raw_create_error(
         return ptr::null_mut();
     }
 
-    // SAFETY: env is valid, message is a valid UTF-8 str so pointer and length are correct.
     if sys::napi_create_string_utf8(
         env,
         message.as_ptr().cast(),
@@ -118,7 +116,9 @@ unsafe fn raw_create_error(
         return ptr::null_mut();
     }
 
-    let _ = sys::napi_create_error(env, code_val, msg_val, &mut err_val);
+    if sys::napi_create_error(env, code_val, msg_val, &mut err_val) != sys::Status::napi_ok {
+        return ptr::null_mut();
+    }
 
     err_val
 }
@@ -176,14 +176,14 @@ unsafe fn raw_create_span_obj(
     if sys::napi_create_object(env, &mut span_obj) != sys::Status::napi_ok {
         return ptr::null_mut();
     }
-    // Use try_from to make u64→u32 truncation explicit; saturate at u32::MAX.
+    // Use try_from to make usize→u32 truncation explicit; saturate at u32::MAX.
     raw_set_uint32_prop(env, span_obj, "offset", u32::try_from(span.offset).unwrap_or(u32::MAX));
     raw_set_uint32_prop(env, span_obj, "length", u32::try_from(span.length).unwrap_or(u32::MAX));
     if let Some(line) = span.line {
-        raw_set_uint32_prop(env, span_obj, "line", line as u32);
+        raw_set_uint32_prop(env, span_obj, "line", u32::try_from(line).unwrap_or(u32::MAX));
     }
     if let Some(column) = span.column {
-        raw_set_uint32_prop(env, span_obj, "column", column as u32);
+        raw_set_uint32_prop(env, span_obj, "column", u32::try_from(column).unwrap_or(u32::MAX));
     }
     span_obj
 }
@@ -281,13 +281,13 @@ where
                 // SAFETY: raw_env is obtained from a valid napi-rs Env that is alive for
                 // this callback invocation. All napi_value handles are created and consumed
                 // within the same callback scope.
-                let err_obj = unsafe { raw_create_error(raw_env, "mds::internal", "internal compiler error") };
-                if !err_obj.is_null() {
-                    unsafe { raw_set_string_prop(raw_env, err_obj, "detail", &detail) };
-                    unsafe {
+                unsafe {
+                    let err_obj = raw_create_error(raw_env, "mds::internal", "internal compiler error");
+                    if !err_obj.is_null() {
+                        raw_set_string_prop(raw_env, err_obj, "detail", &detail);
                         let _ = sys::napi_throw(raw_env, err_obj);
+                        return Err(napi::Error::new(Status::PendingException, ""));
                     }
-                    return Err(napi::Error::new(Status::PendingException, ""));
                 }
                 // Fallback if object creation failed.
                 Err(throw_coded_error(env, "internal compiler error", "mds::internal"))
