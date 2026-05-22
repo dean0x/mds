@@ -6,6 +6,7 @@ import type {
   FileOptions,
   MdsBackend,
 } from '../types.js';
+import { varsOpt } from '../util/options.js';
 
 /**
  * Shape of the napi addon exports.
@@ -17,10 +18,6 @@ interface NapiAddon {
   check(source: string, opts?: { basePath?: string; vars?: Record<string, unknown> }): CheckResult;
   compileFile(path: string, opts?: { vars?: Record<string, unknown> }): CompileResult;
   checkFile(path: string, opts?: { vars?: Record<string, unknown> }): CheckResult;
-}
-
-function varsOpt(options?: CompileOptions | FileOptions): { vars: Record<string, unknown> } | undefined {
-  return options?.vars !== undefined ? { vars: options.vars } : undefined;
 }
 
 /**

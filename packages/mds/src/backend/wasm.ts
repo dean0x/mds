@@ -13,6 +13,7 @@ import {
   DEFAULT_MAX_AGGREGATE_SIZE,
   type BuildModulesMapResult,
 } from '../util/module-scanner.js';
+import { varsOpt } from '../util/options.js';
 
 /**
  * Shape of the WASM module exports (built with --target nodejs).
@@ -104,10 +105,6 @@ function assertInitialized(): WasmModule {
     );
   }
   return wasmModule;
-}
-
-function varsOpt(options?: CompileOptions | FileOptions): { vars: Record<string, unknown> } | undefined {
-  return options?.vars !== undefined ? { vars: options.vars } : undefined;
 }
 
 async function buildFileModules(wasm: WasmModule, path: string): Promise<BuildModulesMapResult> {

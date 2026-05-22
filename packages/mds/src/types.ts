@@ -44,5 +44,9 @@ export interface MdsBackend {
 }
 
 export function isMdsError(err: unknown): err is MdsError {
-  return err instanceof Error && typeof (err as MdsError).code === 'string';
+  return (
+    err instanceof Error &&
+    typeof (err as MdsError).code === 'string' &&
+    (err as MdsError).code.startsWith('mds::')
+  );
 }
