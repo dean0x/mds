@@ -2,6 +2,7 @@ import { readFile, lstat, realpath } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 
 const MAX_PATH_SEGMENTS = 256;
+const MAX_IMPORT_DEPTH = 64;
 export const DEFAULT_MAX_MODULES = 256;
 export const DEFAULT_MAX_AGGREGATE_SIZE = 10 * 1024 * 1024; // 10 MiB
 
@@ -13,6 +14,23 @@ export interface ModuleScannerOptions {
 export interface BuildModulesMapResult {
   entryFilename: string;
   modules: Record<string, string>;
+}
+
+/**
+ * Normalize the root entry-point key (base is empty).
+ *
+ * The path is used as-is; only the segment count is validated.
+ * Extracted from normalizeVirtualKey to reduce its cyclomatic complexity.
+ */
+function normalizeRootKey(relative: string): string {
+  const segmentCount = relative
+    .split('/')
+    .filter((s) => s.length > 0 && s !== '.')
+    .length;
+  if (segmentCount > MAX_PATH_SEGMENTS) {
+    throw new Error(`import path exceeds maximum segment count of ${MAX_PATH_SEGMENTS}`);
+  }
+  return relative;
 }
 
 /**
@@ -33,14 +51,7 @@ export function normalizeVirtualKey(base: string, relative: string): string {
 
   if (base.length === 0) {
     // Root entry point — use key as-is, but still enforce the segment limit.
-    const segmentCount = relative
-      .split('/')
-      .filter((s) => s.length > 0 && s !== '.')
-      .length;
-    if (segmentCount > MAX_PATH_SEGMENTS) {
-      throw new Error(`import path exceeds maximum segment count of ${MAX_PATH_SEGMENTS}`);
-    }
-    return relative;
+    return normalizeRootKey(relative);
   }
 
   // Resolve relative to the directory portion of base (split on '/').
@@ -132,7 +143,16 @@ export async function buildModulesMap(
     return childAbsolute;
   }
 
-  async function scan(absolutePath: string, virtualKey: string): Promise<void> {
+  async function scan(absolutePath: string, virtualKey: string, depth: number = 0): Promise<void> {
+    // Reliability: bound recursion depth explicitly — maxModules limits total
+    // nodes but not stack frames; a linear chain of 256 imports would create
+    // 256 frames without this guard.
+    if (depth > MAX_IMPORT_DEPTH) {
+      throw new Error(
+        `resource limit: import chain depth exceeds maximum of ${MAX_IMPORT_DEPTH}`,
+      );
+    }
+
     if (visited.has(absolutePath)) {
       return;
     }
@@ -146,16 +166,21 @@ export async function buildModulesMap(
       );
     }
 
+    // Security: run lstat and realpath concurrently — both are metadata reads
+    // with no ordering dependency between them.
+    const [stats, resolved] = await Promise.all([
+      lstat(absolutePath),
+      realpath(absolutePath),
+    ]);
+
     // Security: reject symlinks. Use lstat so we inspect the path itself, not
     // its target. Then compare the real path to detect TOCTOU swaps.
-    const stats = await lstat(absolutePath);
     if (stats.isSymbolicLink()) {
       throw new Error(`security: symlink detected at ${absolutePath} — symlinks are not allowed`);
     }
 
     // Security: TOCTOU — verify the path was not swapped for a symlink between
     // lstat and readFile by comparing the real path to the expected path.
-    const resolved = await realpath(absolutePath);
     if (resolved !== absolutePath) {
       throw new Error(
         `security: path ${absolutePath} resolved to unexpected location ${resolved} — possible symlink swap`,
@@ -195,7 +220,7 @@ export async function buildModulesMap(
         // Compute virtual key using normalizeVirtualKey to mirror Rust's VirtualFs::normalize().
         const childVirtualKey = normalizeVirtualKey(virtualKey, importPath);
 
-        await scan(childAbsolute, childVirtualKey);
+        await scan(childAbsolute, childVirtualKey, depth + 1);
       }),
     );
   }
