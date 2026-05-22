@@ -20,7 +20,7 @@ describe('compileFile', () => {
     const result = await compileFile(IMPORT_CONSUMER_MDS);
     assert.ok(result.output.includes('Hello World!'), `expected "Hello World!" in: ${result.output}`);
     // import_consumer imports import_provider
-    assert.ok(result.dependencies.length >= 0, 'dependencies may include imported files');
+    assert.ok(result.dependencies.length >= 1, 'expected at least 1 dependency for file with imports');
   });
 
   test('U-CF3: compile file with deep import chain', async () => {

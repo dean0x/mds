@@ -1,10 +1,15 @@
 /**
  * Backend selection tests for @mds/mds universal package.
- * Tests: U-B1 through U-B4
+ * Tests: U-B1 through U-B5
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { getBackend, compile } from '../dist/node.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 describe('backend', () => {
   test('U-B1: getBackend() returns "native" or "wasm"', () => {
@@ -33,5 +38,18 @@ describe('backend', () => {
     assert.ok(typeof result.output === 'string', 'output must be string');
     assert.ok(Array.isArray(result.warnings), 'warnings must be array');
     assert.ok(Array.isArray(result.dependencies), 'dependencies must be array');
+  });
+
+  test('U-B5: MDS_BACKEND=wasm forces WASM backend', () => {
+    // Spawn a subprocess with MDS_BACKEND=wasm to test backend selection
+    // without affecting the current process's already-resolved backend.
+    const script = path.join(__dirname, 'backend-wasm-helper.mjs');
+    const output = execFileSync(process.execPath, ['--input-type=module'], {
+      input: `import { getBackend } from '../dist/node.js';\nconsole.log(getBackend());\n`,
+      cwd: __dirname,
+      env: { ...process.env, MDS_BACKEND: 'wasm' },
+      encoding: 'utf8',
+    });
+    assert.equal(output.trim(), 'wasm', `expected WASM backend when MDS_BACKEND=wasm, got: ${output.trim()}`);
   });
 });

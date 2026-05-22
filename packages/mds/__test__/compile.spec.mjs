@@ -1,6 +1,6 @@
 /**
  * Core compile() tests for @mds/mds universal package.
- * Tests: U-C1 through U-C6
+ * Tests: U-C1 through U-C9
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -51,5 +51,20 @@ describe('compile', () => {
   test('U-C6: compile returns empty dependencies when no imports', () => {
     const result = compile('Hello World!\n');
     assert.deepEqual(result.dependencies, []);
+  });
+
+  test('U-C7: compile with null vars does not throw', () => {
+    // null vars should be treated as no vars (not a crash)
+    assert.doesNotThrow(() => compile('Hello World!\n', { vars: null }));
+  });
+
+  test('U-C8: compile with undefined vars does not throw', () => {
+    const result = compile('Hello World!\n', { vars: undefined });
+    assert.equal(result.output, 'Hello World!\n');
+  });
+
+  test('U-C9: compile with empty vars object does not throw', () => {
+    const result = compile('Hello World!\n', { vars: {} });
+    assert.equal(result.output, 'Hello World!\n');
   });
 });
