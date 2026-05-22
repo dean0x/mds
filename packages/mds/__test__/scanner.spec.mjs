@@ -9,7 +9,6 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { createRequire } from 'node:module';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -18,8 +17,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const { normalizeVirtualKey, buildModulesMap } = await import('../dist/util/module-scanner.js');
 
 const FIXTURES = path.join(__dirname, 'fixtures');
-const require = createRequire(import.meta.url);
-const napiAddon = require(path.join(__dirname, '../../..', 'crates/mds-napi/mds-napi.node'));
 
 // A minimal scanImports implementation using the napi addon.
 function scanImports(source) {

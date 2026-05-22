@@ -6,7 +6,6 @@ import type {
   CompileOptions,
   FileOptions,
 } from './types.js';
-import { isMdsError } from './types.js';
 
 const forceBackend = process.env['MDS_BACKEND'] as BackendType | undefined;
 

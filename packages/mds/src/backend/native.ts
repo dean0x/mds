@@ -19,6 +19,10 @@ interface NapiAddon {
   checkFile(path: string, opts?: { vars?: Record<string, unknown> }): CheckResult;
 }
 
+function varsOpt(options?: CompileOptions | FileOptions): { vars: Record<string, unknown> } | undefined {
+  return options?.vars !== undefined ? { vars: options.vars } : undefined;
+}
+
 /**
  * Create a native (napi) backend adapter from an injected addon.
  *
@@ -28,31 +32,19 @@ interface NapiAddon {
 export function createNativeBackend(addon: NapiAddon): MdsBackend {
   return {
     compile(source: string, options?: CompileOptions): CompileResult {
-      return addon.compile(source, options?.vars !== undefined ? { vars: options.vars } : undefined);
+      return addon.compile(source, varsOpt(options));
     },
 
     check(source: string, options?: CompileOptions): CheckResult {
-      return addon.check(source, options?.vars !== undefined ? { vars: options.vars } : undefined);
+      return addon.check(source, varsOpt(options));
     },
 
-    compileFile(path: string, options?: FileOptions): Promise<CompileResult> {
-      try {
-        return Promise.resolve(
-          addon.compileFile(path, options?.vars !== undefined ? { vars: options.vars } : undefined),
-        );
-      } catch (err) {
-        return Promise.reject(err);
-      }
+    async compileFile(path: string, options?: FileOptions): Promise<CompileResult> {
+      return addon.compileFile(path, varsOpt(options));
     },
 
-    checkFile(path: string, options?: FileOptions): Promise<CheckResult> {
-      try {
-        return Promise.resolve(
-          addon.checkFile(path, options?.vars !== undefined ? { vars: options.vars } : undefined),
-        );
-      } catch (err) {
-        return Promise.reject(err);
-      }
+    async checkFile(path: string, options?: FileOptions): Promise<CheckResult> {
+      return addon.checkFile(path, varsOpt(options));
     },
 
     getBackend(): BackendType {

@@ -751,28 +751,19 @@ pub fn scan_imports(source: &str) -> Result<Vec<String>, MdsError> {
 
     for node in &module.body {
         match node {
-            ast::Node::Import(directive) => match directive {
-                ast::ImportDirective::Alias { path, .. } => {
-                    paths.insert(path.clone());
-                }
-                ast::ImportDirective::Merge { path, .. } => {
-                    paths.insert(path.clone());
-                }
-                ast::ImportDirective::Selective { path, .. } => {
-                    paths.insert(path.clone());
-                }
-            },
-            ast::Node::Export(directive) => match directive {
-                ast::ExportDirective::ReExport { path, .. } => {
-                    paths.insert(path.clone());
-                }
-                ast::ExportDirective::Wildcard { path } => {
-                    paths.insert(path.clone());
-                }
-                ast::ExportDirective::Named { .. } => {
-                    // No path — local export only, skip.
-                }
-            },
+            ast::Node::Import(
+                ast::ImportDirective::Alias { path, .. }
+                | ast::ImportDirective::Merge { path, .. }
+                | ast::ImportDirective::Selective { path, .. },
+            ) => {
+                paths.insert(path.clone());
+            }
+            ast::Node::Export(
+                ast::ExportDirective::ReExport { path, .. }
+                | ast::ExportDirective::Wildcard { path },
+            ) => {
+                paths.insert(path.clone());
+            }
             _ => {}
         }
     }

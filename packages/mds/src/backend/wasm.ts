@@ -8,6 +8,10 @@ import type {
   MdsBackend,
 } from '../types.js';
 
+// Must match DEFAULT_MAX_MODULES and DEFAULT_MAX_AGGREGATE_SIZE in module-scanner.ts.
+const WASM_MAX_MODULES = 256;
+const WASM_MAX_AGGREGATE_SIZE = 10 * 1024 * 1024; // 10 MiB
+
 /**
  * Shape of the WASM module exports (built with --target nodejs).
  * The WASM module exports compile(source, options) and check(source, options).
@@ -29,12 +33,19 @@ let initPromise: Promise<void> | null = null;
  *
  * Must be called before compile/check in browser environments.
  * In Node.js environments loaded via node.ts, this is called automatically.
+ *
+ * Concurrent calls share the same init promise. If init fails, the cached
+ * promise is cleared so subsequent calls can retry.
  */
 export async function init(options?: InitOptions): Promise<void> {
   if (initPromise !== null) {
     return initPromise;
   }
-  initPromise = _init(options);
+  initPromise = _init(options).catch((err) => {
+    // Reset so a subsequent call can retry after a transient failure.
+    initPromise = null;
+    throw err;
+  });
   return initPromise;
 }
 
@@ -84,6 +95,19 @@ function assertInitialized(): WasmModule {
   return wasmModule;
 }
 
+function varsOpt(options?: CompileOptions | FileOptions): { vars: Record<string, unknown> } | undefined {
+  return options?.vars !== undefined ? { vars: options.vars } : undefined;
+}
+
+async function buildFileModules(wasm: WasmModule, path: string) {
+  const { buildModulesMap } = await import('../util/module-scanner.js');
+  return buildModulesMap(
+    path,
+    (source) => wasm.scanImports(source),
+    { maxModules: WASM_MAX_MODULES, maxAggregateSize: WASM_MAX_AGGREGATE_SIZE },
+  );
+}
+
 /**
  * Create a WASM backend instance. Calls init() internally.
  */
@@ -92,49 +116,31 @@ export async function createWasmBackend(): Promise<MdsBackend> {
   return {
     compile(source: string, options?: CompileOptions): CompileResult {
       const wasm = assertInitialized();
-      return wasm.compile(source, {
-        filename: 'input.mds',
-        modules: {},
-        ...(options?.vars !== undefined ? { vars: options.vars } : {}),
-      });
+      return wasm.compile(source, { filename: 'input.mds', modules: {}, ...varsOpt(options) });
     },
 
     check(source: string, options?: CompileOptions): CheckResult {
       const wasm = assertInitialized();
-      return wasm.check(source, {
-        filename: 'input.mds',
-        modules: {},
-        ...(options?.vars !== undefined ? { vars: options.vars } : {}),
-      });
+      return wasm.check(source, { filename: 'input.mds', modules: {}, ...varsOpt(options) });
     },
 
     async compileFile(path: string, options?: FileOptions): Promise<CompileResult> {
       const wasm = assertInitialized();
-      const { buildModulesMap } = await import('../util/module-scanner.js');
-      const { entryFilename, modules } = await buildModulesMap(
-        path,
-        (source) => wasm.scanImports(source),
-        { maxModules: 256, maxAggregateSize: 10 * 1024 * 1024 },
-      );
+      const { entryFilename, modules } = await buildFileModules(wasm, path);
       return wasm.compile(modules[entryFilename] ?? '', {
         filename: entryFilename,
         modules,
-        ...(options?.vars !== undefined ? { vars: options.vars } : {}),
+        ...varsOpt(options),
       });
     },
 
     async checkFile(path: string, options?: FileOptions): Promise<CheckResult> {
       const wasm = assertInitialized();
-      const { buildModulesMap } = await import('../util/module-scanner.js');
-      const { entryFilename, modules } = await buildModulesMap(
-        path,
-        (source) => wasm.scanImports(source),
-        { maxModules: 256, maxAggregateSize: 10 * 1024 * 1024 },
-      );
+      const { entryFilename, modules } = await buildFileModules(wasm, path);
       return wasm.check(modules[entryFilename] ?? '', {
         filename: entryFilename,
         modules,
-        ...(options?.vars !== undefined ? { vars: options.vars } : {}),
+        ...varsOpt(options),
       });
     },
 

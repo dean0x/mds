@@ -5,6 +5,7 @@ import type {
   CompileResult,
   FileOptions,
   InitOptions,
+  MdsBackend,
 } from './types.js';
 import { init as wasmInit } from './backend/wasm.js';
 
@@ -20,20 +21,33 @@ export type {
   InitOptions,
 } from './types.js';
 
-// Import WASM module lazily — wasm.ts holds the singleton.
-import type { MdsBackend } from './types.js';
-
 let _backend: MdsBackend | undefined;
+// Promise cached synchronously to prevent double-init race when
+// multiple callers invoke init() concurrently.
+let _initPromise: Promise<void> | null = null;
 
 /**
  * Initialize the WASM backend. Must be called before compile/check in browser environments.
- * Idempotent — safe to call multiple times.
+ * Idempotent — safe to call multiple times. Concurrent calls share the same init promise.
  */
 export async function init(options?: InitOptions): Promise<void> {
   if (_backend !== undefined) return;
-  await wasmInit(options);
-  const { createWasmBackend } = await import('./backend/wasm.js');
-  _backend = await createWasmBackend();
+  if (_initPromise !== null) return _initPromise;
+  _initPromise = _doInit(options);
+  return _initPromise;
+}
+
+async function _doInit(options?: InitOptions): Promise<void> {
+  try {
+    // wasmInit populates the singleton with options (e.g. wasmUrl) before createWasmBackend reads it.
+    await wasmInit(options);
+    const { createWasmBackend } = await import('./backend/wasm.js');
+    _backend = await createWasmBackend();
+  } catch (err) {
+    // Reset so a subsequent call can retry after a transient failure.
+    _initPromise = null;
+    throw err;
+  }
 }
 
 function assertInitialized(): MdsBackend {
