@@ -59,7 +59,7 @@ async function _init(options?: InitOptions): Promise<void> {
   // Fallback paths for different install scenarios.
   const candidates = [
     // Workspace: pkg is built next to mds-wasm crate
-    new URL('../../../../../crates/mds-wasm/pkg/mds_wasm.js', import.meta.url).pathname,
+    new URL('../../../../crates/mds-wasm/pkg/mds_wasm.js', import.meta.url).pathname,
     // npm install scenario: mds-wasm might be a separate package
     'mds-wasm',
   ];
