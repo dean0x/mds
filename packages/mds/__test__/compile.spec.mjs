@@ -4,7 +4,6 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { SIMPLE_MDS, FIXTURES } from './helpers.mjs';
 import { compile, isMdsError } from '../dist/node.js';
 
 describe('compile', () => {
@@ -29,12 +28,13 @@ describe('compile', () => {
     assert.equal(result.output, 'Hello World!\n');
   });
 
-  test('U-C4: compile returns warnings for empty @include', () => {
-    // Empty include does not fail, but emits a warning.
+  test('U-C4: compile with frontmatter returns string output and array warnings', () => {
+    // Verify the result shape when source contains a frontmatter block.
     const source = '---\nname: Test\n---\nHello!\n';
     const result = compile(source);
     assert.equal(typeof result.output, 'string');
     assert.ok(Array.isArray(result.warnings));
+    assert.ok(Array.isArray(result.dependencies));
   });
 
   test('U-C5: compile syntax error throws MdsError with code', () => {

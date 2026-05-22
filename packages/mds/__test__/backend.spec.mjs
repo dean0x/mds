@@ -43,7 +43,6 @@ describe('backend', () => {
   test('U-B5: MDS_BACKEND=wasm forces WASM backend', () => {
     // Spawn a subprocess with MDS_BACKEND=wasm to test backend selection
     // without affecting the current process's already-resolved backend.
-    const script = path.join(__dirname, 'backend-wasm-helper.mjs');
     const output = execFileSync(process.execPath, ['--input-type=module'], {
       input: `import { getBackend } from '../dist/node.js';\nconsole.log(getBackend());\n`,
       cwd: __dirname,

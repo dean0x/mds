@@ -32,7 +32,9 @@ export interface MdsErrorSpan {
   offset: number;
   /** Byte length of the error span. */
   length: number;
+  /** 1-based line number of the error, if available. */
   line?: number;
+  /** 1-based column number of the error, if available. */
   column?: number;
 }
 

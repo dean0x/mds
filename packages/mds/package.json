@@ -24,10 +24,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "node --test __test__/*.spec.mjs",
-    "test:parity": "node --test __test__/parity.spec.mjs",
+    "test:native": "node --test __test__/native-backend.spec.mjs",
     "test:perf": "node --test __test__/perf.spec.mjs"
   },
-  "dependencies": {
+  "optionalDependencies": {
     "mds-napi": "file:../../crates/mds-napi"
   },
   "devDependencies": {

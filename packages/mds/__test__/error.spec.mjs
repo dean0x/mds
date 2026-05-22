@@ -46,6 +46,14 @@ describe('error shape', () => {
     assert.equal(isMdsError(42), false);
   });
 
+  test('U-E5b: isMdsError returns false for errors with non-mds:: code', () => {
+    // isMdsError requires code.startsWith('mds::'); a system error code like
+    // 'ENOENT' must not be mistaken for an MDS compiler error.
+    const err = new Error('file not found');
+    err.code = 'ENOENT';
+    assert.equal(isMdsError(err), false);
+  });
+
   test('U-E6: check syntax error has code property', () => {
     try {
       check('Hello {name\n');

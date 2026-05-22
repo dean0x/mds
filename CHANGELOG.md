@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`isMdsError()` stricter identification** — the function now requires the `code` property to start with `"mds::"` in addition to being an `Error` instance with a string `code`. Consumers who previously created synthetic error objects with arbitrary `code` strings and relied on `isMdsError()` returning `true` must prefix their codes with `"mds::"` or use a separate check.
+
 ### Added
 
 - **`@mds/mds` npm package** — universal JavaScript/TypeScript bindings for the MDS compiler

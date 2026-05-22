@@ -80,7 +80,7 @@ try {
     console.error(err.code);    // e.g. "mds::undefined_variable"
     console.error(err.message);
     console.error(err.help);    // optional guidance string
-    console.error(err.span);    // optional { offset, length, line, col }
+    console.error(err.span);    // optional { offset, length, line, column }
   } else {
     throw err;
   }
