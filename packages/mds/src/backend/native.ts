@@ -36,15 +36,23 @@ export function createNativeBackend(addon: NapiAddon): MdsBackend {
     },
 
     compileFile(path: string, options?: FileOptions): Promise<CompileResult> {
-      return Promise.resolve(
-        addon.compileFile(path, options?.vars !== undefined ? { vars: options.vars } : undefined),
-      );
+      try {
+        return Promise.resolve(
+          addon.compileFile(path, options?.vars !== undefined ? { vars: options.vars } : undefined),
+        );
+      } catch (err) {
+        return Promise.reject(err);
+      }
     },
 
     checkFile(path: string, options?: FileOptions): Promise<CheckResult> {
-      return Promise.resolve(
-        addon.checkFile(path, options?.vars !== undefined ? { vars: options.vars } : undefined),
-      );
+      try {
+        return Promise.resolve(
+          addon.checkFile(path, options?.vars !== undefined ? { vars: options.vars } : undefined),
+        );
+      } catch (err) {
+        return Promise.reject(err);
+      }
     },
 
     getBackend(): BackendType {
