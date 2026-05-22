@@ -1,0 +1,174 @@
+import { readFile, lstat } from 'node:fs/promises';
+import { resolve, dirname, basename } from 'node:path';
+
+const MAX_PATH_SEGMENTS = 256;
+const DEFAULT_MAX_MODULES = 256;
+const DEFAULT_MAX_AGGREGATE_SIZE = 10 * 1024 * 1024; // 10 MiB
+
+export interface ModuleScannerOptions {
+  maxModules?: number;
+  maxAggregateSize?: number;
+}
+
+export interface BuildModulesMapResult {
+  entryFilename: string;
+  modules: Record<string, string>;
+}
+
+/**
+ * Normalize a virtual module key the same way VirtualFs::normalize() does in Rust.
+ *
+ * Given a base key (the key of the importing module) and a relative import path,
+ * resolve the import path to a canonical slash-separated key.
+ *
+ * MUST exactly mirror the Rust implementation to ensure import resolution matches.
+ */
+export function normalizeVirtualKey(base: string, relative: string): string {
+  if (relative.length === 0) {
+    throw new Error('import path is empty');
+  }
+  if (relative.includes('\0')) {
+    throw new Error('import path contains null byte');
+  }
+
+  if (base.length === 0) {
+    // Root entry point — use key as-is, but still enforce the segment limit.
+    const segmentCount = relative
+      .split('/')
+      .filter((s) => s.length > 0 && s !== '.')
+      .length;
+    if (segmentCount > MAX_PATH_SEGMENTS) {
+      throw new Error(`import path exceeds maximum segment count of ${MAX_PATH_SEGMENTS}`);
+    }
+    return relative;
+  }
+
+  // Resolve relative to the directory portion of base (split on '/').
+  const lastSlash = base.lastIndexOf('/');
+  const baseDir = lastSlash >= 0 ? base.slice(0, lastSlash) : '';
+  const baseDirSegments: string[] = baseDir.length > 0
+    ? baseDir.split('/').filter((s) => s.length > 0)
+    : [];
+
+  const segments: string[] = [...baseDirSegments];
+
+  for (const part of relative.split('/')) {
+    if (part === '' || part === '.') {
+      // skip
+    } else if (part === '..') {
+      if (segments.length === 0) {
+        throw new Error('import path escapes project directory');
+      }
+      segments.pop();
+    } else {
+      if (segments.length >= MAX_PATH_SEGMENTS) {
+        throw new Error(`import path exceeds maximum segment count of ${MAX_PATH_SEGMENTS}`);
+      }
+      segments.push(part);
+    }
+  }
+
+  if (segments.length === 0) {
+    throw new Error('import path resolves to empty key');
+  }
+
+  return segments.join('/');
+}
+
+/**
+ * Recursively resolve an MDS file and all its imports into a flat modules map
+ * suitable for passing to the WASM compile/check functions.
+ *
+ * Security checks performed:
+ * - Rejects symlinks (lstat check)
+ * - Rejects paths that escape the project root (entry file's directory)
+ * - Rejects paths with null bytes or empty segments
+ * - Enforces module count and aggregate size limits
+ */
+export async function buildModulesMap(
+  entryPath: string,
+  scanImports: (source: string) => string[],
+  options?: ModuleScannerOptions,
+): Promise<BuildModulesMapResult> {
+  const maxModules = options?.maxModules ?? DEFAULT_MAX_MODULES;
+  const maxAggregateSize = options?.maxAggregateSize ?? DEFAULT_MAX_AGGREGATE_SIZE;
+
+  const absoluteEntry = resolve(entryPath);
+  const projectRoot = dirname(absoluteEntry);
+  const entryFilename = basename(absoluteEntry);
+
+  const modules: Record<string, string> = {};
+  const visited = new Set<string>();
+  let aggregateSize = 0;
+
+  async function scan(absolutePath: string, virtualKey: string): Promise<void> {
+    if (visited.has(absolutePath)) {
+      return;
+    }
+    visited.add(absolutePath);
+
+    // Security: reject symlinks.
+    const stats = await lstat(absolutePath);
+    if (stats.isSymbolicLink()) {
+      throw new Error(`security: symlink detected at ${absolutePath} — symlinks are not allowed`);
+    }
+
+    // Security: verify resolved path is within project root.
+    if (!absolutePath.startsWith(projectRoot + '/') && absolutePath !== projectRoot) {
+      throw new Error(
+        `security: path escapes project root: ${absolutePath} is outside ${projectRoot}`,
+      );
+    }
+
+    const content = await readFile(absolutePath, 'utf-8');
+
+    aggregateSize += content.length;
+    if (aggregateSize > maxAggregateSize) {
+      throw new Error(
+        `resource limit: aggregate module size exceeds maximum of ${maxAggregateSize} bytes`,
+      );
+    }
+
+    if (Object.keys(modules).length >= maxModules) {
+      throw new Error(
+        `resource limit: module count exceeds maximum of ${maxModules}`,
+      );
+    }
+
+    modules[virtualKey] = content;
+
+    const importPaths = scanImports(content);
+    const absoluteDir = dirname(absolutePath);
+
+    // Parallelize child reads at each level.
+    await Promise.all(
+      importPaths.map(async (importPath) => {
+        // Security: reject null bytes and empty paths.
+        if (importPath.includes('\0')) {
+          throw new Error('security: import path contains null byte');
+        }
+        if (importPath.trim().length === 0) {
+          throw new Error('security: import path is empty');
+        }
+
+        const childAbsolute = resolve(absoluteDir, importPath);
+
+        // Security: verify child is within project root.
+        if (!childAbsolute.startsWith(projectRoot + '/') && childAbsolute !== projectRoot) {
+          throw new Error(
+            `security: import path escapes project root: ${childAbsolute} is outside ${projectRoot}`,
+          );
+        }
+
+        // Compute virtual key using normalizeVirtualKey to mirror Rust's VirtualFs::normalize().
+        const childVirtualKey = normalizeVirtualKey(virtualKey, importPath);
+
+        await scan(childAbsolute, childVirtualKey);
+      }),
+    );
+  }
+
+  await scan(absoluteEntry, entryFilename);
+
+  return { entryFilename, modules };
+}

@@ -2,14 +2,25 @@
   "name": "@mds/mds",
   "version": "0.1.0",
   "type": "module",
-  "engines": { "node": ">=22.0.0" },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "exports": {
     ".": {
-      "node": { "types": "./dist/node.d.ts", "import": "./dist/node.js" },
-      "default": { "types": "./dist/browser.d.ts", "import": "./dist/browser.js" }
+      "node": {
+        "types": "./dist/node.d.ts",
+        "import": "./dist/node.js"
+      },
+      "default": {
+        "types": "./dist/browser.d.ts",
+        "import": "./dist/browser.js"
+      }
     }
   },
-  "files": ["dist/", "wasm/"],
+  "files": [
+    "dist/",
+    "wasm/"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "node --test __test__/*.spec.mjs",
@@ -20,6 +31,7 @@
     "mds-napi": "file:../../crates/mds-napi"
   },
   "devDependencies": {
+    "@types/node": "^25.9.1",
     "typescript": "^5.4.0"
   }
 }
