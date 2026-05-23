@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 
 use js_sys::Reflect;
-use mds::{Value, format_unknown_keys_error, json_type_name, parse_json_vars, VarsError};
+use mds::{format_unknown_keys_error, json_type_name, parse_json_vars, Value, VarsError};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -345,12 +345,10 @@ fn extract_vars(obj: &js_sys::Object) -> Result<Option<HashMap<String, Value>>, 
     // Deserialize only the vars sub-value.
     let vars_json: serde_json::Value = serde_wasm_bindgen::from_value(val)
         .map_err(|e| options_error(&format!("invalid options.vars: {e}")))?;
-    parse_json_vars(vars_json)
-        .map(Some)
-        .map_err(|e| match e {
-            VarsError::InvalidType(msg) => options_error(&msg),
-            VarsError::Conversion(mds_err) => mds_error_to_js(mds_err),
-        })
+    parse_json_vars(vars_json).map(Some).map_err(|e| match e {
+        VarsError::InvalidType(msg) => options_error(&msg),
+        VarsError::Conversion(mds_err) => mds_error_to_js(mds_err),
+    })
 }
 
 /// Parse the JS options argument into structured Rust data.
@@ -520,5 +518,40 @@ pub fn check(source: &str, options: JsValue) -> Result<JsValue, JsValue> {
                 .map_err(mds_error_to_js)?;
 
         to_js(&CheckOutput { warnings })
+    }))
+}
+
+/// Extract all import and re-export paths from an MDS source string.
+///
+/// Returns an array of path strings (`string[]`) in insertion order, deduplicated.
+/// Does not resolve paths to the filesystem — returns them as-is from the source.
+///
+/// ## Arguments
+///
+/// - `source`: MDS template source text.
+///
+/// ## Returns
+///
+/// On success, a JS array of strings (e.g. `["./foo.mds", "./bar.mds"]`).
+///
+/// On failure, throws a JS `Error` with the same structure as [`compile`].
+///
+/// ## Example (JavaScript)
+///
+/// ```js
+/// const paths = scanImports('@import "./foo.mds"\n@import { bar } from "./bar.mds"\n');
+/// console.log(paths); // ["./foo.mds", "./bar.mds"]
+/// ```
+#[wasm_bindgen(js_name = "scanImports")]
+pub fn scan_imports(source: &str) -> Result<JsValue, JsValue> {
+    check_source_size(source)?;
+
+    // Owned String required so the closure satisfies UnwindSafe.
+    let source = source.to_string();
+
+    catch_panic(AssertUnwindSafe(move || {
+        let paths = mds::scan_imports(&source).map_err(mds_error_to_js)?;
+        serde_wasm_bindgen::to_value(&paths)
+            .map_err(|e| js_error(&format!("failed to serialize result: {e}"), "mds::internal"))
     }))
 }

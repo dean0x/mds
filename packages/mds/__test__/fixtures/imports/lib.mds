@@ -1,0 +1,7 @@
+@import { deepFn } from "./deep.mds"
+
+@define libFn():
+{deepFn()}
+@end
+
+@export libFn

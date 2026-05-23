@@ -52,8 +52,7 @@ pub(crate) mod value;
 
 pub use fs::{FileSystem, NativeFs, VirtualFs};
 pub use options::{
-    format_unknown_keys_error, json_type_name, parse_json_vars, reject_unknown_json_keys,
-    VarsError,
+    format_unknown_keys_error, json_type_name, parse_json_vars, reject_unknown_json_keys, VarsError,
 };
 pub use resolver::ModuleCache;
 
@@ -719,6 +718,58 @@ pub fn compile_file(path: &str) -> Result<String, MdsError> {
     compile(Path::new(path), None)
 }
 
+/// Extract all import and re-export paths from an MDS source string.
+///
+/// Parses the source and walks the AST, collecting the `path` field from every
+/// import and re-export directive:
+/// - `@import "path" as alias` → path
+/// - `@import "path"` (merge) → path
+/// - `@import { names } from "path"` → path
+/// - `@export name from "path"` → path
+/// - `@export * from "path"` → path
+/// - `@export name` (named, no path) → skipped
+///
+/// Duplicate paths are deduplicated while preserving insertion order.
+/// Returns an error if the source has a syntax error.
+///
+/// # Examples
+///
+/// ```rust
+/// let paths = mds::scan_imports("@import \"./foo.mds\" as foo\n@import \"./bar.mds\"\n")?;
+/// assert_eq!(paths, vec!["./foo.mds".to_string(), "./bar.mds".to_string()]);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use = "the extracted import paths should be used"]
+pub fn scan_imports(source: &str) -> Result<Vec<String>, MdsError> {
+    use indexmap::IndexSet;
+
+    let tokens = lexer::tokenize(source, "")?;
+    let module = parser::parse_with_ctx(&tokens, "", source)?;
+
+    let mut paths: IndexSet<String> = IndexSet::new();
+
+    for node in &module.body {
+        match node {
+            ast::Node::Import(
+                ast::ImportDirective::Alias { path, .. }
+                | ast::ImportDirective::Merge { path, .. }
+                | ast::ImportDirective::Selective { path, .. },
+            ) => {
+                paths.insert(path.clone());
+            }
+            ast::Node::Export(
+                ast::ExportDirective::ReExport { path, .. }
+                | ast::ExportDirective::Wildcard { path },
+            ) => {
+                paths.insert(path.clone());
+            }
+            _ => {}
+        }
+    }
+
+    Ok(paths.into_iter().collect())
+}
+
 /// Load runtime variables from a JSON file.
 ///
 /// The file must contain a JSON object; each key becomes a variable name.
@@ -923,5 +974,118 @@ mod tests {
         let json = r#"{"name": "World", "count": 42}"#;
         let vars = load_vars_str(json).expect("valid JSON within size limit should succeed");
         assert_eq!(vars.len(), 2);
+    }
+
+    // ── scan_imports tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn scan_imports_empty_source() {
+        let paths = scan_imports("").expect("empty source should succeed");
+        assert!(paths.is_empty(), "expected no paths, got: {paths:?}");
+    }
+
+    #[test]
+    fn scan_imports_merge_import() {
+        let paths = scan_imports("@import \"./foo.mds\"\n").expect("merge import should succeed");
+        assert_eq!(paths, vec!["./foo.mds".to_string()]);
+    }
+
+    #[test]
+    fn scan_imports_selective_import() {
+        let paths = scan_imports("@import { a, b } from \"./bar.mds\"\n")
+            .expect("selective import should succeed");
+        assert_eq!(paths, vec!["./bar.mds".to_string()]);
+    }
+
+    #[test]
+    fn scan_imports_alias_import() {
+        let paths =
+            scan_imports("@import \"./baz.mds\" as utils\n").expect("alias import should succeed");
+        assert_eq!(paths, vec!["./baz.mds".to_string()]);
+    }
+
+    #[test]
+    fn scan_imports_reexport_directive() {
+        let paths =
+            scan_imports("@export greet from \"./lib.mds\"\n").expect("re-export should succeed");
+        assert_eq!(paths, vec!["./lib.mds".to_string()]);
+    }
+
+    #[test]
+    fn scan_imports_wildcard_export() {
+        let paths =
+            scan_imports("@export * from \"./lib.mds\"\n").expect("wildcard export should succeed");
+        assert_eq!(paths, vec!["./lib.mds".to_string()]);
+    }
+
+    #[test]
+    fn scan_imports_named_export_no_path() {
+        let paths =
+            scan_imports("@export greeting\n").expect("named export without path should succeed");
+        assert!(
+            paths.is_empty(),
+            "named export has no path, expected empty, got: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn scan_imports_deduplication() {
+        let source = "@import \"./foo.mds\"\n@import \"./foo.mds\"\n";
+        let paths = scan_imports(source).expect("deduplication test should succeed");
+        assert_eq!(
+            paths,
+            vec!["./foo.mds".to_string()],
+            "duplicate paths should be deduplicated"
+        );
+    }
+
+    #[test]
+    fn scan_imports_mixed_directives_in_order() {
+        let source = concat!(
+            "@import \"./a.mds\" as a\n",
+            "@import { foo } from \"./b.mds\"\n",
+            "@export bar from \"./c.mds\"\n",
+            "@export * from \"./d.mds\"\n",
+            "@export localFn\n",
+        );
+        let paths = scan_imports(source).expect("mixed directives should succeed");
+        assert_eq!(
+            paths,
+            vec![
+                "./a.mds".to_string(),
+                "./b.mds".to_string(),
+                "./c.mds".to_string(),
+                "./d.mds".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_imports_plain_text_no_imports() {
+        let paths = scan_imports("Hello World!\n").expect("plain text should succeed");
+        assert!(
+            paths.is_empty(),
+            "plain text has no imports, got: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn scan_imports_syntax_error() {
+        // Unclosed interpolation — lexer/parser should return an error.
+        let result = scan_imports("Hello {name\n");
+        assert!(result.is_err(), "expected error for malformed source");
+    }
+
+    #[test]
+    fn scan_imports_frontmatter_with_imports() {
+        let source = concat!(
+            "---\n",
+            "name: Alice\n",
+            "---\n",
+            "@import \"./lib.mds\"\n",
+            "Hello {name}!\n",
+        );
+        let paths = scan_imports(source).expect("frontmatter + imports should succeed");
+        assert_eq!(paths, vec!["./lib.mds".to_string()]);
     }
 }

@@ -1,6 +1,8 @@
 /target
 crates/mds-wasm/pkg/
+crates/mds-wasm/pkg-web/
 *.node
 node_modules/
-crates/mds-napi/index.js
 crates/mds-napi/index.d.ts
+crates/mds-napi/package-lock.json
+packages/mds/dist/
