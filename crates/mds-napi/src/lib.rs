@@ -38,7 +38,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::ptr;
 
-use mds::{Value, format_unknown_keys_error, parse_json_vars, VarsError};
+use mds::{format_unknown_keys_error, parse_json_vars, Value, VarsError};
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::Env;
@@ -87,11 +87,7 @@ pub struct CheckResult {
 ///
 /// `env` must be a valid `napi_env` obtained from an active napi callback frame.
 /// The function must be called from within a valid napi callback scope.
-unsafe fn raw_create_error(
-    env: sys::napi_env,
-    code: &str,
-    message: &str,
-) -> sys::napi_value {
+unsafe fn raw_create_error(env: sys::napi_env, code: &str, message: &str) -> sys::napi_value {
     let mut code_val: sys::napi_value = ptr::null_mut();
     let mut msg_val: sys::napi_value = ptr::null_mut();
     let mut err_val: sys::napi_value = ptr::null_mut();
@@ -132,12 +128,8 @@ unsafe fn raw_create_error(
 unsafe fn raw_set_string_prop(env: sys::napi_env, obj: sys::napi_value, key: &str, value: &str) {
     let Ok(ckey) = CString::new(key) else { return };
     let mut val: sys::napi_value = ptr::null_mut();
-    let ok = sys::napi_create_string_utf8(
-        env,
-        value.as_ptr().cast(),
-        value.len() as isize,
-        &mut val,
-    );
+    let ok =
+        sys::napi_create_string_utf8(env, value.as_ptr().cast(), value.len() as isize, &mut val);
     if ok == sys::Status::napi_ok {
         let _ = sys::napi_set_named_property(env, obj, ckey.as_ptr(), val);
     }
@@ -168,22 +160,39 @@ unsafe fn raw_set_uint32_prop(env: sys::napi_env, obj: sys::napi_value, key: &st
 ///
 /// `env` must be a valid `napi_env` obtained from an active napi callback frame.
 /// The caller must be within a valid napi callback scope.
-unsafe fn raw_create_span_obj(
-    env: sys::napi_env,
-    span: &mds::SerializedSpan,
-) -> sys::napi_value {
+unsafe fn raw_create_span_obj(env: sys::napi_env, span: &mds::SerializedSpan) -> sys::napi_value {
     let mut span_obj: sys::napi_value = ptr::null_mut();
     if sys::napi_create_object(env, &mut span_obj) != sys::Status::napi_ok {
         return ptr::null_mut();
     }
     // Use try_from to make usize→u32 truncation explicit; saturate at u32::MAX.
-    raw_set_uint32_prop(env, span_obj, "offset", u32::try_from(span.offset).unwrap_or(u32::MAX));
-    raw_set_uint32_prop(env, span_obj, "length", u32::try_from(span.length).unwrap_or(u32::MAX));
+    raw_set_uint32_prop(
+        env,
+        span_obj,
+        "offset",
+        u32::try_from(span.offset).unwrap_or(u32::MAX),
+    );
+    raw_set_uint32_prop(
+        env,
+        span_obj,
+        "length",
+        u32::try_from(span.length).unwrap_or(u32::MAX),
+    );
     if let Some(line) = span.line {
-        raw_set_uint32_prop(env, span_obj, "line", u32::try_from(line).unwrap_or(u32::MAX));
+        raw_set_uint32_prop(
+            env,
+            span_obj,
+            "line",
+            u32::try_from(line).unwrap_or(u32::MAX),
+        );
     }
     if let Some(column) = span.column {
-        raw_set_uint32_prop(env, span_obj, "column", u32::try_from(column).unwrap_or(u32::MAX));
+        raw_set_uint32_prop(
+            env,
+            span_obj,
+            "column",
+            u32::try_from(column).unwrap_or(u32::MAX),
+        );
     }
     span_obj
 }
@@ -213,7 +222,8 @@ fn throw_mds_error(env: &Env, err: mds::MdsError) -> napi::Error {
                 let span_obj = raw_create_span_obj(raw_env, span);
                 if !span_obj.is_null() {
                     if let Ok(ckey) = CString::new("span") {
-                        let _ = sys::napi_set_named_property(raw_env, err_obj, ckey.as_ptr(), span_obj);
+                        let _ =
+                            sys::napi_set_named_property(raw_env, err_obj, ckey.as_ptr(), span_obj);
                     }
                 }
             }
@@ -282,7 +292,8 @@ where
                 // this callback invocation. All napi_value handles are created and consumed
                 // within the same callback scope.
                 unsafe {
-                    let err_obj = raw_create_error(raw_env, "mds::internal", "internal compiler error");
+                    let err_obj =
+                        raw_create_error(raw_env, "mds::internal", "internal compiler error");
                     if !err_obj.is_null() {
                         raw_set_string_prop(raw_env, err_obj, "detail", &detail);
                         let _ = sys::napi_throw(raw_env, err_obj);
@@ -290,12 +301,20 @@ where
                     }
                 }
                 // Fallback if object creation failed.
-                Err(throw_coded_error(env, "internal compiler error", "mds::internal"))
+                Err(throw_coded_error(
+                    env,
+                    "internal compiler error",
+                    "mds::internal",
+                ))
             }
             #[cfg(not(feature = "debug-panics"))]
             {
                 let _ = payload;
-                Err(throw_coded_error(env, "internal compiler error", "mds::internal"))
+                Err(throw_coded_error(
+                    env,
+                    "internal compiler error",
+                    "mds::internal",
+                ))
             }
         }
     }
@@ -341,11 +360,7 @@ fn napi_type_name(vt: ValueType) -> &'static str {
 /// Uses `get_property_names` to enumerate all keys, deserializes the resulting
 /// Array as a `serde_json` array of strings, then filters out recognised keys.
 /// Reports ALL unknown keys at once so users can fix multiple typos in one go.
-fn reject_unknown_napi_keys(
-    env: &Env,
-    obj: &Object,
-    known: &[&str],
-) -> napi::Result<()> {
+fn reject_unknown_napi_keys(env: &Env, obj: &Object, known: &[&str]) -> napi::Result<()> {
     let names_obj: Object = obj.get_property_names()?;
     // Deserialize the property-names Array into a JSON array of strings.
     let names_json: serde_json::Value = env.from_js_value(names_obj)?;
@@ -367,7 +382,10 @@ fn reject_unknown_napi_keys(
         return Ok(());
     }
 
-    Err(throw_options_error(env, &format_unknown_keys_error(&unknowns, known)))
+    Err(throw_options_error(
+        env,
+        &format_unknown_keys_error(&unknowns, known),
+    ))
 }
 
 /// Extract and validate the `basePath` option using direct property access.
@@ -409,10 +427,7 @@ fn extract_base_path_direct(env: &Env, obj: &Object) -> napi::Result<Option<Path
 /// Returns `None` for absent, `undefined`, or `null`; delegates to the shared
 /// `parse_json_vars` for object validation and conversion; errors on non-object
 /// types (including arrays).
-fn extract_vars_direct(
-    env: &Env,
-    obj: &Object,
-) -> napi::Result<Option<HashMap<String, Value>>> {
+fn extract_vars_direct(env: &Env, obj: &Object) -> napi::Result<Option<HashMap<String, Value>>> {
     if !obj.has_named_property("vars")? {
         return Ok(None);
     }
@@ -506,18 +521,15 @@ fn parse_file_opts(
 /// - `help`: optional hint string
 /// - `span`: optional `{ offset, length, line?, column? }`
 #[napi]
-pub fn compile(
-    env: Env,
-    source: String,
-    opts: Option<Object>,
-) -> napi::Result<CompileResult> {
+pub fn compile(env: Env, source: String, opts: Option<Object>) -> napi::Result<CompileResult> {
     check_source_size(&env, &source)?;
 
     let (base_path, vars) = parse_compile_opts(&env, opts)?;
 
-    let result = run_catching(&env, AssertUnwindSafe(move || {
-        mds::compile_str_with_deps(&source, base_path.as_deref(), vars)
-    }))?;
+    let result = run_catching(
+        &env,
+        AssertUnwindSafe(move || mds::compile_str_with_deps(&source, base_path.as_deref(), vars)),
+    )?;
 
     Ok(CompileResult {
         output: result.output,
@@ -541,17 +553,14 @@ pub fn compile(
 ///
 /// Same shape as `compile`. Dependencies are absolute filesystem paths.
 #[napi(js_name = "compileFile")]
-pub fn compile_file(
-    env: Env,
-    path: String,
-    opts: Option<Object>,
-) -> napi::Result<CompileResult> {
+pub fn compile_file(env: Env, path: String, opts: Option<Object>) -> napi::Result<CompileResult> {
     let vars = parse_file_opts(&env, opts)?;
 
     let path_buf = PathBuf::from(path);
-    let result = run_catching(&env, AssertUnwindSafe(move || {
-        mds::compile_with_deps(&path_buf, vars)
-    }))?;
+    let result = run_catching(
+        &env,
+        AssertUnwindSafe(move || mds::compile_with_deps(&path_buf, vars)),
+    )?;
 
     Ok(CompileResult {
         output: result.output,
@@ -572,18 +581,17 @@ pub fn compile_file(
 /// On success, `{ warnings: string[] }`.
 /// On failure, throws a JS `Error` with the same structure as `compile`.
 #[napi]
-pub fn check(
-    env: Env,
-    source: String,
-    opts: Option<Object>,
-) -> napi::Result<CheckResult> {
+pub fn check(env: Env, source: String, opts: Option<Object>) -> napi::Result<CheckResult> {
     check_source_size(&env, &source)?;
 
     let (base_path, vars) = parse_compile_opts(&env, opts)?;
 
-    let ((), warnings) = run_catching(&env, AssertUnwindSafe(move || {
-        mds::check_str_collecting_warnings(&source, base_path.as_deref(), vars)
-    }))?;
+    let ((), warnings) = run_catching(
+        &env,
+        AssertUnwindSafe(move || {
+            mds::check_str_collecting_warnings(&source, base_path.as_deref(), vars)
+        }),
+    )?;
 
     Ok(CheckResult { warnings })
 }
@@ -600,17 +608,14 @@ pub fn check(
 ///
 /// Same shape as `check`.
 #[napi(js_name = "checkFile")]
-pub fn check_file(
-    env: Env,
-    path: String,
-    opts: Option<Object>,
-) -> napi::Result<CheckResult> {
+pub fn check_file(env: Env, path: String, opts: Option<Object>) -> napi::Result<CheckResult> {
     let vars = parse_file_opts(&env, opts)?;
 
     let path_buf = PathBuf::from(path);
-    let ((), warnings) = run_catching(&env, AssertUnwindSafe(move || {
-        mds::check_collecting_warnings(&path_buf, vars)
-    }))?;
+    let ((), warnings) = run_catching(
+        &env,
+        AssertUnwindSafe(move || mds::check_collecting_warnings(&path_buf, vars)),
+    )?;
 
     Ok(CheckResult { warnings })
 }

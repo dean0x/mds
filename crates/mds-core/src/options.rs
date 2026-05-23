@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(json_type_name(&json!(true)), "boolean");
         assert_eq!(json_type_name(&json!(false)), "boolean");
         assert_eq!(json_type_name(&json!(42)), "number");
-        assert_eq!(json_type_name(&json!(3.14)), "number");
+        assert_eq!(json_type_name(&json!(2.72)), "number");
         assert_eq!(json_type_name(&json!("hello")), "string");
         assert_eq!(json_type_name(&json!([])), "array");
         assert_eq!(json_type_name(&json!([1, 2])), "array");
@@ -309,14 +309,16 @@ mod tests {
 
     #[test]
     fn test_reject_unknown_single_key() {
-        let map: serde_json::Map<_, _> =
-            serde_json::from_str(r#"{"typo": "x"}"#).unwrap();
+        let map: serde_json::Map<_, _> = serde_json::from_str(r#"{"typo": "x"}"#).unwrap();
         let err = reject_unknown_json_keys(&map, &["basePath", "vars"]).unwrap_err();
         assert!(
             err.contains("unknown option key"),
             "single-key message should say 'unknown option key': {err}"
         );
-        assert!(err.contains("\"typo\""), "should name the unknown key: {err}");
+        assert!(
+            err.contains("\"typo\""),
+            "should name the unknown key: {err}"
+        );
         assert!(
             err.contains("basePath") && err.contains("vars"),
             "should list recognised keys: {err}"
@@ -330,8 +332,7 @@ mod tests {
 
     #[test]
     fn test_reject_unknown_multiple_keys() {
-        let map: serde_json::Map<_, _> =
-            serde_json::from_str(r#"{"foo": 1, "bar": 2}"#).unwrap();
+        let map: serde_json::Map<_, _> = serde_json::from_str(r#"{"foo": 1, "bar": 2}"#).unwrap();
         let err = reject_unknown_json_keys(&map, &["basePath", "vars"]).unwrap_err();
         assert!(
             err.contains("unknown option keys:"),
@@ -362,10 +363,7 @@ mod tests {
         use std::error::Error;
 
         let invalid_type = VarsError::InvalidType("bad".to_string());
-        assert!(
-            invalid_type.source().is_none(),
-            "InvalidType has no source"
-        );
+        assert!(invalid_type.source().is_none(), "InvalidType has no source");
 
         let mds_err = MdsError::json_error("depth exceeded");
         let conversion = VarsError::Conversion(mds_err);

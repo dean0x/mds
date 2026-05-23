@@ -1197,7 +1197,7 @@ mod tests {
     #[test]
     fn parse_dot_path_at_limit_accepted() {
         // MAX_DOT_SEGMENTS segments (e.g. a.b.c...32 parts) must be accepted.
-        let segments: Vec<&str> = std::iter::repeat("x").take(MAX_DOT_SEGMENTS).collect();
+        let segments: Vec<&str> = std::iter::repeat_n("x", MAX_DOT_SEGMENTS).collect();
         let path = segments.join(".");
         let src = format!("{{{path}}}");
         let tokens = tokenize(&src, "test.mds").unwrap();
@@ -1211,7 +1211,7 @@ mod tests {
     #[test]
     fn parse_interpolation_dot_path_exceeds_limit_rejected() {
         // MAX_DOT_SEGMENTS + 1 segments in an interpolation must be rejected.
-        let segments: Vec<&str> = std::iter::repeat("x").take(MAX_DOT_SEGMENTS + 1).collect();
+        let segments: Vec<&str> = std::iter::repeat_n("x", MAX_DOT_SEGMENTS + 1).collect();
         let path = segments.join(".");
         let src = format!("{{{path}}}");
         let tokens = tokenize(&src, "test.mds").unwrap();
@@ -1230,7 +1230,7 @@ mod tests {
     #[test]
     fn parse_if_condition_dot_path_exceeds_limit_rejected() {
         // @if with too many dot segments must be rejected.
-        let segments: Vec<&str> = std::iter::repeat("x").take(MAX_DOT_SEGMENTS + 1).collect();
+        let segments: Vec<&str> = std::iter::repeat_n("x", MAX_DOT_SEGMENTS + 1).collect();
         let path = segments.join(".");
         let src = format!("@if {path}:\ncontent\n@end\n");
         let tokens = tokenize(&src, "test.mds").unwrap();
@@ -1249,7 +1249,7 @@ mod tests {
     #[test]
     fn parse_for_iterable_dot_path_exceeds_limit_rejected() {
         // @for with too many dot segments in iterable must be rejected.
-        let segments: Vec<&str> = std::iter::repeat("x").take(MAX_DOT_SEGMENTS + 1).collect();
+        let segments: Vec<&str> = std::iter::repeat_n("x", MAX_DOT_SEGMENTS + 1).collect();
         let path = segments.join(".");
         let src = format!("@for item in {path}:\n- {{item}}\n@end\n");
         let tokens = tokenize(&src, "test.mds").unwrap();
@@ -1268,7 +1268,7 @@ mod tests {
     #[test]
     fn parse_arg_dot_path_exceeds_limit_rejected() {
         // Function arg with too many dot segments must be rejected.
-        let segments: Vec<&str> = std::iter::repeat("x").take(MAX_DOT_SEGMENTS + 1).collect();
+        let segments: Vec<&str> = std::iter::repeat_n("x", MAX_DOT_SEGMENTS + 1).collect();
         let path = segments.join(".");
         let result = parse_args(&path);
         assert!(

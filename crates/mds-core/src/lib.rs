@@ -52,8 +52,7 @@ pub(crate) mod value;
 
 pub use fs::{FileSystem, NativeFs, VirtualFs};
 pub use options::{
-    format_unknown_keys_error, json_type_name, parse_json_vars, reject_unknown_json_keys,
-    VarsError,
+    format_unknown_keys_error, json_type_name, parse_json_vars, reject_unknown_json_keys, VarsError,
 };
 pub use resolver::ModuleCache;
 
@@ -993,8 +992,8 @@ mod tests {
 
     #[test]
     fn scan_imports_selective_import() {
-        let paths =
-            scan_imports("@import { a, b } from \"./bar.mds\"\n").expect("selective import should succeed");
+        let paths = scan_imports("@import { a, b } from \"./bar.mds\"\n")
+            .expect("selective import should succeed");
         assert_eq!(paths, vec!["./bar.mds".to_string()]);
     }
 
@@ -1023,14 +1022,21 @@ mod tests {
     fn scan_imports_named_export_no_path() {
         let paths =
             scan_imports("@export greeting\n").expect("named export without path should succeed");
-        assert!(paths.is_empty(), "named export has no path, expected empty, got: {paths:?}");
+        assert!(
+            paths.is_empty(),
+            "named export has no path, expected empty, got: {paths:?}"
+        );
     }
 
     #[test]
     fn scan_imports_deduplication() {
         let source = "@import \"./foo.mds\"\n@import \"./foo.mds\"\n";
         let paths = scan_imports(source).expect("deduplication test should succeed");
-        assert_eq!(paths, vec!["./foo.mds".to_string()], "duplicate paths should be deduplicated");
+        assert_eq!(
+            paths,
+            vec!["./foo.mds".to_string()],
+            "duplicate paths should be deduplicated"
+        );
     }
 
     #[test]
@@ -1057,7 +1063,10 @@ mod tests {
     #[test]
     fn scan_imports_plain_text_no_imports() {
         let paths = scan_imports("Hello World!\n").expect("plain text should succeed");
-        assert!(paths.is_empty(), "plain text has no imports, got: {paths:?}");
+        assert!(
+            paths.is_empty(),
+            "plain text has no imports, got: {paths:?}"
+        );
     }
 
     #[test]

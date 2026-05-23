@@ -435,7 +435,10 @@ fn js_array_len(val: &JsValue) -> u32 {
 
 /// Helper: get string element at index from a JS array.
 fn js_array_str(val: &JsValue, idx: u32) -> String {
-    js_sys::Array::from(val).get(idx).as_string().unwrap_or_default()
+    js_sys::Array::from(val)
+        .get(idx)
+        .as_string()
+        .unwrap_or_default()
 }
 
 #[wasm_bindgen_test]

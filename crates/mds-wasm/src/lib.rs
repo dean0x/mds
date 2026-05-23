@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 
 use js_sys::Reflect;
-use mds::{Value, format_unknown_keys_error, json_type_name, parse_json_vars, VarsError};
+use mds::{format_unknown_keys_error, json_type_name, parse_json_vars, Value, VarsError};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -345,12 +345,10 @@ fn extract_vars(obj: &js_sys::Object) -> Result<Option<HashMap<String, Value>>, 
     // Deserialize only the vars sub-value.
     let vars_json: serde_json::Value = serde_wasm_bindgen::from_value(val)
         .map_err(|e| options_error(&format!("invalid options.vars: {e}")))?;
-    parse_json_vars(vars_json)
-        .map(Some)
-        .map_err(|e| match e {
-            VarsError::InvalidType(msg) => options_error(&msg),
-            VarsError::Conversion(mds_err) => mds_error_to_js(mds_err),
-        })
+    parse_json_vars(vars_json).map(Some).map_err(|e| match e {
+        VarsError::InvalidType(msg) => options_error(&msg),
+        VarsError::Conversion(mds_err) => mds_error_to_js(mds_err),
+    })
 }
 
 /// Parse the JS options argument into structured Rust data.
