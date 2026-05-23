@@ -85,9 +85,7 @@ async function tryLoadCandidate(
 ): Promise<WasmModule | null> {
   try {
     const mod = require(candidate) as WasmModule;
-    // For nodejs target, wasm-pack generates a CJS module that is already
-    // initialized (no need to call default()). If it has a default export
-    // that is a function, call it for browser targets.
+    // Browser targets expose a default() initializer; nodejs targets do not.
     if (typeof mod.default === 'function') {
       await mod.default(wasmUrl);
     }
@@ -103,7 +101,6 @@ async function _init(options?: InitOptions): Promise<void> {
   const { createRequire } = await import('node:module');
   const require = createRequire(import.meta.url);
 
-  // Exactly 2 candidates — structurally bounded; no dynamic growth expected.
   const candidates: readonly string[] = [
     // Workspace: pkg is built next to mds-wasm crate
     new URL('../../../../crates/mds-wasm/pkg/mds_wasm.js', import.meta.url).pathname,
@@ -138,8 +135,10 @@ function assertInitialized(): WasmModule {
  * Both the outer object and the nested modules map are frozen so that WASM
  * FFI cannot mutate shared state across calls.
  */
-const DEFAULT_MODULES: Record<string, string> = Object.freeze({} as Record<string, string>);
-const DEFAULT_COMPILE_OPTS = Object.freeze({ filename: 'input.mds', modules: DEFAULT_MODULES });
+const DEFAULT_COMPILE_OPTS = Object.freeze({
+  filename: 'input.mds',
+  modules: Object.freeze({} as Record<string, string>),
+});
 
 /** Build the options object for compile/check, merging vars when present. */
 function compileOpts(options?: CompileOptions): { filename: string; modules: Record<string, string>; vars?: Record<string, unknown> } {

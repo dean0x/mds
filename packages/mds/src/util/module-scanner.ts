@@ -106,8 +106,6 @@ export async function buildModulesMap(
   /**
    * Validate a child import path string and resolve it to an absolute filesystem
    * path within the project root. Returns the resolved absolute path.
-   *
-   * Extracted to reduce nesting in the scan closure (scanner-6).
    */
   function validateImportPath(importPath: string, absoluteDir: string): string {
     // Security: reject null bytes and empty paths.
@@ -138,8 +136,6 @@ export async function buildModulesMap(
    * Separated from scan() to isolate filesystem-security logic from orchestration.
    */
   async function statAndValidateModule(absolutePath: string): Promise<number> {
-    // Security: run lstat and realpath concurrently — both are metadata reads
-    // with no ordering dependency between them.
     const [stats, resolved] = await Promise.all([
       lstat(absolutePath),
       realpath(absolutePath),
