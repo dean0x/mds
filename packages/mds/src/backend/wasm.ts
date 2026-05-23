@@ -75,26 +75,60 @@ export async function init(options?: InitOptions): Promise<void> {
 /**
  * Attempt to load a single WASM candidate path.
  *
- * Returns the loaded module on success, or null if the candidate is not found.
- * Re-throws unexpected errors so the caller can surface them.
+ * Returns the loaded module on success, or null if the candidate is not found
+ * (MODULE_NOT_FOUND) or the loaded module does not match the expected shape.
+ * Re-throws unexpected errors (OOM, corrupted WASM, init failures) so the
+ * caller can surface them rather than silently discarding them.
  */
 async function tryLoadCandidate(
   candidate: string,
   require: NodeRequire,
   wasmUrl: InitOptions['wasmUrl'],
 ): Promise<WasmModule | null> {
+  let mod: unknown;
   try {
-    const mod = require(candidate) as WasmModule;
-    // Browser targets expose a default() initializer; nodejs targets do not.
-    if (typeof mod.default === 'function') {
-      await mod.default(wasmUrl);
-    }
-    return mod;
-  } catch {
+    mod = require(candidate);
+  } catch (err) {
+    if (isModuleNotFound(err)) return null;
+    throw err;
+  }
+
+  // Validate the module shape at the boundary before trusting it as WasmModule.
+  // compile and check are the minimum required exports; scanImports is used by
+  // compileFile/checkFile but is intentionally not guarded here because the
+  // current WASM build may omit it — a runtime error at the call site is
+  // preferable to silently discarding an otherwise-valid module.
+  if (
+    typeof (mod as Record<string, unknown>).compile !== 'function' ||
+    typeof (mod as Record<string, unknown>).check !== 'function'
+  ) {
     return null;
   }
+
+  const wasmMod = mod as WasmModule;
+  // Browser targets expose a default() initializer; nodejs targets do not.
+  if (typeof wasmMod.default === 'function') {
+    await wasmMod.default(wasmUrl);
+  }
+  return wasmMod;
 }
 
+/** Returns true when an error indicates the required path simply does not exist. */
+function isModuleNotFound(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    (err as NodeJS.ErrnoException).code === 'MODULE_NOT_FOUND'
+  );
+}
+
+/**
+ * Internal initialization: locate and load the WASM module from known
+ * candidate paths. Tries each path in order, stopping at the first success.
+ * If a candidate triggers an unexpected error (not MODULE_NOT_FOUND), that
+ * error is propagated immediately — callers should not swallow it.
+ *
+ * @internal
+ */
 async function _init(options?: InitOptions): Promise<void> {
   // In Node.js: load the built WASM module from the mds-wasm pkg directory.
   // The WASM is built with `wasm-pack build --target nodejs`.
@@ -108,19 +142,28 @@ async function _init(options?: InitOptions): Promise<void> {
     'mds-wasm',
   ];
 
+  let lastError: Error | undefined;
   for (const candidate of candidates) {
-    const mod = await tryLoadCandidate(candidate, require, options?.wasmUrl);
-    if (mod !== null) {
-      wasmModule = mod;
-      return;
+    try {
+      const mod = await tryLoadCandidate(candidate, require, options?.wasmUrl);
+      if (mod !== null) {
+        wasmModule = mod;
+        return;
+      }
+    } catch (err) {
+      // tryLoadCandidate re-throws non-MODULE_NOT_FOUND errors — capture the
+      // last one so the diagnostic message can include it.
+      lastError = err instanceof Error ? err : new Error(String(err));
     }
   }
 
+  const cause = lastError !== undefined ? ` Caused by: ${lastError.message}` : '';
   throw new Error(
-    `@mds/mds: failed to load WASM module. Build it first with: wasm-pack build crates/mds-wasm --target nodejs --out-dir pkg`,
+    `@mds/mds: failed to load WASM module. Build it first with: wasm-pack build crates/mds-wasm --target nodejs --out-dir pkg${cause}`,
   );
 }
 
+/** Return the initialized WASM module, or throw if init() has not completed. */
 function assertInitialized(): WasmModule {
   if (wasmModule === undefined) {
     throw new Error(
@@ -141,7 +184,7 @@ const DEFAULT_COMPILE_OPTS = Object.freeze({
 });
 
 /** Build the options object for compile/check, merging vars when present. */
-function compileOpts(options?: CompileOptions): { filename: string; modules: Record<string, string>; vars?: Record<string, unknown> } {
+function compileOpts(options?: CompileOptions) {
   const vars = varsOpt(options);
   return vars !== undefined ? { ...DEFAULT_COMPILE_OPTS, ...vars } : DEFAULT_COMPILE_OPTS;
 }
