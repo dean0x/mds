@@ -21,6 +21,10 @@ import {
 } from '../dist/browser.js';
 import { init as wasmInit, _resetForTesting as wasmReset } from '../dist/backend/wasm.js';
 
+// Mirror of MAX_INIT_RETRIES from src/backend/wasm.ts.
+// If this value drifts, U-BR11 will surface the mismatch via a test failure.
+const MAX_INIT_RETRIES = 3;
+
 // ---------------------------------------------------------------------------
 // Pre-init behavior (describe ensures these complete before post-init suite)
 // ---------------------------------------------------------------------------
@@ -154,7 +158,7 @@ describe('browser entry — init() retry after transient failure', () => {
 
   test('U-BR11: init() clears cached promise on rejection so next call can retry', async () => {
     // Exhaust wasm.ts retries so createWasmBackend() rejects immediately.
-    wasmReset(3); // MAX_INIT_RETRIES = 3
+    wasmReset(MAX_INIT_RETRIES);
     browserReset();
 
     // First call: should reject because wasm is exhausted.

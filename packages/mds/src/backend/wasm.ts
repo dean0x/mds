@@ -186,7 +186,9 @@ const DEFAULT_COMPILE_OPTS = Object.freeze({
 });
 
 /** Build the options object for compile/check, merging vars when present. */
-function compileOpts(options?: CompileOptions) {
+function compileOpts(
+  options?: CompileOptions,
+): { filename: string; modules: Record<string, string>; vars?: Record<string, unknown> } {
   const vars = options?.vars;
   return vars != null
     ? { filename: DEFAULT_COMPILE_OPTS.filename, modules: DEFAULT_COMPILE_OPTS.modules, vars }
@@ -198,7 +200,7 @@ function fileOpts(
   entryFilename: string,
   modules: Record<string, string>,
   options?: FileOptions,
-) {
+): { filename: string; modules: Record<string, string>; vars?: Record<string, unknown> } {
   const vars = options?.vars;
   return vars != null
     ? { filename: entryFilename, modules, vars }
