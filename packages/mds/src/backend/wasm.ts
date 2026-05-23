@@ -29,17 +29,19 @@ const MAX_INIT_RETRIES = 3;
 let initFailures = 0;
 
 /**
- * Reset all singleton state.
+ * Reset all singleton state, optionally pre-seeding the failure counter.
  *
  * FOR TESTING ONLY — allows integration tests to exercise the retry-exhaustion
- * path without spawning a subprocess.
+ * path without spawning a subprocess or driving N actual failures.
  *
+ * @param failures - Number of failures to pre-seed. Defaults to 0 (full reset).
+ *                   Pass MAX_INIT_RETRIES (3) to simulate exhaustion directly.
  * @internal
  */
-export function _resetForTesting(): void {
+export function _resetForTesting(failures = 0): void {
   wasmModule = undefined;
   initPromise = null;
-  initFailures = 0;
+  initFailures = failures;
 }
 
 /**

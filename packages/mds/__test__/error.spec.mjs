@@ -1,6 +1,6 @@
 /**
  * Error shape tests for @mds/mds universal package.
- * Tests: U-E1 through U-E8
+ * Tests: U-E1 through U-E9
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -46,7 +46,7 @@ describe('error shape', () => {
     assert.equal(isMdsError(42), false);
   });
 
-  test('U-E5b: isMdsError returns false for errors with non-mds:: code', () => {
+  test('U-E9: isMdsError returns false for errors with non-mds:: code', () => {
     // isMdsError requires code.startsWith('mds::'); a system error code like
     // 'ENOENT' must not be mistaken for an MDS compiler error.
     const err = new Error('file not found');

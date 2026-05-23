@@ -3,9 +3,9 @@
  * Tests: U-BR1 through U-BR10
  *
  * Imports dist/browser.js directly. Node.js ESM module state is shared within
- * the process, so pre-init tests run inside a describe whose before() hook
- * establishes ordering, and init() is called in a before() that runs after
- * all pre-init tests complete.
+ * the process. Node.js test runner executes top-level describe blocks
+ * sequentially, so pre-init tests complete before the post-init suite starts.
+ * init() is called in a before() hook inside the post-init describe block.
  */
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';

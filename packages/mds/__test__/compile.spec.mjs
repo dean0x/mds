@@ -53,9 +53,13 @@ describe('compile', () => {
     assert.deepEqual(result.dependencies, []);
   });
 
-  test('U-C7: compile with null vars does not throw', () => {
-    // null vars should be treated as no vars (not a crash)
-    assert.doesNotThrow(() => compile('Hello World!\n', { vars: null }));
+  test('U-C7: compile with null vars produces identical output to no-vars compile', () => {
+    // null vars must be treated as absent — varsOpt uses != null so both null
+    // and undefined are omitted from the options passed to the backend.
+    const source = 'Hello World!\n';
+    const withNull = compile(source, { vars: null });
+    const withoutVars = compile(source);
+    assert.equal(withNull.output, withoutVars.output, 'null vars should produce same output as no vars');
   });
 
   test('U-C8: compile with undefined vars does not throw', () => {

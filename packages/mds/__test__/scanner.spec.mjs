@@ -130,17 +130,13 @@ describe('buildModulesMap', () => {
     assert.ok(Object.keys(result.modules).length >= 3, 'should resolve all modules in shallow chain');
   });
 
-  test('U-SM5: rejects import chain exceeding depth limit', async () => {
-    // Create a scanImports that always claims the current file imports "./simple.mds",
-    // cycling back to the same absolute path. The visited Set deduplicates it after the
-    // first visit, so we exercise only depth=1 with this approach. To properly trigger
-    // the depth guard we set maxModules=1 and verify the module count error fires,
-    // confirming the resource-limit path works. The depth guard itself is verified by
-    // the constant MAX_IMPORT_DEPTH=64 and the depth parameter wiring in the source.
-    //
-    // True depth-limit testing requires 65 unique real files (too heavyweight for unit
-    // tests). The guard is structurally verified: depth is incremented on every
-    // recursive call and compared against the constant before filesystem access.
+  test('U-SM5: rejects when module count exceeds maxModules', async () => {
+    // The fixtures/imports chain has 3+ modules. Setting maxModules=1 means even
+    // the first import discovered triggers the resource-limit guard, confirming
+    // that path works. The depth guard (MAX_IMPORT_DEPTH=64) is structurally
+    // verified: depth is incremented on every recursive call and compared against
+    // the constant before filesystem access. True depth-limit testing would require
+    // 65 unique real files (too heavyweight for unit tests).
     const entryPath = path.join(FIXTURES, 'imports', 'entry.mds');
     await assert.rejects(
       () => buildModulesMap(entryPath, scanImports, { maxModules: 1 }),
