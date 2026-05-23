@@ -29,6 +29,20 @@ const MAX_INIT_RETRIES = 3;
 let initFailures = 0;
 
 /**
+ * Reset all singleton state.
+ *
+ * FOR TESTING ONLY — allows integration tests to exercise the retry-exhaustion
+ * path without spawning a subprocess.
+ *
+ * @internal
+ */
+export function _resetForTesting(): void {
+  wasmModule = undefined;
+  initPromise = null;
+  initFailures = 0;
+}
+
+/**
  * Initialize the WASM backend (idempotent singleton).
  *
  * Must be called before compile/check in browser environments.
@@ -56,40 +70,55 @@ export async function init(options?: InitOptions): Promise<void> {
   return initPromise;
 }
 
+/**
+ * Attempt to load a single WASM candidate path.
+ *
+ * Returns the loaded module on success, or null if the candidate is not found.
+ * Re-throws unexpected errors so the caller can surface them.
+ */
+async function tryLoadCandidate(
+  candidate: string,
+  require: NodeRequire,
+  wasmUrl: InitOptions['wasmUrl'],
+): Promise<WasmModule | null> {
+  try {
+    const mod = require(candidate) as WasmModule;
+    // For nodejs target, wasm-pack generates a CJS module that is already
+    // initialized (no need to call default()). If it has a default export
+    // that is a function, call it for browser targets.
+    if (typeof mod.default === 'function') {
+      await mod.default(wasmUrl);
+    }
+    return mod;
+  } catch {
+    return null;
+  }
+}
+
 async function _init(options?: InitOptions): Promise<void> {
   // In Node.js: load the built WASM module from the mds-wasm pkg directory.
   // The WASM is built with `wasm-pack build --target nodejs`.
   const { createRequire } = await import('node:module');
   const require = createRequire(import.meta.url);
 
-  // Try to load from the napi package's sibling pkg directory.
-  // Fallback paths for different install scenarios.
-  const candidates = [
+  // Exactly 2 candidates — structurally bounded; no dynamic growth expected.
+  const candidates: readonly string[] = [
     // Workspace: pkg is built next to mds-wasm crate
     new URL('../../../../crates/mds-wasm/pkg/mds_wasm.js', import.meta.url).pathname,
     // npm install scenario: mds-wasm might be a separate package
     'mds-wasm',
   ];
 
-  let loadError: unknown;
   for (const candidate of candidates) {
-    try {
-      const mod = require(candidate) as WasmModule;
-      // For nodejs target, wasm-pack generates a CJS module that is already
-      // initialized (no need to call default()). If it has a default export
-      // that is a function, call it for browser targets.
-      if (typeof mod.default === 'function') {
-        await mod.default(options?.wasmUrl);
-      }
+    const mod = await tryLoadCandidate(candidate, require, options?.wasmUrl);
+    if (mod !== null) {
       wasmModule = mod;
       return;
-    } catch (e) {
-      loadError = e;
     }
   }
 
   throw new Error(
-    `@mds/mds: failed to load WASM module. Build it first with: wasm-pack build crates/mds-wasm --target nodejs --out-dir pkg. ${String(loadError)}`,
+    `@mds/mds: failed to load WASM module. Build it first with: wasm-pack build crates/mds-wasm --target nodejs --out-dir pkg`,
   );
 }
 
@@ -102,8 +131,19 @@ function assertInitialized(): WasmModule {
   return wasmModule;
 }
 
-/** Default compile/check options for the common no-vars path — avoids per-call allocation. */
-const DEFAULT_COMPILE_OPTS = Object.freeze({ filename: 'input.mds', modules: {} as Record<string, string> });
+/**
+ * Deep-frozen default compile/check options for the common no-vars path.
+ * Both the outer object and the nested modules map are frozen so that WASM
+ * FFI cannot mutate shared state across calls.
+ */
+const DEFAULT_MODULES: Record<string, string> = Object.freeze({} as Record<string, string>);
+const DEFAULT_COMPILE_OPTS = Object.freeze({ filename: 'input.mds', modules: DEFAULT_MODULES });
+
+/** Build the options object for compile/check, merging vars when present. */
+function compileOpts(options?: CompileOptions): { filename: string; modules: Record<string, string>; vars?: Record<string, unknown> } {
+  const vars = varsOpt(options);
+  return vars !== undefined ? { ...DEFAULT_COMPILE_OPTS, ...vars } : DEFAULT_COMPILE_OPTS;
+}
 
 /**
  * Create a WASM backend instance. Calls init() internally.
@@ -113,14 +153,12 @@ export async function createWasmBackend(options?: InitOptions): Promise<MdsBacke
   return {
     compile(source: string, options?: CompileOptions): CompileResult {
       const wasm = assertInitialized();
-      const vars = varsOpt(options);
-      return wasm.compile(source, vars !== undefined ? { ...DEFAULT_COMPILE_OPTS, ...vars } : DEFAULT_COMPILE_OPTS);
+      return wasm.compile(source, compileOpts(options));
     },
 
     check(source: string, options?: CompileOptions): CheckResult {
       const wasm = assertInitialized();
-      const vars = varsOpt(options);
-      return wasm.check(source, vars !== undefined ? { ...DEFAULT_COMPILE_OPTS, ...vars } : DEFAULT_COMPILE_OPTS);
+      return wasm.check(source, compileOpts(options));
     },
 
     async compileFile(path: string, options?: FileOptions): Promise<CompileResult> {
