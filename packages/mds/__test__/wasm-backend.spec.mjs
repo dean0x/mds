@@ -9,16 +9,24 @@ import { test, describe, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { init, _resetForTesting } from '../dist/backend/wasm.js';
 
+// Mirror of MAX_INIT_RETRIES from src/backend/wasm.ts (line 27).
+// If this value drifts from the source, U-WB2 will fail to trigger the
+// exhaustion path, surfacing the mismatch via a test failure rather than
+// silently testing the wrong threshold.
 const MAX_INIT_RETRIES = 3;
 
 describe('wasm backend — circuit breaker', () => {
   afterEach(() => {
     // Restore a clean state after each test so the module singleton does not
     // bleed into subsequent tests or into the main backend.spec tests.
+    // Isolation assumption: Node.js test runner uses --experimental-test-isolation=process
+    // by default (Node >=22), so each test file gets its own ESM module registry.
+    // If running in an older Node where files share a registry, this reset guards
+    // against singleton state leaking across test files in the same process.
     _resetForTesting(0);
   });
 
-  test('U-WB1: init() succeeds when failures are below the limit', async () => {
+  test('U-WB1: init() attempts loading when failures are below the limit (requires WASM build)', async () => {
     // Pre-seed 2 failures (one below the threshold of 3).
     _resetForTesting(MAX_INIT_RETRIES - 1);
     // Should succeed because failures (2) < MAX_INIT_RETRIES (3).
