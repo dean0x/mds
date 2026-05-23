@@ -130,29 +130,14 @@ export async function buildModulesMap(
     return childAbsolute;
   }
 
-  async function scan(absolutePath: string, virtualKey: string, depth: number = 0): Promise<void> {
-    // Reliability: bound recursion depth explicitly — maxModules limits total
-    // nodes but not stack frames; a linear chain of 256 imports would create
-    // 256 frames without this guard.
-    if (depth > MAX_IMPORT_DEPTH) {
-      throw new Error(
-        `resource limit: import chain depth exceeds maximum of ${MAX_IMPORT_DEPTH}`,
-      );
-    }
-
-    if (visited.has(absolutePath)) {
-      return;
-    }
-    visited.add(absolutePath);
-
-    // Resource limit: check module count immediately after marking visited so
-    // the count is O(1) and there is no off-by-one from checking after the write.
-    if (visited.size > maxModules) {
-      throw new Error(
-        `resource limit: module count exceeds maximum of ${maxModules}`,
-      );
-    }
-
+  /**
+   * Validate a module at absolutePath (symlink check, TOCTOU check, project root
+   * containment) and return its OS-reported byte size for size-limit reservation.
+   * Runs lstat and realpath concurrently since they have no ordering dependency.
+   *
+   * Separated from scan() to isolate filesystem-security logic from orchestration.
+   */
+  async function statAndValidateModule(absolutePath: string): Promise<number> {
     // Security: run lstat and realpath concurrently — both are metadata reads
     // with no ordering dependency between them.
     const [stats, resolved] = await Promise.all([
@@ -181,11 +166,43 @@ export async function buildModulesMap(
       );
     }
 
+    // Return OS byte size so the caller can pre-reserve against the aggregate
+    // size limit before reading content. stats.size is byte-accurate unlike
+    // content.length which counts UTF-16 code units.
+    return stats.size;
+  }
+
+  async function scan(absolutePath: string, virtualKey: string, depth: number = 0): Promise<void> {
+    // Reliability: bound recursion depth explicitly — maxModules limits total
+    // nodes but not stack frames; a linear chain of 256 imports would create
+    // 256 frames without this guard.
+    if (depth > MAX_IMPORT_DEPTH) {
+      throw new Error(
+        `resource limit: import chain depth exceeds maximum of ${MAX_IMPORT_DEPTH}`,
+      );
+    }
+
+    if (visited.has(absolutePath)) {
+      return;
+    }
+    visited.add(absolutePath);
+
+    // Resource limit: check module count immediately after marking visited so
+    // the count is O(1) and there is no off-by-one from checking after the write.
+    if (visited.size > maxModules) {
+      throw new Error(
+        `resource limit: module count exceeds maximum of ${maxModules}`,
+      );
+    }
+
+    const fileSize = await statAndValidateModule(absolutePath);
+
     // Resource limit: pre-reserve file size (in bytes, from OS metadata) before
     // reading content so that parallel scan calls cannot each pass the check
-    // independently and collectively overshoot the limit (scanner-2 / scanner-3).
-    // stats.size is byte-accurate unlike content.length which counts UTF-16 units.
-    aggregateSize += stats.size;
+    // independently and collectively overshoot the limit.
+    // JS is single-threaded: the increment and guard below execute atomically
+    // (no await between them), so concurrent scan() calls cannot interleave here.
+    aggregateSize += fileSize;
     if (aggregateSize > maxAggregateSize) {
       throw new Error(
         `resource limit: aggregate module size exceeds maximum of ${maxAggregateSize} bytes`,
