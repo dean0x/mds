@@ -59,26 +59,38 @@ function wrapWithFileOps(
   base: MdsBaseBackend,
   wasmModule: WasmModule,
 ): MdsNodeBackend {
+  /**
+   * Build the modules map for a file entry point and extract the entry source,
+   * removing it from the map. WASM's build_modules() treats `modules` as extra
+   * dependencies and inserts the entry source separately under `filename` — if
+   * the entry key is still present in `modules`, it throws mds::filename_collision.
+   */
+  async function prepareFileArgs(
+    path: string,
+    options: FileOptions | undefined,
+  ): Promise<{ source: string; opts: ReturnType<typeof fileOpts> }> {
+    const { entryFilename, modules } = await buildModulesMap(path, (src) => wasmModule.scanImports(src));
+    const source = modules[entryFilename];
+    if (source === undefined) {
+      throw new Error(
+        `invariant violation: buildModulesMap did not populate entry file "${entryFilename}" in modules map`,
+      );
+    }
+    delete modules[entryFilename];
+    return { source, opts: fileOpts(entryFilename, modules, options) };
+  }
+
   return {
     ...base,
 
     async compileFile(path: string, options?: FileOptions): Promise<CompileResult> {
-      const { entryFilename, modules } = await buildModulesMap(path, (src) => wasmModule.scanImports(src));
-      // Extract the entry source and remove it from the modules map before passing
-      // to WASM. The WASM build_modules() function treats `modules` as "extra"
-      // dependencies and inserts the entry source separately under `filename` — if
-      // the entry key is still present in `modules`, it throws mds::filename_collision.
-      const source = modules[entryFilename] ?? '';
-      delete modules[entryFilename];
-      return wasmModule.compile(source, fileOpts(entryFilename, modules, options));
+      const { source, opts } = await prepareFileArgs(path, options);
+      return wasmModule.compile(source, opts);
     },
 
     async checkFile(path: string, options?: FileOptions): Promise<CheckResult> {
-      const { entryFilename, modules } = await buildModulesMap(path, (src) => wasmModule.scanImports(src));
-      // Same fix as compileFile: remove entry from modules to avoid filename_collision.
-      const source = modules[entryFilename] ?? '';
-      delete modules[entryFilename];
-      return wasmModule.check(source, fileOpts(entryFilename, modules, options));
+      const { source, opts } = await prepareFileArgs(path, options);
+      return wasmModule.check(source, opts);
     },
   };
 }
