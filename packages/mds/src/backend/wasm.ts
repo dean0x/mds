@@ -72,9 +72,10 @@ export function _resetForTesting(failures = 0, browserFailuresCount = 0): void {
  * Attempt to load a single WASM candidate path (Node.js only).
  *
  * Returns the loaded module on success, or null if the candidate is not found
- * (MODULE_NOT_FOUND) or the loaded module does not match the expected shape.
- * Re-throws unexpected errors (OOM, corrupted WASM, init failures) so the
- * caller can surface them rather than silently discarding them.
+ * (MODULE_NOT_FOUND). Throws if the loaded module does not match the expected
+ * WasmModule shape (missing compile/check/scanImports). Re-throws unexpected
+ * errors (OOM, corrupted WASM, init failures) so the caller can surface them
+ * rather than silently discarding them.
  */
 async function tryLoadCandidate(
   candidate: string,
@@ -94,12 +95,11 @@ async function tryLoadCandidate(
   // which the caller captures as lastError for the final diagnostic.
   validateWasmShape(mod);
 
-  const wasmMod = mod as WasmModule;
   // Browser targets expose a default() initializer; nodejs targets do not.
-  if (typeof wasmMod.default === 'function') {
-    await wasmMod.default(wasmUrl);
+  if (typeof mod.default === 'function') {
+    await mod.default(wasmUrl);
   }
-  return wasmMod;
+  return mod;
 }
 
 /** Returns true when an error indicates the required path simply does not exist. */
