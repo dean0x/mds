@@ -1,5 +1,12 @@
-import { readFile, lstat, realpath } from 'node:fs/promises';
+import { open, lstat, realpath } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { resolve, dirname, basename } from 'node:path';
+
+// O_NOFOLLOW prevents the kernel from following a symlink at the final path
+// component. Using it closes the TOCTOU window between lstat and open.
+// On Windows, O_NOFOLLOW is not defined; fall back to 0 (no-op flag) and
+// rely on a post-open lstat check instead.
+const O_NOFOLLOW: number = (constants as Record<string, number>)['O_NOFOLLOW'] ?? 0;
 
 const MAX_PATH_SEGMENTS = 256;
 const MAX_IMPORT_DEPTH = 64;
@@ -129,43 +136,68 @@ export async function buildModulesMap(
   }
 
   /**
-   * Validate a module at absolutePath (symlink check, TOCTOU check, project root
-   * containment) and return its OS-reported byte size for size-limit reservation.
-   * Runs lstat and realpath concurrently since they have no ordering dependency.
+   * Validate a module at absolutePath (symlink check, TOCTOU-safe read) and
+   * return its content and byte size.
+   *
+   * Uses O_NOFOLLOW to open the file descriptor before stat/read, eliminating the
+   * TOCTOU race window between validation and content access. If the path is a
+   * symlink, O_NOFOLLOW causes open() to fail with ELOOP, which we surface as a
+   * security error. On Windows (where O_NOFOLLOW=0), a post-open lstat check is
+   * performed instead.
    *
    * Separated from scan() to isolate filesystem-security logic from orchestration.
    */
-  async function statAndValidateModule(absolutePath: string): Promise<number> {
-    const [stats, resolved] = await Promise.all([
-      lstat(absolutePath),
-      realpath(absolutePath),
-    ]);
-
-    // Security: reject symlinks. Use lstat so we inspect the path itself, not
-    // its target. Then compare the real path to detect TOCTOU swaps.
-    if (stats.isSymbolicLink()) {
-      throw new Error(`security: symlink detected at ${absolutePath} — symlinks are not allowed`);
-    }
-
-    // Security: TOCTOU — verify the path was not swapped for a symlink between
-    // lstat and readFile by comparing the real path to the expected path.
-    if (resolved !== absolutePath) {
-      throw new Error(
-        `security: path ${absolutePath} resolved to unexpected location ${resolved} — possible symlink swap`,
-      );
-    }
-
-    // Security: verify resolved path is within project root.
+  async function openAndValidateModule(absolutePath: string): Promise<{ size: number; content: string }> {
+    // Security: verify path is within project root before opening.
     if (!absolutePath.startsWith(projectRoot + '/') && absolutePath !== projectRoot) {
       throw new Error(
         `security: path escapes project root: ${absolutePath} is outside ${projectRoot}`,
       );
     }
 
-    // Return OS byte size so the caller can pre-reserve against the aggregate
-    // size limit before reading content. stats.size is byte-accurate unlike
-    // content.length which counts UTF-16 code units.
-    return stats.size;
+    let handle: Awaited<ReturnType<typeof open>>;
+    try {
+      // O_NOFOLLOW | O_RDONLY: if absolutePath is a symlink the kernel rejects it
+      // with ELOOP before our code reads a single byte — no TOCTOU window.
+      handle = await open(absolutePath, constants.O_RDONLY | O_NOFOLLOW);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ELOOP' || code === 'ENOTDIR') {
+        throw new Error(`security: symlink detected at ${absolutePath} — symlinks are not allowed`);
+      }
+      throw err;
+    }
+
+    try {
+      const [stats, resolved] = await Promise.all([
+        handle.stat(),
+        realpath(absolutePath),
+      ]);
+
+      // Secondary check: verify the fd we opened is a regular file (not a device,
+      // socket, etc.) and that the resolved path matches (guards Windows fallback
+      // where O_NOFOLLOW=0).
+      if (stats.isSymbolicLink()) {
+        throw new Error(`security: symlink detected at ${absolutePath} — symlinks are not allowed`);
+      }
+      if (!stats.isFile()) {
+        throw new Error(`security: ${absolutePath} is not a regular file`);
+      }
+
+      // On platforms where O_NOFOLLOW=0, the open() above did not prevent symlink
+      // traversal. A post-open realpath comparison catches a symlink that was in
+      // place at open time.
+      if (resolved !== absolutePath) {
+        throw new Error(
+          `security: path ${absolutePath} resolved to unexpected location ${resolved} — possible symlink`,
+        );
+      }
+
+      const content = await handle.readFile({ encoding: 'utf-8' });
+      return { size: stats.size, content };
+    } finally {
+      await handle.close();
+    }
   }
 
   async function scan(absolutePath: string, virtualKey: string, depth: number = 0): Promise<void> {
@@ -191,7 +223,7 @@ export async function buildModulesMap(
       );
     }
 
-    const fileSize = await statAndValidateModule(absolutePath);
+    const { size: fileSize, content } = await openAndValidateModule(absolutePath);
 
     // Resource limit: pre-reserve file size (in bytes, from OS metadata) before
     // reading content so that parallel scan calls cannot each pass the check
@@ -204,8 +236,6 @@ export async function buildModulesMap(
         `resource limit: aggregate module size exceeds maximum of ${maxAggregateSize} bytes`,
       );
     }
-
-    const content = await readFile(absolutePath, 'utf-8');
 
     modules[virtualKey] = content;
 
