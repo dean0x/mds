@@ -68,7 +68,7 @@ export function init(options?: InitOptions): Promise<void> {
   return initVoidPromise;
 }
 
-function assertInitialized(): MdsBaseBackend {
+function assertReady(): MdsBaseBackend {
   if (resolvedBackend === undefined) {
     throw new Error('@mds/mds: call init() before using compile/check in a browser environment');
   }
@@ -77,12 +77,12 @@ function assertInitialized(): MdsBaseBackend {
 
 /** Compile an MDS source string to Markdown. Requires init() to have been called and awaited first. */
 export function compile(source: string, options?: CompileOptions): CompileResult {
-  return assertInitialized().compile(source, options);
+  return assertReady().compile(source, options);
 }
 
 /** Validate an MDS source string without rendering. Requires init() to have been called and awaited first. */
 export function check(source: string, options?: CompileOptions): CheckResult {
-  return assertInitialized().check(source, options);
+  return assertReady().check(source, options);
 }
 
 /** Returns the active backend type. Always `'wasm'` in browser environments. */

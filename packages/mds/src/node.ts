@@ -175,27 +175,27 @@ function assertReady(): MdsNodeBackend {
   return backend;
 }
 
-/** Compile an MDS source string to Markdown. Requires await init() first. */
+/** Compile an MDS source string to Markdown. Requires init() to have been called and awaited first. */
 export function compile(source: string, options?: CompileOptions): CompileResult {
   return assertReady().compile(source, options);
 }
 
-/** Validate an MDS source string without rendering. Requires await init() first. */
+/** Validate an MDS source string without rendering. Requires init() to have been called and awaited first. */
 export function check(source: string, options?: CompileOptions): CheckResult {
   return assertReady().check(source, options);
 }
 
-/** Compile an MDS file to Markdown, resolving @import directives relative to the file. Requires await init() first. */
+/** Compile an MDS file to Markdown, resolving @import directives relative to the file. Requires init() to have been called and awaited first. */
 export function compileFile(path: string, options?: FileOptions): Promise<CompileResult> {
   return assertReady().compileFile(path, options);
 }
 
-/** Validate an MDS file without rendering, resolving @import directives relative to the file. Requires await init() first. */
+/** Validate an MDS file without rendering, resolving @import directives relative to the file. Requires init() to have been called and awaited first. */
 export function checkFile(path: string, options?: FileOptions): Promise<CheckResult> {
   return assertReady().checkFile(path, options);
 }
 
-/** Returns which backend is currently active: 'native' or 'wasm'. Requires await init() first. */
+/** Returns which backend is currently active: 'native' or 'wasm'. Requires init() to have been called and awaited first. */
 export function getBackend(): BackendType {
   return assertReady().getBackend();
 }
