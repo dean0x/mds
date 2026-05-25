@@ -1,6 +1,10 @@
 import type { MdsPluginOptions } from '@mds/bundler-utils';
 import { createMdsTransformer, formatMdsError } from '@mds/bundler-utils';
 
+// Hand-rolled rather than `import type { LoaderContext } from 'webpack'` because
+// webpack uses a CJS `export =` shape that is awkward to import in a pure-ESM
+// package and the full type is a large intersection of ~10 interfaces. The
+// structural subset below captures exactly what this loader uses.
 interface LoaderContext {
   resourcePath: string;
   async(): (err: Error | null, content?: string) => void;
@@ -21,20 +25,16 @@ async function ensureTransformer(options: MdsPluginOptions): Promise<NonNullable
     // build. Multiple compiler instances with different options are not
     // supported by a module-level singleton — use separate webpack processes
     // in that scenario.
-    initPromise = import('@mds/mds')
-      .then((mds) => {
-        transformer = createMdsTransformer(mds, options);
-      })
-      .catch((err: unknown) => {
-        // Reset so the next call can retry the dynamic import.
-        initPromise = null;
-        throw err;
-      });
+    initPromise = import('@mds/mds').then(
+      (mds) => { transformer = createMdsTransformer(mds, options); },
+      (err: unknown) => { initPromise = null; throw err; },
+    );
   }
   await initPromise;
-  // After initPromise resolves, transformer is guaranteed non-null:
-  // the .then() callback sets it before the promise resolves.
-  return transformer!;
+  if (transformer === null) {
+    throw new Error('Invariant violation: transformer not initialized after init resolved');
+  }
+  return transformer;
 }
 
 export default async function mdsLoader(this: LoaderContext): Promise<void> {
@@ -61,8 +61,8 @@ export default async function mdsLoader(this: LoaderContext): Promise<void> {
  * FOR TESTING ONLY — throws in production environments.
  */
 export function _resetForTesting(): void {
-  if (process.env['NODE_ENV'] === 'production') {
-    throw new Error('_resetForTesting must not be called in production');
+  if (process.env['NODE_ENV'] !== 'test') {
+    throw new Error('_resetForTesting is only allowed when NODE_ENV=test');
   }
   transformer = null;
   initPromise = null;
