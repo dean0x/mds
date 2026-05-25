@@ -26,7 +26,14 @@ async function ensureTransformer(options: MdsPluginOptions): Promise<NonNullable
     // supported by a module-level singleton — use separate webpack processes
     // in that scenario.
     initPromise = import('@mds/mds').then(
-      (mds) => { transformer = createMdsTransformer(mds, options); },
+      (mds) => {
+        try {
+          transformer = createMdsTransformer(mds, options);
+        } catch (err) {
+          initPromise = null;
+          throw err;
+        }
+      },
       (err: unknown) => { initPromise = null; throw err; },
     );
   }
@@ -58,7 +65,7 @@ export default async function mdsLoader(this: LoaderContext): Promise<void> {
 
 /**
  * Reset singleton state for testing.
- * FOR TESTING ONLY — throws in production environments.
+ * FOR TESTING ONLY — throws unless NODE_ENV=test.
  */
 export function _resetForTesting(): void {
   if (process.env['NODE_ENV'] !== 'test') {
@@ -72,7 +79,7 @@ export function _resetForTesting(): void {
  * Inject a pre-built transformer for testing without going through the real
  * @mds/mds import. Allows tests to provide a mock transformer that returns
  * controlled warnings, dependencies, and output.
- * FOR TESTING ONLY — throws in production environments.
+ * FOR TESTING ONLY — throws unless NODE_ENV=test.
  */
 export function _setTransformerForTesting(t: ReturnType<typeof createMdsTransformer>): void {
   if (process.env['NODE_ENV'] !== 'test') {

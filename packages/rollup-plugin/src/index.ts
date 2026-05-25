@@ -25,22 +25,25 @@ interface RollupPlugin {
 }
 
 /**
+ * Inject a pre-built transformer for testing without going through the real
+ * @mds/mds import. Allows tests to provide a mock transformer that returns
+ * controlled warnings, dependencies, and output.
+ * FOR TESTING ONLY — does not affect production builds.
+ */
+let _testTransformer: ReturnType<typeof createMdsTransformer> | null = null;
+export function _setTransformerForTesting(t: ReturnType<typeof createMdsTransformer> | null): void {
+  if (process.env['NODE_ENV'] !== 'test') {
+    throw new Error('_setTransformerForTesting is only allowed when NODE_ENV=test');
+  }
+  _testTransformer = t;
+}
+
+/**
  * Rollup plugin that compiles `.mds` and `.md` (with `type: mds` frontmatter)
  * files into JavaScript modules. Uses `this.error()` for build-time errors so
  * Rollup can display them with position information. Watch-mode dependencies
  * are registered via `this.addWatchFile()` so Rollup re-compiles on changes.
  */
-/**
- * Inject a pre-built transformer for testing without going through the real
- * @mds/mds import. Allows tests to provide a mock transformer that returns
- * controlled warnings, dependencies, and output.
- * FOR TESTING ONLY — does nothing in production.
- */
-let _testTransformer: ReturnType<typeof createMdsTransformer> | null = null;
-export function _setTransformerForTesting(t: ReturnType<typeof createMdsTransformer> | null): void {
-  _testTransformer = t;
-}
-
 export default function mdsPlugin(options?: MdsPluginOptions): RollupPlugin {
   let transformer: ReturnType<typeof createMdsTransformer> | null = null;
 
