@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::Arc;
 
 use indexmap::{IndexMap, IndexSet};
@@ -129,12 +128,11 @@ impl ModuleCache {
     /// then resolves through the module cache with cycle detection and depth guarding.
     pub fn resolve_path(
         &mut self,
-        path: &Path,
+        path: &str,
         runtime_vars: &HashMap<String, Value>,
         warnings: &mut Vec<String>,
     ) -> Result<Arc<ResolvedModule>, MdsError> {
-        let path_str = path.display().to_string();
-        let key = self.fs.normalize("", &path_str)?;
+        let key = self.fs.normalize("", path)?;
         self.resolve_by_key(&key, runtime_vars, warnings)
     }
 
@@ -232,20 +230,19 @@ impl ModuleCache {
     ///
     /// Imports within the source are resolved relative to `base_dir`.
     ///
-    /// **NativeFs-only**: this method takes a `&Path` and calls `canonicalize()` and
-    /// `fs.set_root()`, which only make sense for OS-backed filesystems. For virtual or
+    /// **NativeFs-only**: this method calls `canonicalize()` and `fs.set_root()`,
+    /// which only make sense for OS-backed filesystems. For virtual or
     /// WASM environments use [`ModuleCache::resolve_key`] instead.
     pub fn resolve_source(
         &mut self,
         source: &str,
-        base_dir: &Path,
+        base_dir: &str,
         runtime_vars: &HashMap<String, Value>,
         warnings: &mut Vec<String>,
     ) -> Result<Arc<ResolvedModule>, MdsError> {
         // Canonicalize base_dir via the FileSystem abstraction so that custom
         // or virtual backends can override this behaviour (fixes issue #21).
-        let base_dir_str = base_dir.display().to_string();
-        let canonical_str = self.fs.canonicalize(&base_dir_str)?;
+        let canonical_str = self.fs.canonicalize(base_dir)?;
         self.fs.set_root(&canonical_str)?;
 
         // The base_key must look like a file path so that normalize() can call

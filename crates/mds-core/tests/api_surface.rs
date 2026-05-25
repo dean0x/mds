@@ -653,3 +653,31 @@ fn load_vars_str_feeds_compile_virtual() {
     let output = mds::compile_virtual(modules, "main.mds", Some(vars)).unwrap();
     assert_eq!(output, "Hello Test!\n");
 }
+
+// ── Issue #23: resolve_path and resolve_source accept &str, not &Path ─────────
+
+#[test]
+fn module_cache_resolve_path_accepts_str() {
+    // Validates #23: resolve_path now takes &str, not &Path.
+    // The test verifies the signature compiles — a file-not-found error is expected
+    // since "/nonexistent.mds" does not exist on disk.
+    let mut cache = ModuleCache::new();
+    let mut warnings = vec![];
+    let result = cache.resolve_path("/nonexistent.mds", &HashMap::new(), &mut warnings);
+    assert!(result.is_err(), "expected error for nonexistent file");
+}
+
+#[test]
+fn module_cache_resolve_source_accepts_str() {
+    // Validates #23: resolve_source now takes &str for base_dir, not &Path.
+    // A simple valid source with no imports should succeed with the current directory.
+    let mut cache = ModuleCache::new();
+    let mut warnings = vec![];
+    let base_dir = std::env::current_dir()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let result = cache.resolve_source("Hello!\n", &base_dir, &HashMap::new(), &mut warnings);
+    assert!(result.is_ok(), "expected ok for valid source: {result:?}");
+}

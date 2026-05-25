@@ -57,7 +57,7 @@ pub use options::{
 pub use resolver::ModuleCache;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub use error::{MdsError, SerializedError, SerializedSpan};
 pub use value::Value;
@@ -177,10 +177,13 @@ pub fn check(
     runtime_vars: Option<HashMap<String, Value>>,
 ) -> Result<(), MdsError> {
     let path = path.as_ref();
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| MdsError::io("path is not valid UTF-8"))?;
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
-    cache.resolve_path(path, &vars, &mut warnings)?;
+    cache.resolve_path(path_str, &vars, &mut warnings)?;
     emit_warnings(&warnings);
     Ok(())
 }
@@ -204,12 +207,23 @@ pub fn check_str(source: &str) -> Result<(), MdsError> {
     check_str_with(source, None, None)
 }
 
-/// Resolve an optional base directory to a `PathBuf`, falling back to cwd.
-fn resolve_base_dir(base_dir: Option<&Path>) -> Result<PathBuf, MdsError> {
+/// Resolve an optional base directory to a `String`, falling back to cwd.
+///
+/// Fails with an explicit error when the path contains non-UTF-8 bytes rather
+/// than silently corrupting the string via `display()`.
+fn resolve_base_dir(base_dir: Option<&Path>) -> Result<String, MdsError> {
     match base_dir {
-        Some(d) => Ok(d.to_path_buf()),
+        Some(d) => d
+            .to_str()
+            .ok_or_else(|| MdsError::io("base_dir path is not valid UTF-8"))
+            .map(str::to_owned),
         None => std::env::current_dir()
-            .map_err(|e| MdsError::io(format!("cannot determine current directory: {e}"))),
+            .map_err(|e| MdsError::io(format!("cannot determine current directory: {e}")))
+            .and_then(|p| {
+                p.to_str()
+                    .ok_or_else(|| MdsError::io("current directory path is not valid UTF-8"))
+                    .map(str::to_owned)
+            }),
     }
 }
 
@@ -278,10 +292,13 @@ pub fn compile_collecting_warnings(
     runtime_vars: Option<HashMap<String, Value>>,
 ) -> Result<(String, Vec<String>), MdsError> {
     let path = path.as_ref();
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| MdsError::io("path is not valid UTF-8"))?;
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
-    let resolved = cache.resolve_path(path, &vars, &mut warnings)?;
+    let resolved = cache.resolve_path(path_str, &vars, &mut warnings)?;
     Ok((build_output(&resolved), warnings))
 }
 
@@ -322,10 +339,13 @@ pub fn check_collecting_warnings(
     runtime_vars: Option<HashMap<String, Value>>,
 ) -> Result<((), Vec<String>), MdsError> {
     let path = path.as_ref();
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| MdsError::io("path is not valid UTF-8"))?;
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
-    cache.resolve_path(path, &vars, &mut warnings)?;
+    cache.resolve_path(path_str, &vars, &mut warnings)?;
     Ok(((), warnings))
 }
 
@@ -527,10 +547,13 @@ pub fn compile_with_deps(
     runtime_vars: Option<HashMap<String, Value>>,
 ) -> Result<CompileOutput, MdsError> {
     let path = path.as_ref();
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| MdsError::io("path is not valid UTF-8"))?;
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
-    let resolved = cache.resolve_path(path, &vars, &mut warnings)?;
+    let resolved = cache.resolve_path(path_str, &vars, &mut warnings)?;
     let output = build_output(&resolved);
     // Post-order DFS guarantees the entry module is last in the cache.
     // Filter by value rather than position for explicitness.
