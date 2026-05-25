@@ -172,4 +172,38 @@ describe('createMdsTransformer', () => {
     const result = await transformer.shouldTransform('/path/to/file.ts');
     assert.equal(result, false);
   });
+
+  test('null byte in output is escaped', async () => {
+    const mds = createMockMds({
+      async compileFile() {
+        return { output: 'before\x00after', warnings: [], dependencies: [] };
+      },
+    });
+    const transformer = createMdsTransformer(mds);
+    const result = await transformer.transform('/file.mds');
+
+    const lines = result.code.split('\n');
+    const exportLine = lines.find(l => l.startsWith('export default'));
+    assert.ok(exportLine, 'should have export default line');
+    assert.ok(!exportLine.includes('\x00'), 'null byte must be escaped in JS string literal');
+    assert.ok(exportLine.includes('\\0'), 'null byte must be escaped as \\0');
+  });
+
+  test('poisoned promise resets on init rejection, allowing retry', async () => {
+    let callCount = 0;
+    const mds = createMockMds({
+      async init() {
+        callCount++;
+        if (callCount === 1) throw new Error('transient init failure');
+      },
+    });
+    const transformer = createMdsTransformer(mds);
+
+    // First call — init() rejects transiently
+    await assert.rejects(() => transformer.transform('/file.mds'), /transient init failure/);
+
+    // Second call — must retry init, not re-use the rejected promise
+    await transformer.transform('/file.mds');
+    assert.equal(callCount, 2, 'init should have been called twice (once for each attempt)');
+  });
 });
