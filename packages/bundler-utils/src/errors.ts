@@ -9,10 +9,11 @@ interface MdsErrorLike {
 
 function isMdsErrorLike(err: unknown): err is MdsErrorLike {
   if (!(err instanceof Error)) return false;
-  const code = (err as unknown as Record<string, unknown>)['code'];
-  return typeof code === 'string' && code.startsWith('mds::');
+  if (!('code' in err) || typeof err.code !== 'string') return false;
+  return err.code.startsWith('mds::');
 }
 
+/** Formats a compiler error (or any thrown value) into a `FormattedError` suitable for bundler error reporting. */
 export function formatMdsError(err: unknown, id: string): FormattedError {
   if (isMdsErrorLike(err)) {
     let message = err.message;

@@ -1,6 +1,15 @@
 import type { MdsPluginOptions } from '@mds/bundler-utils';
 import { createMdsTransformer, formatMdsError, cleanId, isMdsExtension } from '@mds/bundler-utils';
 
+// Structural subset of Vite's PluginContext. We intentionally keep a narrow
+// interface rather than importing `Plugin` from 'vite' because:
+//   1. Vite's Plugin<A> extends rollup.Plugin<A> which pulls in ObjectHook,
+//      HmrContext → ViteDevServer → hundreds of types we don't use.
+//   2. handleHotUpdate uses legacy HmrContext (with full ViteDevServer), while
+//      we only need { file, server.ws.send }. A structural type avoids fighting
+//      the generic chain and keeps this file dependency-free at the type level.
+// If Vite's Plugin API surface ever changes in a breaking way that affects the
+// hooks below, TypeScript will catch it at build time via structural checking.
 interface PluginTransformContext {
   warn(msg: string): void;
   addWatchFile(id: string): void;
@@ -21,6 +30,12 @@ interface VitePlugin {
   }) => void | undefined | unknown[];
 }
 
+/**
+ * Vite plugin that compiles `.mds` and `.md` (with `type: mds` frontmatter)
+ * files into JavaScript modules. Runs with `enforce: 'pre'` so it intercepts
+ * before Vite's default asset handling. On file change, triggers a full-page
+ * reload via HMR (see comment on handleHotUpdate below for rationale).
+ */
 export default function mdsPlugin(options?: MdsPluginOptions): VitePlugin {
   let transformer: ReturnType<typeof createMdsTransformer> | null = null;
 
@@ -63,6 +78,11 @@ export default function mdsPlugin(options?: MdsPluginOptions): VitePlugin {
     },
 
     handleHotUpdate(ctx) {
+      // Full-reload instead of granular HMR is intentional for v0.1.0.
+      // MDS files export plain strings (no stateful React/Vue components),
+      // so there is no module graph to hot-swap — a full reload is both safe
+      // and correct. Targeted HMR (invalidating only the importing modules) is
+      // a future optimisation once the module graph integration is validated.
       const clean = cleanId(ctx.file);
       if (isMdsExtension(clean)) {
         ctx.server.ws.send({ type: 'full-reload' });

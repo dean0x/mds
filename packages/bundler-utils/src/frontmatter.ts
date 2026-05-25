@@ -1,9 +1,11 @@
 import { open } from 'node:fs/promises';
 
+/** Returns `true` if `id` has a `.mds` file extension. */
 export function isMdsExtension(id: string): boolean {
   return id.endsWith('.mds');
 }
 
+/** Strips query string and hash fragment from a module id, returning the bare file path. */
 export function cleanId(id: string): string {
   const qIdx = id.indexOf('?');
   const hIdx = id.indexOf('#');
@@ -28,15 +30,16 @@ export function cleanId(id: string): string {
  * 3. Between the opening and closing `---`, there is a `type: mds` key
  */
 export function shouldTransform(id: string): boolean | Promise<boolean> {
-  const clean = cleanId(id);
-  if (isMdsExtension(clean)) return true;
-  if (!clean.endsWith('.md')) return false;
+  // id is expected to be pre-cleaned by the caller (query/hash stripped).
+  // Callers (vite-plugin, rollup-plugin) call cleanId() before invoking this.
+  if (isMdsExtension(id)) return true;
+  if (!id.endsWith('.md')) return false;
 
   // Async: read only the first 512 bytes and check for type: mds in frontmatter.
   // Using open + read instead of readFile avoids loading the entire file into memory
   // for large .md files.
   const PEEK_BYTES = 512;
-  return open(clean, 'r')
+  return open(id, 'r')
     .then(async (fh) => {
       try {
         const buf = Buffer.alloc(PEEK_BYTES);

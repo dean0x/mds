@@ -1,6 +1,13 @@
 import type { MdsPluginOptions } from '@mds/bundler-utils';
 import { createMdsTransformer, formatMdsError, cleanId } from '@mds/bundler-utils';
 
+// Structural subset of Rollup's PluginContext and Plugin. We intentionally keep
+// narrow interfaces rather than importing `Plugin` from 'rollup' because:
+//   1. Rollup's Plugin<A> extends OutputPlugin and Partial<PluginHooks> which
+//      pulls in dozens of hook types (resolveId, load, renderChunk, …) unused here.
+//   2. The structural types below are verified at build time via assignability
+//      checks, so type drift is caught without the full import overhead.
+// If Rollup's API surface changes in a breaking way, TypeScript will report it.
 interface PluginContext {
   warn(msg: string): void;
   addWatchFile(id: string): void;
@@ -17,6 +24,12 @@ interface RollupPlugin {
   ) => Promise<{ code: string; map: null } | null>;
 }
 
+/**
+ * Rollup plugin that compiles `.mds` and `.md` (with `type: mds` frontmatter)
+ * files into JavaScript modules. Uses `this.error()` for build-time errors so
+ * Rollup can display them with position information. Watch-mode dependencies
+ * are registered via `this.addWatchFile()` so Rollup re-compiles on changes.
+ */
 export default function mdsPlugin(options?: MdsPluginOptions): RollupPlugin {
   let transformer: ReturnType<typeof createMdsTransformer> | null = null;
 
