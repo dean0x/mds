@@ -1,6 +1,6 @@
 /**
  * WASM backend compileFile/checkFile tests for @mds/mds universal package.
- * Tests: U-WCF1 through U-WCF8
+ * Tests: U-WCF1 through U-WCF11
  *
  * Uses subprocess isolation with MDS_BACKEND=wasm to force the WASM backend
  * for file operations. Each test spawns a separate subprocess to avoid
@@ -54,7 +54,7 @@ describe('WASM backend — compileFile/checkFile', () => {
       const r = await compileFile(${JSON.stringify(SIMPLE_MDS)});
       process.stdout.write(JSON.stringify({ output: r.output, warnings: r.warnings, dependencies: r.dependencies }));
     `, wasmEnv());
-    assert.equal(typeof result.output, 'string', 'output must be string');
+    assert.ok(typeof result.output === 'string', 'output must be string');
     assert.ok(result.output.length > 0, 'output must not be empty');
     assert.ok(Array.isArray(result.warnings), 'warnings must be array');
     assert.ok(Array.isArray(result.dependencies), 'dependencies must be array');
@@ -84,7 +84,7 @@ describe('WASM backend — compileFile/checkFile', () => {
       const r = await compileFile(${JSON.stringify(ENTRY_MDS)});
       process.stdout.write(JSON.stringify({ output: r.output, warnings: r.warnings, dependencies: r.dependencies }));
     `, wasmEnv());
-    assert.equal(typeof result.output, 'string', 'output must be string');
+    assert.ok(typeof result.output === 'string', 'output must be string');
     assert.ok(result.output.length > 0, 'output must not be empty');
   });
 
@@ -95,7 +95,7 @@ describe('WASM backend — compileFile/checkFile', () => {
       const r = await compileFile(${JSON.stringify(SIMPLE_MDS)}, { vars: { count: 99 } });
       process.stdout.write(JSON.stringify({ output: r.output, warnings: r.warnings, dependencies: r.dependencies }));
     `, wasmEnv());
-    assert.equal(typeof result.output, 'string', 'output must be string');
+    assert.ok(typeof result.output === 'string', 'output must be string');
     assert.ok(
       result.output.includes('You have 99 items'),
       `expected runtime var override (count=99) in output, got: ${result.output}`,
@@ -124,6 +124,7 @@ describe('WASM backend — compileFile/checkFile', () => {
       }
     `, wasmEnv());
     assert.ok(result.threw, 'compileFile on nonexistent path must throw');
+    assert.ok(result.message.length > 0, 'error message must not be empty');
   });
 
   test('U-WCF7: WASM compileFile output matches native compileFile output (parity)', async () => {
@@ -141,6 +142,11 @@ describe('WASM backend — compileFile/checkFile', () => {
       wasmResult.output,
       nativeResult.output,
       `WASM and native compileFile output must match.\nWASM: ${wasmResult.output}\nNative: ${nativeResult.output}`,
+    );
+    assert.deepEqual(
+      wasmResult.dependencies,
+      nativeResult.dependencies,
+      'WASM and native compileFile dependencies must match',
     );
   });
 
@@ -178,6 +184,11 @@ describe('WASM backend — compileFile/checkFile', () => {
       nativeResult.output,
       `WASM and native compileFile output must match for file with imports.\nWASM: ${wasmResult.output}\nNative: ${nativeResult.output}`,
     );
+    assert.deepEqual(
+      wasmResult.dependencies,
+      nativeResult.dependencies,
+      'WASM and native compileFile dependencies must match',
+    );
   });
 
   test('U-WCF10: WASM checkFile with imports matches native (parity)', async () => {
@@ -210,5 +221,6 @@ describe('WASM backend — compileFile/checkFile', () => {
       }
     `, wasmEnv());
     assert.ok(result.threw, 'checkFile on nonexistent path must throw');
+    assert.ok(result.message.length > 0, 'error message must not be empty');
   });
 });
