@@ -1,32 +1,31 @@
 import { shouldTransform as checkTransform, cleanId } from './frontmatter.js';
 // Unicode line separator (U+2028) and paragraph separator (U+2029) must be
 // escaped in JavaScript string literals embedded in source code.
-const LINE_SEP = ' ';
-const PARA_SEP = ' ';
 function escapeForJs(str) {
     let result = '';
     for (let i = 0; i < str.length; i++) {
         const ch = str[i];
-        if (ch === '\\') {
-            result += '\\\\';
-        }
-        else if (ch === '"') {
-            result += '\\"';
-        }
-        else if (ch === '\n') {
-            result += '\\n';
-        }
-        else if (ch === '\r') {
-            result += '\\r';
-        }
-        else if (ch === LINE_SEP) {
-            result += '\\u2028';
-        }
-        else if (ch === PARA_SEP) {
-            result += '\\u2029';
-        }
-        else {
-            result += ch;
+        const code = ch.charCodeAt(0);
+        switch (true) {
+            case ch === '\\':
+                result += '\\\\';
+                break;
+            case ch === '"':
+                result += '\\"';
+                break;
+            case ch === '\n':
+                result += '\\n';
+                break;
+            case ch === '\r':
+                result += '\\r';
+                break;
+            case code === 0x2028:
+                result += '\\u2028';
+                break;
+            case code === 0x2029:
+                result += '\\u2029';
+                break;
+            default: result += ch;
         }
     }
     return result;

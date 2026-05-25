@@ -3,11 +3,10 @@
  */
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { createMdsTransformer } from '../dist/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

@@ -14,17 +14,6 @@ const SIMPLE_MDS = resolve(__dirname, '../../mds/__test__/fixtures/simple.mds');
 // Test helpers
 // ---------------------------------------------------------------------------
 
-function createMockTransformer(overrides = {}) {
-  return {
-    shouldTransform: overrides.shouldTransform ?? ((id) => id.endsWith('.mds')),
-    transform: overrides.transform ?? (async (id) => ({
-      code: `export default "compiled: ${id}";`,
-      dependencies: [],
-      warnings: [],
-    })),
-  };
-}
-
 function createPluginContext(overrides = {}) {
   const addedWatchFiles = [];
   const warnings = [];
@@ -100,18 +89,12 @@ describe('mdsPlugin', () => {
   });
 
   test('transform calls addWatchFile for each dependency', async () => {
-    // Create a plugin and manually stub the transformer
+    const CONSUMER_MDS = resolve(__dirname, '../../mds/__test__/fixtures/import_consumer.mds');
     const plugin = mdsPlugin();
     const ctx = createPluginContext();
     await plugin.buildStart.call(ctx);
-
-    // We can't easily inject a mock transformer post-buildStart since @mds/mds is the real one.
-    // Instead, test that .mds files work end-to-end: if the file doesn't exist, an error is thrown.
-    // For dependency tracking, we test it via the plugin's internal logic with a temp .mds file.
-    // For now, verify the mechanism works for a real .mds file.
-    // This is an integration-level check covered by integration.spec.mjs.
-    // For unit testing, we'll test directly via transform with a mock context.
-    assert.ok(true, 'addWatchFile mechanism verified through integration test');
+    await plugin.transform.call(ctx, '', CONSUMER_MDS);
+    assert.ok(ctx.addedWatchFiles.length >= 1, 'expected at least one watch file');
   });
 
   test('handleHotUpdate sends full-reload for .mds file', () => {

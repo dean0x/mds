@@ -1,8 +1,8 @@
 function isMdsErrorLike(err) {
     if (!(err instanceof Error))
         return false;
-    const errObj = err;
-    return typeof errObj['code'] === 'string' && String(errObj['code']).startsWith('mds::');
+    const code = err['code'];
+    return typeof code === 'string' && code.startsWith('mds::');
 }
 export function formatMdsError(err, id) {
     if (isMdsErrorLike(err)) {

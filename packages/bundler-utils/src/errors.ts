@@ -9,8 +9,8 @@ interface MdsErrorLike {
 
 function isMdsErrorLike(err: unknown): err is MdsErrorLike {
   if (!(err instanceof Error)) return false;
-  const errObj = err as unknown as Record<string, unknown>;
-  return typeof errObj['code'] === 'string' && String(errObj['code']).startsWith('mds::');
+  const code = (err as unknown as Record<string, unknown>)['code'];
+  return typeof code === 'string' && code.startsWith('mds::');
 }
 
 export function formatMdsError(err: unknown, id: string): FormattedError {
