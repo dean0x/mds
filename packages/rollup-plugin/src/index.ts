@@ -30,6 +30,17 @@ interface RollupPlugin {
  * Rollup can display them with position information. Watch-mode dependencies
  * are registered via `this.addWatchFile()` so Rollup re-compiles on changes.
  */
+/**
+ * Inject a pre-built transformer for testing without going through the real
+ * @mds/mds import. Allows tests to provide a mock transformer that returns
+ * controlled warnings, dependencies, and output.
+ * FOR TESTING ONLY — does nothing in production.
+ */
+let _testTransformer: ReturnType<typeof createMdsTransformer> | null = null;
+export function _setTransformerForTesting(t: ReturnType<typeof createMdsTransformer> | null): void {
+  _testTransformer = t;
+}
+
 export default function mdsPlugin(options?: MdsPluginOptions): RollupPlugin {
   let transformer: ReturnType<typeof createMdsTransformer> | null = null;
 
@@ -37,6 +48,10 @@ export default function mdsPlugin(options?: MdsPluginOptions): RollupPlugin {
     name: 'mds',
 
     async buildStart() {
+      if (_testTransformer !== null) {
+        transformer = _testTransformer;
+        return;
+      }
       const mds = await import('@mds/mds');
       transformer = createMdsTransformer(mds, options);
     },

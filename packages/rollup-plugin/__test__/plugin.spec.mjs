@@ -5,7 +5,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import mdsPlugin from '../dist/index.js';
+import mdsPlugin, { _setTransformerForTesting } from '../dist/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SIMPLE_MDS = resolve(__dirname, '../../mds/__test__/fixtures/simple.mds');
@@ -94,6 +94,35 @@ describe('mdsPlugin (rollup)', () => {
     const options = { vars: { env: 'production' } };
     const plugin = mdsPlugin(options);
     assert.ok(plugin, 'plugin created with options');
+  });
+
+  test('this.warn called once per compiler warning', async () => {
+    // Inject a mock transformer that returns warnings to exercise the
+    // for-loop in the plugin that calls this.warn(warning).
+    const mockTransformer = {
+      shouldTransform(_id) { return true; },
+      async transform(_id) {
+        return {
+          code: 'export default "ok";',
+          warnings: ['rollup warning one', 'rollup warning two'],
+          dependencies: [],
+        };
+      },
+    };
+    _setTransformerForTesting(mockTransformer);
+
+    try {
+      const plugin = mdsPlugin();
+      const ctx = createPluginContext();
+      await plugin.buildStart.call(ctx);
+      await plugin.transform.call(ctx, '', SIMPLE_MDS);
+
+      assert.equal(ctx.warnings.length, 2, 'should call this.warn for each compiler warning');
+      assert.equal(ctx.warnings[0], 'rollup warning one');
+      assert.equal(ctx.warnings[1], 'rollup warning two');
+    } finally {
+      _setTransformerForTesting(null);
+    }
   });
 
   test('transform calls this.error when compile fails', async () => {

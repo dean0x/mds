@@ -67,3 +67,17 @@ export function _resetForTesting(): void {
   transformer = null;
   initPromise = null;
 }
+
+/**
+ * Inject a pre-built transformer for testing without going through the real
+ * @mds/mds import. Allows tests to provide a mock transformer that returns
+ * controlled warnings, dependencies, and output.
+ * FOR TESTING ONLY — throws in production environments.
+ */
+export function _setTransformerForTesting(t: ReturnType<typeof createMdsTransformer>): void {
+  if (process.env['NODE_ENV'] !== 'test') {
+    throw new Error('_setTransformerForTesting is only allowed when NODE_ENV=test');
+  }
+  transformer = t;
+  initPromise = Promise.resolve();
+}

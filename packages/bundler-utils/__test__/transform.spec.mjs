@@ -174,6 +174,32 @@ describe('createMdsTransformer', () => {
     assert.equal(result, false);
   });
 
+  test('U+2028 and U+2029 in output are escaped in export default line', async () => {
+    const u2028 = ' ';
+    const u2029 = ' ';
+    const mds = createMockMds({
+      async compileFile() {
+        return {
+          output: `before${u2028}middle${u2029}after`,
+          warnings: [],
+          dependencies: [],
+        };
+      },
+    });
+    const transformer = createMdsTransformer(mds);
+    const result = await transformer.transform('/file.mds');
+
+    const lines = result.code.split('\n');
+    const exportLine = lines.find(l => l.startsWith('export default'));
+    assert.ok(exportLine, 'should have export default line');
+    // Raw U+2028/U+2029 must not appear — they are JS line terminators
+    assert.ok(!exportLine.includes(u2028), 'U+2028 must not appear raw in export default');
+    assert.ok(!exportLine.includes(u2029), 'U+2029 must not appear raw in export default');
+    // Must appear as explicit unicode escape sequences
+    assert.ok(exportLine.includes('\\u2028'), 'U+2028 must be escaped as \\u2028');
+    assert.ok(exportLine.includes('\\u2029'), 'U+2029 must be escaped as \\u2029');
+  });
+
   test('null byte in output is escaped', async () => {
     const mds = createMockMds({
       async compileFile() {
@@ -213,6 +239,21 @@ describe('createMdsTransformer', () => {
     // U+2028/U+2029 are JS line terminators and must not appear verbatim
     assert.ok(!metaLine.includes(u2028), 'U+2028 must be escaped in metadata');
     assert.ok(!metaLine.includes(u2029), 'U+2029 must be escaped in metadata');
+  });
+
+  test('concurrent transforms call init() exactly once', async () => {
+    const mds = createMockMds();
+    const transformer = createMdsTransformer(mds);
+
+    // Fire multiple transforms concurrently — the promise-caching pattern must
+    // ensure init() is called only once even when all calls race to ensureInit.
+    await Promise.all([
+      transformer.transform('/file1.mds'),
+      transformer.transform('/file2.mds'),
+      transformer.transform('/file3.mds'),
+    ]);
+
+    assert.equal(mds.initCallCount, 1, 'init should be called exactly once under concurrent load');
   });
 
   test('poisoned promise resets on init rejection, allowing retry', async () => {

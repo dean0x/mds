@@ -5,7 +5,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import mdsPlugin from '../dist/index.js';
+import mdsPlugin, { _setTransformerForTesting } from '../dist/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SIMPLE_MDS = resolve(__dirname, '../../mds/__test__/fixtures/simple.mds');
@@ -148,6 +148,35 @@ describe('mdsPlugin', () => {
     );
     assert.ok(err instanceof Error, 'should throw an Error');
     assert.equal(err.id, '/nonexistent/path/file.mds', 'error should have .id set to the file path');
+  });
+
+  test('this.warn called once per compiler warning', async () => {
+    // Inject a mock transformer that returns warnings to exercise the
+    // for-loop in the plugin that calls this.warn(warning).
+    const mockTransformer = {
+      shouldTransform(_id) { return true; },
+      async transform(_id) {
+        return {
+          code: 'export default "ok";',
+          warnings: ['compiler warning one', 'compiler warning two'],
+          dependencies: [],
+        };
+      },
+    };
+    _setTransformerForTesting(mockTransformer);
+
+    try {
+      const plugin = mdsPlugin();
+      const ctx = createPluginContext();
+      await plugin.buildStart.call(ctx);
+      await plugin.transform.call(ctx, '', SIMPLE_MDS);
+
+      assert.equal(ctx.warnings.length, 2, 'should call this.warn for each compiler warning');
+      assert.equal(ctx.warnings[0], 'compiler warning one');
+      assert.equal(ctx.warnings[1], 'compiler warning two');
+    } finally {
+      _setTransformerForTesting(null);
+    }
   });
 
   test('options passed to plugin are available', () => {

@@ -12,7 +12,7 @@ const SIMPLE_MDS = resolve(__dirname, '../../mds/__test__/fixtures/simple.mds');
 // ---------------------------------------------------------------------------
 // Import loader and reset helper
 // ---------------------------------------------------------------------------
-const { default: mdsLoader, _resetForTesting } = await import('../dist/index.js');
+const { default: mdsLoader, _resetForTesting, _setTransformerForTesting } = await import('../dist/index.js');
 
 // ---------------------------------------------------------------------------
 // Mock LoaderContext factory
@@ -112,12 +112,34 @@ describe('mdsLoader', () => {
   });
 
   test('no warnings emitted for simple fixture', async () => {
-    // We can't easily inject a mock transformer due to the module-level singleton,
-    // so we verify the happy path: simple.mds produces zero warnings.
-    // The warning emission path (emitWarning per warning) is covered indirectly
-    // by bundler-utils/src/transform.spec which verifies warnings pass through.
     const ctx = createLoaderContext(SIMPLE_MDS);
     await mdsLoader.call(ctx);
     assert.equal(ctx.emittedWarnings.length, 0);
+  });
+
+  test('emitWarning called once per compiler warning, each wrapped in Error', async () => {
+    // Inject a mock transformer that returns two warnings to exercise the
+    // for-loop in the loader that calls this.emitWarning(new Error(warning)).
+    const mockTransformer = {
+      shouldTransform(_id) { return true; },
+      async transform(_id) {
+        return {
+          code: 'export default "ok";',
+          warnings: ['first warning', 'second warning'],
+          dependencies: [],
+        };
+      },
+    };
+    _setTransformerForTesting(mockTransformer);
+
+    const ctx = createLoaderContext(SIMPLE_MDS);
+    await mdsLoader.call(ctx);
+
+    assert.equal(ctx.callbackResult.err, null, 'should not error');
+    assert.equal(ctx.emittedWarnings.length, 2, 'should emit one warning per compiler warning');
+    assert.ok(ctx.emittedWarnings[0] instanceof Error, 'each warning should be an Error instance');
+    assert.ok(ctx.emittedWarnings[1] instanceof Error, 'each warning should be an Error instance');
+    assert.equal(ctx.emittedWarnings[0].message, 'first warning');
+    assert.equal(ctx.emittedWarnings[1].message, 'second warning');
   });
 });
