@@ -40,6 +40,15 @@ export interface ModuleScannerOptions {
 
 export interface BuildModulesMapResult {
   entryFilename: string;
+  /**
+   * Flat map of virtual filename → source for the entry file and all its
+   * transitive imports. The entry file itself is included, keyed by
+   * `entryFilename`. Callers that pass `modules` as extra dependencies to the
+   * WASM `build_modules()` function MUST extract and remove the entry source
+   * before the call — leaving the entry key present causes
+   * `mds::filename_collision` because `build_modules()` also inserts the entry
+   * source under `filename`.
+   */
   modules: Record<string, string>;
 }
 
