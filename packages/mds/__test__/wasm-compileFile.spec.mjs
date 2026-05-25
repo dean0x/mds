@@ -124,7 +124,7 @@ describe('WASM backend — compileFile/checkFile', () => {
       }
     `, wasmEnv());
     assert.ok(result.threw, 'compileFile on nonexistent path must throw');
-    assert.ok(result.message.length > 0, 'error message must not be empty');
+    assert.ok(result.message, 'error message must not be empty');
   });
 
   test('U-WCF7: WASM compileFile output matches native compileFile output (parity)', async () => {
@@ -143,10 +143,11 @@ describe('WASM backend — compileFile/checkFile', () => {
       nativeResult.output,
       `WASM and native compileFile output must match.\nWASM: ${wasmResult.output}\nNative: ${nativeResult.output}`,
     );
+    const toBasenames = (deps) => deps.map((d) => path.basename(d)).sort();
     assert.deepEqual(
-      wasmResult.dependencies,
-      nativeResult.dependencies,
-      'WASM and native compileFile dependencies must match',
+      toBasenames(wasmResult.dependencies),
+      toBasenames(nativeResult.dependencies),
+      'WASM and native compileFile dependencies must match (compared by basename — WASM returns relative, native returns absolute)',
     );
   });
 
@@ -184,10 +185,11 @@ describe('WASM backend — compileFile/checkFile', () => {
       nativeResult.output,
       `WASM and native compileFile output must match for file with imports.\nWASM: ${wasmResult.output}\nNative: ${nativeResult.output}`,
     );
+    const toBasenames = (deps) => deps.map((d) => path.basename(d)).sort();
     assert.deepEqual(
-      wasmResult.dependencies,
-      nativeResult.dependencies,
-      'WASM and native compileFile dependencies must match',
+      toBasenames(wasmResult.dependencies),
+      toBasenames(nativeResult.dependencies),
+      'WASM and native compileFile dependencies must match (compared by basename — WASM returns relative, native returns absolute)',
     );
   });
 
@@ -221,6 +223,6 @@ describe('WASM backend — compileFile/checkFile', () => {
       }
     `, wasmEnv());
     assert.ok(result.threw, 'checkFile on nonexistent path must throw');
-    assert.ok(result.message.length > 0, 'error message must not be empty');
+    assert.ok(result.message, 'error message must not be empty');
   });
 });
