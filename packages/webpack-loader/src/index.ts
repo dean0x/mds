@@ -1,5 +1,5 @@
-import { createMdsTransformer, formatMdsError } from '@mds/bundler-utils';
 import type { MdsPluginOptions } from '@mds/bundler-utils';
+import { createMdsTransformer, formatMdsError } from '@mds/bundler-utils';
 
 interface LoaderContext {
   resourcePath: string;
@@ -15,9 +15,21 @@ let initPromise: Promise<void> | null = null;
 async function ensureTransformer(options: MdsPluginOptions): Promise<NonNullable<typeof transformer>> {
   if (transformer !== null) return transformer;
   if (initPromise === null) {
-    initPromise = import('@mds/mds').then((mds) => {
-      transformer = createMdsTransformer(mds, options);
-    });
+    // NOTE: options are captured from the first call. Webpack loaders are
+    // stateless functions invoked per-file; options come from the webpack
+    // config and do not change across loader invocations within a single
+    // build. Multiple compiler instances with different options are not
+    // supported by a module-level singleton — use separate webpack processes
+    // in that scenario.
+    initPromise = import('@mds/mds')
+      .then((mds) => {
+        transformer = createMdsTransformer(mds, options);
+      })
+      .catch((err: unknown) => {
+        // Reset so the next call can retry the dynamic import.
+        initPromise = null;
+        throw err;
+      });
   }
   await initPromise;
   // After initPromise resolves, transformer is guaranteed to be set.
@@ -47,9 +59,12 @@ export default async function mdsLoader(this: LoaderContext): Promise<void> {
 
 /**
  * Reset singleton state for testing.
- * FOR TESTING ONLY.
+ * FOR TESTING ONLY — throws in production environments.
  */
 export function _resetForTesting(): void {
+  if (process.env['NODE_ENV'] === 'production') {
+    throw new Error('_resetForTesting must not be called in production');
+  }
   transformer = null;
   initPromise = null;
 }
