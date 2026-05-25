@@ -73,7 +73,7 @@ function wrapWithFileOps(
     const source = modules[entryFilename];
     if (source === undefined) {
       throw new Error(
-        `invariant violation: buildModulesMap did not populate entry file "${entryFilename}" in modules map`,
+        `buildModulesMap did not populate entry file "${entryFilename}" in modules map`,
       );
     }
     delete modules[entryFilename];
