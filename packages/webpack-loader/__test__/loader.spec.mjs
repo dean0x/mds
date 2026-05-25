@@ -111,12 +111,13 @@ describe('mdsLoader', () => {
     assert.equal(ctx2.callbackResult.err, null);
   });
 
-  test('emitWarning called for each warning', async () => {
-    // We can't easily inject a mock transformer, so we rely on the real compile
-    // which shouldn't emit warnings for simple.mds. Test the happy path.
+  test('no warnings emitted for simple fixture', async () => {
+    // We can't easily inject a mock transformer due to the module-level singleton,
+    // so we verify the happy path: simple.mds produces zero warnings.
+    // The warning emission path (emitWarning per warning) is covered indirectly
+    // by bundler-utils/src/transform.spec which verifies warnings pass through.
     const ctx = createLoaderContext(SIMPLE_MDS);
     await mdsLoader.call(ctx);
-    // For simple.mds there are no warnings
     assert.equal(ctx.emittedWarnings.length, 0);
   });
 });

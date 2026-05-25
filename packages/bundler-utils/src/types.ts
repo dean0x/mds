@@ -1,6 +1,16 @@
 /**
  * Minimal interface for the MDS compiler API required by bundler plugins.
  * Both the native Node.js backend and the WASM backend satisfy this interface.
+ *
+ * Structural typing relationship: the real `@mds/mds` module namespace satisfies
+ * this interface by duck typing — no explicit `implements` declaration is needed
+ * because TypeScript's structural type system enforces compatibility at the
+ * dynamic `import('@mds/mds')` call sites in transformer.ts.
+ *
+ * This interface intentionally omits `InitOptions` (the optional argument that
+ * the real `init()` accepts) because bundler plugins always call `init()` with
+ * no arguments. Widening the interface to include options the plugins never use
+ * would couple bundler-utils to the full @mds/mds API surface unnecessarily.
  */
 export interface MdsApi {
   /** Compile a file at the given absolute path and return the compiled output. */
