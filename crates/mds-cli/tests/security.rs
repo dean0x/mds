@@ -236,23 +236,33 @@ fn resolve_source_nonexistent_base_dir_errors() {
 #[test]
 fn parser_nesting_depth_limit_rejects_deep_nesting() {
     // Build a template with 257 nested @if blocks (just past MAX_NESTING_DEPTH=256).
-    let mut source = String::new();
-    source.push_str("---\nflag: true\n---\n");
-    for _ in 0..257 {
-        source.push_str("@if flag:\n");
-    }
-    source.push_str("deep\n");
-    for _ in 0..257 {
-        source.push_str("@end\n");
-    }
+    //
+    // Run in a thread with a larger stack (8 MB) because deeply-nested @if blocks
+    // create equally deep parse_body/parse_if_block call chains. The depth limit
+    // error must fire BEFORE the system stack overflows.
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut source = String::new();
+            source.push_str("---\nflag: true\n---\n");
+            for _ in 0..257 {
+                source.push_str("@if flag:\n");
+            }
+            source.push_str("deep\n");
+            for _ in 0..257 {
+                source.push_str("@end\n");
+            }
 
-    let result = mds::compile_str(&source);
-    assert!(result.is_err(), "257 nested @if blocks must be rejected");
-    let err = format!("{}", result.unwrap_err());
-    assert!(
-        err.contains("nesting") || err.contains("depth") || err.contains("256"),
-        "error should mention nesting depth limit, got: {err}"
-    );
+            let result = mds::compile_str(&source);
+            assert!(result.is_err(), "257 nested @if blocks must be rejected");
+            let err = format!("{}", result.unwrap_err());
+            assert!(
+                err.contains("nesting") || err.contains("depth") || err.contains("256"),
+                "error should mention nesting depth limit, got: {err}"
+            );
+        })
+        .unwrap();
+    handle.join().unwrap();
 }
 
 #[test]

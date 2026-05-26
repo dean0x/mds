@@ -5,6 +5,48 @@ pub struct Module {
     pub body: Vec<Node>,
 }
 
+/// Maximum number of @elseif branches on a single @if block.
+/// Matches MAX_NESTING_DEPTH to prevent pathological chains.
+pub const MAX_ELSEIF_BRANCHES: usize = 256;
+
+/// A literal value on the RHS of an equality condition.
+///
+/// Only string, number, boolean, and null literals are supported.
+/// No variable-to-variable comparison.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CondValue {
+    /// A string literal: `"admin"` or `'admin'`
+    String(String),
+    /// A numeric literal: `42`, `3.14`, `-5`
+    Number(f64),
+    /// A boolean literal: `true` or `false`
+    Bool(bool),
+    /// The null literal
+    Null,
+}
+
+/// A condition in an `@if` or `@elseif` directive.
+#[derive(Debug, Clone)]
+pub enum Condition {
+    /// `@if config.debug:` — truthy check on a dot-path variable
+    Truthy(Vec<String>),
+    /// `@if !config.debug:` — negated truthy check
+    Not(Vec<String>),
+    /// `@if role == "admin":` — strict equality
+    Eq(Vec<String>, CondValue),
+    /// `@if role != "admin":` — strict inequality
+    NotEq(Vec<String>, CondValue),
+}
+
+impl Condition {
+    /// Extract the dot-path from any condition variant.
+    pub fn path(&self) -> &[String] {
+        match self {
+            Condition::Truthy(p) | Condition::Not(p) | Condition::Eq(p, _) | Condition::NotEq(p, _) => p,
+        }
+    }
+}
+
 /// YAML frontmatter block.
 #[derive(Debug, Clone)]
 pub struct Frontmatter {
@@ -83,10 +125,11 @@ pub enum Arg {
 
 #[derive(Debug, Clone)]
 pub struct IfBlock {
-    /// Condition as a dot-separated path: single identifier is `vec!["name"]`,
-    /// dot path is `vec!["config", "debug"]`.
-    pub condition: Vec<String>,
+    /// The primary condition (`@if <condition>:`).
+    pub condition: Condition,
     pub then_body: Vec<Node>,
+    /// Zero or more `@elseif` branches, evaluated in order (short-circuit).
+    pub elseif_branches: Vec<(Condition, Vec<Node>)>,
     pub else_body: Option<Vec<Node>>,
     pub offset: usize,
 }

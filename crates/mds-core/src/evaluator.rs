@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::ast::{Arg, Expr, ForBlock, IfBlock, IncludeDirective, Node};
+use crate::ast::{Arg, CondValue, Condition, Expr, ForBlock, IfBlock, IncludeDirective, Node};
 use crate::error::MdsError;
 use crate::limits::MAX_DOT_SEGMENTS;
 use crate::scope::{FunctionDef, Scope};
@@ -329,20 +329,73 @@ fn call_qualified_function(
     invoke_function(&func, &qualified_name, args, scope, ctx)
 }
 
+/// Compare a runtime `Value` against a literal `CondValue` using strict equality.
+///
+/// Type matching is strict — `Number(3) != String("3")`. Different types always
+/// return `false`. `NaN == NaN` is `false` (IEEE 754 via Rust's `f64 ==`).
+fn values_equal(value: &Value, expected: &CondValue) -> bool {
+    match (value, expected) {
+        (Value::String(s), CondValue::String(e)) => s == e,
+        (Value::Number(n), CondValue::Number(e)) => n == e,
+        (Value::Boolean(b), CondValue::Bool(e)) => b == e,
+        (Value::Null, CondValue::Null) => true,
+        _ => false,
+    }
+}
+
+/// Evaluate a condition to a boolean, resolving the dot-path variable from scope.
+fn evaluate_condition(condition: &Condition, scope: &Scope) -> Result<bool, MdsError> {
+    match condition {
+        Condition::Truthy(path) => {
+            let root = path.first().ok_or_else(|| {
+                MdsError::syntax("internal error: @if block has empty condition path")
+            })?;
+            let value = resolve_dot_path(root, &path[1..], scope)?;
+            Ok(value.is_truthy())
+        }
+        Condition::Not(path) => {
+            let root = path.first().ok_or_else(|| {
+                MdsError::syntax("internal error: @if block has empty condition path")
+            })?;
+            let value = resolve_dot_path(root, &path[1..], scope)?;
+            Ok(!value.is_truthy())
+        }
+        Condition::Eq(path, expected) => {
+            let root = path.first().ok_or_else(|| {
+                MdsError::syntax("internal error: @if block has empty condition path")
+            })?;
+            let value = resolve_dot_path(root, &path[1..], scope)?;
+            Ok(values_equal(&value, expected))
+        }
+        Condition::NotEq(path, expected) => {
+            let root = path.first().ok_or_else(|| {
+                MdsError::syntax("internal error: @if block has empty condition path")
+            })?;
+            let value = resolve_dot_path(root, &path[1..], scope)?;
+            Ok(!values_equal(&value, expected))
+        }
+    }
+}
+
 fn evaluate_if(
     block: &IfBlock,
     scope: &mut Scope,
     ctx: &mut EvalContext,
 ) -> Result<String, MdsError> {
-    let root = block
-        .condition
-        .first()
-        .ok_or_else(|| MdsError::syntax("internal error: @if block has empty condition path"))?;
-    let value = resolve_dot_path(root, &block.condition[1..], scope)?;
+    // Evaluate the primary condition
+    if evaluate_condition(&block.condition, scope)? {
+        return evaluate_nodes(&block.then_body, scope, ctx);
+    }
 
-    if value.is_truthy() {
-        evaluate_nodes(&block.then_body, scope, ctx)
-    } else if let Some(else_body) = &block.else_body {
+    // Evaluate @elseif branches in order (short-circuit: first true branch wins)
+    for (cond, body) in &block.elseif_branches {
+        if evaluate_condition(cond, scope)? {
+            return evaluate_nodes(body, scope, ctx);
+        }
+    }
+
+    // Fall through to @else body if present
+    if let Some(else_body) = &block.else_body {
         evaluate_nodes(else_body, scope, ctx)
     } else {
         Ok(String::new())
@@ -510,7 +563,7 @@ fn evaluate_include(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{DefineBlock, Interpolation, TextNode};
+    use crate::ast::{Condition, DefineBlock, Interpolation, TextNode};
     use std::sync::Arc;
 
     fn text(s: &str) -> Node {
@@ -570,7 +623,8 @@ mod tests {
     #[test]
     fn evaluate_if_truthy() {
         let nodes = vec![Node::If(IfBlock {
-            condition: vec!["flag".to_string()],
+            condition: Condition::Truthy(vec!["flag".to_string()]),
+            elseif_branches: vec![],
             then_body: vec![text("yes")],
             else_body: Some(vec![text("no")]),
             offset: 0,
@@ -584,7 +638,8 @@ mod tests {
     #[test]
     fn evaluate_if_falsy() {
         let nodes = vec![Node::If(IfBlock {
-            condition: vec!["flag".to_string()],
+            condition: Condition::Truthy(vec!["flag".to_string()]),
+            elseif_branches: vec![],
             then_body: vec![text("yes")],
             else_body: Some(vec![text("no")]),
             offset: 0,

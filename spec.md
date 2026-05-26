@@ -89,13 +89,72 @@ Free tier content here.
 @end
 ```
 
+**Negation** (`!`):
+
+```mds
+@if !debug_mode:
+Production content here.
+@end
+```
+
+**Equality comparison** (`==` / `!=`):
+
+```mds
+@if role == "admin":
+Admin panel content.
+@elseif role == "mod":
+Moderator controls.
+@else:
+Regular user view.
+@end
+```
+
+Comparison RHS must be a string, number, boolean, or null literal:
+
+```mds
+@if count == 0:
+No results found.
+@end
+
+@if active == true:
+Service is active.
+@end
+
+@if status != "disabled":
+Feature is available.
+@end
+```
+
+**`@elseif`** chains:
+
+```mds
+@if tier == "enterprise":
+Enterprise features.
+@elseif tier == "pro":
+Pro features.
+@elseif tier == "starter":
+Starter features.
+@else:
+Free tier.
+@end
+```
+
 **Rules:**
 
-- Condition is a variable name or dot path (truthy/falsy check): `@if premium:` or `@if config.debug:`
+- Condition forms:
+  - Truthy check: `@if var:` or `@if config.debug:`
+  - Negation: `@if !var:` or `@if !config.debug:`
+  - Equality: `@if var == "value":` / `@if var != "value":`
 - Falsy values: `false`, `null`, empty string `""`, empty array `[]`, empty object `{}`, `0`, `NaN`
 - Everything else is truthy
+- Equality is **strict** — no type coercion: `@if count == "3":` is false when count is the number 3
+- `NaN == NaN` is false (IEEE 754)
+- `@elseif` branches are evaluated in order; first matching branch wins (short-circuit)
+- `@elseif` must appear before `@else:`; `@else:` cannot be followed by `@elseif`
+- Cannot combine negation with comparison: `@if !var == "x":` is a parse error — use `@if var != "x":`
+- `@if !!var:` (double negation) is a parse error
+- Maximum 256 `@elseif` branches per `@if` block
 - Nesting: plain `@end`, resolved by innermost matching
-- No `@elseif` in v0.1 (use nested `@if` or restructure)
 
 ---
 
@@ -609,14 +668,13 @@ These are intentionally deferred to keep the language simple and the compiler fo
 - Structured JSON output (chat message arrays)
 - TypeScript/JS integration or runtime bindings
 - Built-in functions (upper, lower, join, etc.)
-- `@elseif` chains
 - Recursion
 - Macros, async functions, streaming
 - Default function arguments
 - URL-based imports (remote modules)
 - Source maps
 - Template inheritance
-- Conditional expressions (comparisons, logical operators in `@if`)
+- Logical operators in `@if` (`&&`, `||`): use `@elseif` chains instead
 
 ---
 
@@ -639,7 +697,10 @@ wildcard_reexport := "@export" "*" "from" quoted_path
 
 define          := "@define" identifier "(" params? "):" body "@end"
 include         := "@include" identifier
-if_block        := "@if" dot_path ":" body ("@else:" body)? "@end"
+if_block        := "@if" condition ":" body ("@elseif" condition ":" body)* ("@else:" body)? "@end"
+condition       := "!" dot_path | dot_path ("==" | "!=") cond_value | dot_path
+cond_value      := quoted_string | number | "true" | "false" | "null"
+number          := "-"? [0-9]+ ("." [0-9]+)?
 for_block       := "@for" loop_vars "in" dot_path ":" body "@end"
 loop_vars       := identifier | identifier "," identifier
 
