@@ -690,6 +690,25 @@ fn compile_rejects_non_utf8_path() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn compile_str_with_rejects_non_utf8_base_dir() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    // Construct a base_dir path whose bytes are not valid UTF-8.
+    let invalid_utf8: &OsStr = OsStrExt::from_bytes(b"/tmp/\xFF\xFE");
+    let path = Path::new(invalid_utf8);
+
+    let err = mds::compile_str_with("Hello!\n", Some(path), None)
+        .expect_err("expected error for non-UTF-8 base_dir");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not valid UTF-8"),
+        "error message should mention 'not valid UTF-8', got: {msg}"
+    );
+}
+
 // ── Issue #23: resolve_path and resolve_source accept &str, not &Path ─────────
 
 #[test]

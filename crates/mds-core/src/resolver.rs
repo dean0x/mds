@@ -122,8 +122,10 @@ impl ModuleCache {
         Ok(())
     }
 
-    /// Resolve a module from an OS filesystem path.
+    /// Resolve a module from a filesystem path string.
     ///
+    /// `path` is a UTF-8 string representation of the OS path (callers convert
+    /// `&Path` to `&str` at the public API boundary via `path_to_str`).
     /// Normalizes `path` to a canonical key via the underlying [`FileSystem`],
     /// then resolves through the module cache with cycle detection and depth guarding.
     pub fn resolve_path(

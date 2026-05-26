@@ -209,6 +209,9 @@ pub fn check_str(source: &str) -> Result<(), MdsError> {
 ///
 /// Fails with an explicit error when the path contains non-UTF-8 bytes rather
 /// than silently corrupting the string via `display()`.
+///
+/// This is one of two UTF-8 boundary enforcement points; the other is
+/// [`path_to_str`], which handles the entry-point `path` argument.
 fn resolve_base_dir(base_dir: Option<&Path>) -> Result<String, MdsError> {
     match base_dir {
         Some(d) => d
@@ -255,7 +258,9 @@ pub fn check_str_with(
 /// Convert a `Path` to `&str`, returning an explicit error for non-UTF-8 paths.
 ///
 /// Used at the public API boundary before passing the path string to the resolver,
-/// which expects `&str` rather than `&Path`.
+/// which expects `&str` rather than `&Path`. This is one of two UTF-8 boundary
+/// enforcement points; the other is [`resolve_base_dir`], which handles the
+/// optional `base_dir` argument.
 fn path_to_str(path: &Path) -> Result<&str, MdsError> {
     path.to_str()
         .ok_or_else(|| MdsError::io("path is not valid UTF-8"))
@@ -809,21 +814,18 @@ pub fn scan_imports(source: &str) -> Result<Vec<String>, MdsError> {
 /// ```
 #[must_use = "the loaded variables should be used"]
 pub fn load_vars_file(path: &Path) -> Result<HashMap<String, Value>, MdsError> {
+    let path_str = path_to_str(path)?;
     // Read bytes first, then check size (same TOCTOU-safe pattern as resolver.rs).
     let bytes = std::fs::read(path)
-        .map_err(|e| MdsError::io(format!("cannot read vars file {}: {e}", path.display())))?;
+        .map_err(|e| MdsError::io(format!("cannot read vars file {path_str}: {e}")))?;
     if bytes.len() as u64 > MAX_FILE_SIZE {
         return Err(MdsError::resource_limit(format!(
-            "vars file exceeds maximum size of {} bytes: {}",
+            "vars file exceeds maximum size of {} bytes: {path_str}",
             MAX_FILE_SIZE,
-            path.display()
         )));
     }
     let content = String::from_utf8(bytes).map_err(|e| {
-        MdsError::io(format!(
-            "invalid UTF-8 in vars file {}: {e}",
-            path.display()
-        ))
+        MdsError::io(format!("invalid UTF-8 in vars file {path_str}: {e}"))
     })?;
     let json: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| MdsError::json_error(e.to_string()))?;
