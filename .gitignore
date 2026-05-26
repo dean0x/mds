@@ -6,3 +6,4 @@ node_modules/
 crates/mds-napi/index.d.ts
 crates/mds-napi/package-lock.json
 packages/*/dist/
+packages/*/dist-cjs/

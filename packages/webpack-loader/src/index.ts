@@ -1,6 +1,17 @@
 import type { MdsPluginOptions } from '@mds/bundler-utils';
 import { LazyInit, createMdsTransformer, formatMdsError } from '@mds/bundler-utils';
 
+// When compiled to CJS, TypeScript rewrites `import()` to `require()`, which
+// breaks loading ESM-only packages like `@mds/mds`. This wrapper preserves
+// the native `import()` call in CJS output by creating a new Function at
+// runtime — the compiler cannot see through the string literal.
+// See: https://github.com/microsoft/TypeScript/issues/43329
+// eslint-disable-next-line @typescript-eslint/no-implied-eval
+const _esmImport: (id: string) => Promise<unknown> = new Function(
+  'id',
+  'return import(id)',
+) as (id: string) => Promise<unknown>;
+
 // Hand-rolled rather than `import type { LoaderContext } from 'webpack'` because
 // webpack uses a CJS `export =` shape that is awkward to import in a pure-ESM
 // package and the full type is a large intersection of ~10 interfaces. The
@@ -26,7 +37,7 @@ let lazy: LazyInit<Transformer> | null = null;
 function getLazy(options: MdsPluginOptions): LazyInit<Transformer> {
   if (lazy === null) {
     lazy = new LazyInit(async () => {
-      const mds = await import('@mds/mds');
+      const mds = await _esmImport('@mds/mds') as typeof import('@mds/mds');
       return createMdsTransformer(mds, options);
     });
   }
