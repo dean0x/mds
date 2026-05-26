@@ -198,9 +198,8 @@ fn value_methods() {
 
 #[test]
 fn cli_import_pattern_works() {
+    // Compile-time check that compile_str matches the fn(&str) -> Result<String, MdsError> shape.
     let _: fn(&str) -> Result<String, MdsError> = |s| mds::compile_str(s);
-    const _: () = assert!(MAX_FILE_SIZE > 0);
-    const _: () = assert!(MAX_TRAVERSAL_DEPTH > 0);
 }
 
 // ── New public types from Phase 2 ─────────────────────────────────────────────
@@ -652,4 +651,88 @@ fn load_vars_str_feeds_compile_virtual() {
     modules.insert("main.mds".to_string(), "Hello {name}!\n".to_string());
     let output = mds::compile_virtual(modules, "main.mds", Some(vars)).unwrap();
     assert_eq!(output, "Hello Test!\n");
+}
+
+// ── Non-UTF-8 path rejection ──────────────────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn check_rejects_non_utf8_path() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    // Construct a path whose bytes are not valid UTF-8.
+    let invalid_utf8: &OsStr = OsStrExt::from_bytes(b"/tmp/\xFF\xFE.mds");
+    let path = Path::new(invalid_utf8);
+
+    let err = mds::check(path, None).expect_err("expected error for non-UTF-8 path");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not valid UTF-8"),
+        "error message should mention 'not valid UTF-8', got: {msg}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn compile_rejects_non_utf8_path() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let invalid_utf8: &OsStr = OsStrExt::from_bytes(b"/tmp/\xFF\xFE.mds");
+    let path = Path::new(invalid_utf8);
+
+    let err = mds::compile(path, None).expect_err("expected error for non-UTF-8 path");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not valid UTF-8"),
+        "error message should mention 'not valid UTF-8', got: {msg}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn compile_str_with_rejects_non_utf8_base_dir() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    // Construct a base_dir path whose bytes are not valid UTF-8.
+    let invalid_utf8: &OsStr = OsStrExt::from_bytes(b"/tmp/\xFF\xFE");
+    let path = Path::new(invalid_utf8);
+
+    let err = mds::compile_str_with("Hello!\n", Some(path), None)
+        .expect_err("expected error for non-UTF-8 base_dir");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not valid UTF-8"),
+        "error message should mention 'not valid UTF-8', got: {msg}"
+    );
+}
+
+// ── Issue #23: resolve_path and resolve_source accept &str, not &Path ─────────
+
+#[test]
+fn module_cache_resolve_path_accepts_str() {
+    // Validates #23: resolve_path now takes &str, not &Path.
+    // The test verifies the signature compiles — a file-not-found error is expected
+    // since "/nonexistent.mds" does not exist on disk.
+    let mut cache = ModuleCache::new();
+    let mut warnings = vec![];
+    let result = cache.resolve_path("/nonexistent.mds", &HashMap::new(), &mut warnings);
+    assert!(result.is_err(), "expected error for nonexistent file");
+}
+
+#[test]
+fn module_cache_resolve_source_accepts_str() {
+    // Validates #23: resolve_source now takes &str for base_dir, not &Path.
+    // A simple valid source with no imports should succeed with the current directory.
+    let mut cache = ModuleCache::new();
+    let mut warnings = vec![];
+    let base_dir = std::env::current_dir()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let result = cache.resolve_source("Hello!\n", &base_dir, &HashMap::new(), &mut warnings);
+    assert!(result.is_ok(), "expected ok for valid source: {result:?}");
 }

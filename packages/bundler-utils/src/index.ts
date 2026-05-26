@@ -8,3 +8,4 @@ export type {
 export { shouldTransform, isMdsExtension, cleanId } from './frontmatter.js';
 export { createMdsTransformer } from './transform.js';
 export { formatMdsError } from './errors.js';
+export { LazyInit } from './lazy-init.js';

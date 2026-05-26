@@ -1,5 +1,6 @@
 import type { MdsApi, MdsPluginOptions, TransformResult } from './types.js';
 import { shouldTransform as checkTransform } from './frontmatter.js';
+import { LazyInit } from './lazy-init.js';
 
 // Characters that must be escaped inside a JS double-quoted string literal.
 // U+2028 (line separator) and U+2029 (paragraph separator) are treated as
@@ -64,25 +65,13 @@ export function createMdsTransformer(mds: MdsApi, options?: MdsPluginOptions): {
   shouldTransform(id: string): boolean | Promise<boolean>;
   transform(id: string): Promise<TransformResult>;
 } {
-  let initialized = false;
-  let initPromise: Promise<void> | null = null;
-
-  async function ensureInit(): Promise<void> {
-    if (initialized) return;
-    if (initPromise === null) {
-      initPromise = mds.init().then(
-        () => { initialized = true; },
-        (err: unknown) => { initPromise = null; throw err; },
-      );
-    }
-    return initPromise;
-  }
+  const initLazy = new LazyInit<void>(async () => { await mds.init(); });
 
   return {
     shouldTransform: checkTransform,
 
     async transform(id: string): Promise<TransformResult> {
-      await ensureInit();
+      await initLazy.get();
       // id is trusted — sourced from the bundler's module resolution pipeline.
       // Callers (vite-plugin, rollup-plugin, webpack-loader) are responsible for
       // stripping query/hash before calling transform().

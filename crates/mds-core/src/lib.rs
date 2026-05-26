@@ -57,7 +57,7 @@ pub use options::{
 pub use resolver::ModuleCache;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub use error::{MdsError, SerializedError, SerializedSpan};
 pub use value::Value;
@@ -177,10 +177,11 @@ pub fn check(
     runtime_vars: Option<HashMap<String, Value>>,
 ) -> Result<(), MdsError> {
     let path = path.as_ref();
+    let path_str = path_to_str(path)?;
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
-    cache.resolve_path(path, &vars, &mut warnings)?;
+    cache.resolve_path(path_str, &vars, &mut warnings)?;
     emit_warnings(&warnings);
     Ok(())
 }
@@ -204,12 +205,26 @@ pub fn check_str(source: &str) -> Result<(), MdsError> {
     check_str_with(source, None, None)
 }
 
-/// Resolve an optional base directory to a `PathBuf`, falling back to cwd.
-fn resolve_base_dir(base_dir: Option<&Path>) -> Result<PathBuf, MdsError> {
+/// Resolve an optional base directory to a `String`, falling back to cwd.
+///
+/// Fails with an explicit error when the path contains non-UTF-8 bytes rather
+/// than silently corrupting the string via `display()`.
+///
+/// This is one of two UTF-8 boundary enforcement points; the other is
+/// [`path_to_str`], which handles the entry-point `path` argument.
+fn resolve_base_dir(base_dir: Option<&Path>) -> Result<String, MdsError> {
     match base_dir {
-        Some(d) => Ok(d.to_path_buf()),
+        Some(d) => d
+            .to_str()
+            .ok_or_else(|| MdsError::io("base_dir path is not valid UTF-8"))
+            .map(str::to_owned),
         None => std::env::current_dir()
-            .map_err(|e| MdsError::io(format!("cannot determine current directory: {e}"))),
+            .map_err(|e| MdsError::io(format!("cannot determine current directory: {e}")))
+            .and_then(|p| {
+                p.to_str()
+                    .ok_or_else(|| MdsError::io("current directory path is not valid UTF-8"))
+                    .map(str::to_owned)
+            }),
     }
 }
 
@@ -238,6 +253,17 @@ pub fn check_str_with(
     cache.resolve_source(source, &dir, &vars, &mut warnings)?;
     emit_warnings(&warnings);
     Ok(())
+}
+
+/// Convert a `Path` to `&str`, returning an explicit error for non-UTF-8 paths.
+///
+/// Used at the public API boundary before passing the path string to the resolver,
+/// which expects `&str` rather than `&Path`. This is one of two UTF-8 boundary
+/// enforcement points; the other is [`resolve_base_dir`], which handles the
+/// optional `base_dir` argument.
+fn path_to_str(path: &Path) -> Result<&str, MdsError> {
+    path.to_str()
+        .ok_or_else(|| MdsError::io("path is not valid UTF-8"))
 }
 
 /// Print warnings to stderr. Each warning is printed on its own line.
@@ -278,10 +304,11 @@ pub fn compile_collecting_warnings(
     runtime_vars: Option<HashMap<String, Value>>,
 ) -> Result<(String, Vec<String>), MdsError> {
     let path = path.as_ref();
+    let path_str = path_to_str(path)?;
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
-    let resolved = cache.resolve_path(path, &vars, &mut warnings)?;
+    let resolved = cache.resolve_path(path_str, &vars, &mut warnings)?;
     Ok((build_output(&resolved), warnings))
 }
 
@@ -322,10 +349,11 @@ pub fn check_collecting_warnings(
     runtime_vars: Option<HashMap<String, Value>>,
 ) -> Result<((), Vec<String>), MdsError> {
     let path = path.as_ref();
+    let path_str = path_to_str(path)?;
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
-    cache.resolve_path(path, &vars, &mut warnings)?;
+    cache.resolve_path(path_str, &vars, &mut warnings)?;
     Ok(((), warnings))
 }
 
@@ -527,10 +555,11 @@ pub fn compile_with_deps(
     runtime_vars: Option<HashMap<String, Value>>,
 ) -> Result<CompileOutput, MdsError> {
     let path = path.as_ref();
+    let path_str = path_to_str(path)?;
     let vars = runtime_vars.unwrap_or_default();
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
-    let resolved = cache.resolve_path(path, &vars, &mut warnings)?;
+    let resolved = cache.resolve_path(path_str, &vars, &mut warnings)?;
     let output = build_output(&resolved);
     // Post-order DFS guarantees the entry module is last in the cache.
     // Filter by value rather than position for explicitness.
@@ -785,22 +814,18 @@ pub fn scan_imports(source: &str) -> Result<Vec<String>, MdsError> {
 /// ```
 #[must_use = "the loaded variables should be used"]
 pub fn load_vars_file(path: &Path) -> Result<HashMap<String, Value>, MdsError> {
+    let path_str = path_to_str(path)?;
     // Read bytes first, then check size (same TOCTOU-safe pattern as resolver.rs).
     let bytes = std::fs::read(path)
-        .map_err(|e| MdsError::io(format!("cannot read vars file {}: {e}", path.display())))?;
+        .map_err(|e| MdsError::io(format!("cannot read vars file {path_str}: {e}")))?;
     if bytes.len() as u64 > MAX_FILE_SIZE {
         return Err(MdsError::resource_limit(format!(
-            "vars file exceeds maximum size of {} bytes: {}",
+            "vars file exceeds maximum size of {} bytes: {path_str}",
             MAX_FILE_SIZE,
-            path.display()
         )));
     }
-    let content = String::from_utf8(bytes).map_err(|e| {
-        MdsError::io(format!(
-            "invalid UTF-8 in vars file {}: {e}",
-            path.display()
-        ))
-    })?;
+    let content = String::from_utf8(bytes)
+        .map_err(|e| MdsError::io(format!("invalid UTF-8 in vars file {path_str}: {e}")))?;
     let json: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| MdsError::json_error(e.to_string()))?;
 
@@ -959,10 +984,8 @@ mod tests {
     fn load_vars_str_rejects_oversized_input() {
         // Construct a string that exceeds MAX_FILE_SIZE (10 MB).
         let oversized = "x".repeat((MAX_FILE_SIZE as usize) + 1);
-        let result = load_vars_str(&oversized);
-        assert!(result.is_err(), "expected error for oversized input");
-        let err = result.unwrap_err();
-        let msg = format!("{err}");
+        let err = load_vars_str(&oversized).expect_err("expected error for oversized input");
+        let msg = err.to_string();
         assert!(
             msg.contains("exceeds maximum size"),
             "error message should mention size limit, got: {msg}"
