@@ -130,7 +130,7 @@ describe('mdsLoader', () => {
         };
       },
     };
-    _setTransformerForTesting(mockTransformer);
+    await _setTransformerForTesting(mockTransformer);
 
     const ctx = createLoaderContext(SIMPLE_MDS);
     await mdsLoader.call(ctx);

@@ -5,25 +5,33 @@
  * - On factory rejection the pending promise is cleared so the next `get()` retries.
  * - Uses a `resolved` boolean flag (not `instance !== undefined`) so `T = void`
  *   and `T = null` work correctly.
+ * - A generation counter prevents a stale in-flight factory resolution from
+ *   overwriting state that was cleared by `reset()` (TOCTOU safety).
  */
 export class LazyInit<T> {
   private resolved = false;
   private instance: T | undefined = undefined;
   private pending: Promise<T> | null = null;
+  private generation = 0;
 
   constructor(private readonly factory: () => Promise<T>) {}
 
   get(): Promise<T> {
     if (this.resolved) return Promise.resolve(this.instance as T);
     if (this.pending === null) {
+      const gen = ++this.generation;
       this.pending = this.factory().then(
         (result) => {
-          this.resolved = true;
-          this.instance = result;
+          if (this.generation === gen) {
+            this.resolved = true;
+            this.instance = result;
+          }
           return result;
         },
         (err: unknown) => {
-          this.pending = null;
+          if (this.generation === gen) {
+            this.pending = null;
+          }
           throw err;
         },
       );
@@ -32,6 +40,7 @@ export class LazyInit<T> {
   }
 
   reset(): void {
+    this.generation++;
     this.resolved = false;
     this.instance = undefined;
     this.pending = null;

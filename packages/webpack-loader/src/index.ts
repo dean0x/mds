@@ -70,11 +70,12 @@ export function _resetForTesting(): void {
  * controlled warnings, dependencies, and output.
  * FOR TESTING ONLY — throws unless NODE_ENV=test.
  */
-export function _setTransformerForTesting(t: Transformer): void {
+export async function _setTransformerForTesting(t: Transformer): Promise<void> {
   if (process.env['NODE_ENV'] !== 'test') {
     throw new Error('_setTransformerForTesting is only allowed when NODE_ENV=test');
   }
   lazy = new LazyInit(async () => t);
-  // Pre-resolve so get() returns immediately on next call.
-  void lazy.get();
+  // Pre-resolve so get() returns immediately on next call. Awaited so callers
+  // can be certain the lazy is fully resolved before proceeding.
+  await lazy.get();
 }
