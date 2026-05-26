@@ -30,14 +30,16 @@ interface VitePlugin {
   }) => void | undefined | unknown[];
 }
 
+type Transformer = ReturnType<typeof createMdsTransformer>;
+
 /**
  * Inject a pre-built transformer for testing without going through the real
  * @mds/mds import. Allows tests to provide a mock transformer that returns
  * controlled warnings, dependencies, and output.
  * FOR TESTING ONLY — throws unless NODE_ENV=test.
  */
-let _testTransformer: ReturnType<typeof createMdsTransformer> | null = null;
-export function _setTransformerForTesting(t: ReturnType<typeof createMdsTransformer> | null): void {
+let _testTransformer: Transformer | null = null;
+export function _setTransformerForTesting(t: Transformer | null): void {
   if (process.env['NODE_ENV'] !== 'test') {
     throw new Error('_setTransformerForTesting is only allowed when NODE_ENV=test');
   }
@@ -51,7 +53,7 @@ export function _setTransformerForTesting(t: ReturnType<typeof createMdsTransfor
  * reload via HMR (see comment on handleHotUpdate below for rationale).
  */
 export default function mdsPlugin(options?: MdsPluginOptions): VitePlugin {
-  let transformer: ReturnType<typeof createMdsTransformer> | null = null;
+  let transformer: Transformer | null = null;
 
   return {
     name: 'mds',
