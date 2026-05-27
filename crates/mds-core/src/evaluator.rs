@@ -820,6 +820,22 @@ mod tests {
         );
     }
 
+    // ── values_equal: NaN semantics ──────────────────────────────────────────
+
+    #[test]
+    fn values_equal_nan_is_not_equal_to_itself() {
+        // IEEE 754 defines NaN != NaN. values_equal must follow this — even though
+        // the parser rejects NaN literals in condition values, the runtime Value type
+        // holds f64 and could theoretically carry a NaN produced by arithmetic.
+        // Verify that values_equal returns false for NaN == NaN.
+        let nan_value = Value::Number(f64::NAN);
+        let nan_cond = CondValue::Number(f64::NAN);
+        assert!(
+            !values_equal(&nan_value, &nan_cond),
+            "NaN must not equal NaN (IEEE 754)"
+        );
+    }
+
     // ── Resource limit: MAX_OUTPUT_SIZE ──────────────────────────────────────
 
     #[test]
