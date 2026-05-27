@@ -546,7 +546,9 @@ Maximum config file size: 1 MB.
 ---
 name: Alice
 items: [apple, banana]
-premium: true
+tier: premium
+count: 2
+debug: false
 ---
 
 @import "./footer.mds" as footer
@@ -562,10 +564,16 @@ Hello {name}!
 Your items:
 {list(items)}
 
-@if premium:
-Thanks for being premium!
+@if tier == "premium":
+Thanks for being a premium member!
+@elseif tier == "pro":
+Thanks for being a pro member!
 @else:
 Upgrade for premium features.
+@end
+
+@if !debug:
+You have {count} items.
 @end
 
 @include footer
@@ -577,7 +585,9 @@ Upgrade for premium features.
 ---
 name: Alice
 items: [apple, banana]
-premium: true
+tier: premium
+count: 2
+debug: false
 ---
 Hello Alice!
 
@@ -585,7 +595,9 @@ Your items:
 - apple
 - banana
 
-Thanks for being premium!
+Thanks for being a premium member!
+
+You have 2 items.
 
 [footer content here]
 ```
@@ -714,7 +726,7 @@ include         := "@include" identifier
 if_block        := "@if" condition ":" body ("@elseif" condition ":" body)* ("@else:" body)? "@end"
 condition       := "!" dot_path | dot_path ("==" | "!=") cond_value | dot_path
 cond_value      := quoted_string | number | "true" | "false" | "null"
-number          := "-"? [0-9]+ ("." [0-9]+)?
+number          := "-"? [0-9]+ ("." [0-9]+)?   (* not NaN or Infinity — those are rejected at parse time *)
 for_block       := "@for" loop_vars "in" dot_path ":" body "@end"
 loop_vars       := identifier | identifier "," identifier
 
