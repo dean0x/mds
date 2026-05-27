@@ -468,10 +468,10 @@ fn parse_cond_value(s: &str) -> Result<CondValue, MdsError> {
 
     // Boolean literals
     if s == "true" {
-        return Ok(CondValue::Bool(true));
+        return Ok(CondValue::Boolean(true));
     }
     if s == "false" {
-        return Ok(CondValue::Bool(false));
+        return Ok(CondValue::Boolean(false));
     }
 
     // Null literal

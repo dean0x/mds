@@ -12,7 +12,8 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "require": "./dist-cjs/index.js"
+      "require": "./dist-cjs/index.js",
+      "default": "./dist-cjs/index.js"
     },
     "./mds": {
       "types": "./mds.d.ts"
@@ -24,7 +25,7 @@
     "mds.d.ts"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json & tsc -p tsconfig.cjs.json & wait && node -e \"require('fs').writeFileSync('dist-cjs/package.json', '{\\\"type\\\":\\\"commonjs\\\"}\\n')\"",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist-cjs/package.json', '{\\\"type\\\":\\\"commonjs\\\"}\\n')\"",
     "test": "node --test __test__/*.spec.mjs"
   },
   "peerDependencies": {

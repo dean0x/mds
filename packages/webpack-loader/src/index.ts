@@ -1,11 +1,18 @@
 import type { MdsPluginOptions } from '@mds/bundler-utils';
 import { LazyInit, createMdsTransformer, formatMdsError } from '@mds/bundler-utils';
 
-// When compiled to CJS, TypeScript rewrites `import()` to `require()`, which
-// breaks loading ESM-only packages like `@mds/mds`. This wrapper preserves
-// the native `import()` call in CJS output by creating a new Function at
-// runtime — the compiler cannot see through the string literal.
+// WORKAROUND: When compiled to CJS, TypeScript rewrites `import()` to
+// `require()`, breaking ESM-only packages like `@mds/mds`. This wrapper
+// preserves native `import()` by creating a new Function at runtime — the
+// compiler cannot see through the string literal.
 // See: https://github.com/microsoft/TypeScript/issues/43329
+//
+// CSP caveat: new Function() is functionally equivalent to eval() for
+// Content Security Policy purposes. Environments with `unsafe-eval` blocked
+// will reject this call. Webpack loaders run in Node.js (no CSP by default),
+// so this is safe for the intended use case. If you need to run this loader
+// in a CSP-restricted environment, remove the CSP restriction for Node.js
+// or switch to an ESM-only build pipeline.
 // eslint-disable-next-line @typescript-eslint/no-implied-eval
 const _esmImport: (id: string) => Promise<unknown> = new Function(
   'id',

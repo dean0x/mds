@@ -337,7 +337,7 @@ fn values_equal(value: &Value, expected: &CondValue) -> bool {
     match (value, expected) {
         (Value::String(s), CondValue::String(e)) => s == e,
         (Value::Number(n), CondValue::Number(e)) => n == e,
-        (Value::Boolean(b), CondValue::Bool(e)) => b == e,
+        (Value::Boolean(b), CondValue::Boolean(e)) => b == e,
         (Value::Null, CondValue::Null) => true,
         _ => false,
     }

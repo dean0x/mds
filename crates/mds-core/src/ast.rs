@@ -6,7 +6,8 @@ pub struct Module {
 }
 
 /// Maximum number of @elseif branches on a single @if block.
-/// Matches MAX_NESTING_DEPTH to prevent pathological chains.
+/// @elseif branches are flat (no stack frames), so 256 is safe independently of
+/// MAX_NESTING_DEPTH (64), which limits recursive nesting depth.
 pub const MAX_ELSEIF_BRANCHES: usize = 256;
 
 /// A literal value on the RHS of an equality condition.
@@ -20,7 +21,7 @@ pub enum CondValue {
     /// A numeric literal: `42`, `3.14`, `-5`
     Number(f64),
     /// A boolean literal: `true` or `false`
-    Bool(bool),
+    Boolean(bool),
     /// The null literal
     Null,
 }
@@ -50,6 +51,7 @@ impl Condition {
     ///
     /// An empty path is an internal invariant violation — the parser always produces a
     /// non-empty path for a valid `@if` condition.
+    #[must_use = "errors should be handled"]
     pub fn root(&self) -> Result<&str, crate::error::MdsError> {
         self.path().first().map(String::as_str).ok_or_else(|| {
             crate::error::MdsError::syntax("internal error: @if block has empty condition path")
