@@ -137,6 +137,8 @@ Feature is available.
 @end
 ```
 
+Escape sequences (`\\`, `\"`, `\'`) are supported inside both single- and double-quoted comparison literals, matching function argument strings (see §4.5).
+
 **`@elseif`** chains:
 
 ```mds
@@ -659,7 +661,7 @@ File association gives standard Markdown highlighting, but `@` directives and `{
 
 **Phase 1 — TextMate injection grammar (VS Code, Sublime Text)**
 
-A single JSON file (`mds.tmLanguage.json`) that injects into the Markdown grammar scope, adding keyword highlighting for `@import`, `@if`, `@for`, `@define`, `@end`, `@export`, `@include` and interpolation highlighting for `{var}`. Shipped as a VS Code extension.
+A single JSON file (`mds.tmLanguage.json`) that injects into the Markdown grammar scope, adding keyword highlighting for `@import`, `@if`, `@elseif`, `@else`, `@for`, `@define`, `@end`, `@export`, `@include` and interpolation highlighting for `{var}`. Shipped as a VS Code extension.
 
 **Phase 2 — Tree-sitter grammar (Neovim, Helix, Zed)**
 
@@ -727,6 +729,8 @@ escaped_brace   := "\{" | "\}"
 identifier      := [a-zA-Z_][a-zA-Z0-9_]*
 identifier_list := identifier ("," identifier)*
 quoted_string   := "\"" string_chars "\"" | "'" string_chars "'"
+string_chars    := (escape_seq | [^"\\] | [^'\\])*
+escape_seq      := "\\\\" | "\\\"" | "\\'"
 quoted_path     := "\"" path_chars "\""
 ```
 

@@ -36,7 +36,7 @@ mds build hello.mds -o -     # stdout
 ## Features
 
 - **Variables** — YAML frontmatter or runtime `--set KEY=VALUE` flags
-- **Conditionals** — `@if`/`@else`/`@end` blocks
+- **Conditionals** — `@if`/`@elseif`/`@else`/`@end` blocks with negation (`!`) and equality comparisons (`==`/`!=`)
 - **Loops** — `@for item in list:` iteration over arrays
 - **Functions** — `@define` reusable blocks with parameters
 - **Imports** — `@import` for modular prompt libraries (alias, merge, selective)

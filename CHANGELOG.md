@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Negation in `@if` conditions** — prefix a dot-path with `!` to negate it (`@if !feature_enabled`).
+- **Equality comparisons in `@if`/`@elseif`** — compare a dot-path against a string, number, boolean, or null literal using `==` or `!=` (`@if role == "admin"`, `@if count != 0`).
+- **`@elseif` directive** — chain multiple conditional branches without nesting (`@if`/`@elseif`/`@else`/`@end`).
+- **NaN and Infinity rejection** — numeric literals that parse to `NaN` or infinite values are now rejected at parse time with a clear error.
+- **CJS build for `@mds/webpack-loader`** — Webpack 5 compatibility; the package now ships both ESM and CommonJS entry points.
+
 ### Changed
 
 - **`isMdsError()` stricter identification** — the function now requires the `code` property to start with `"mds::"` in addition to being an `Error` instance with a string `code`. Consumers who previously created synthetic error objects with arbitrary `code` strings and relied on `isMdsError()` returning `true` must prefix their codes with `"mds::"` or use a separate check.
