@@ -245,39 +245,7 @@ impl Parser<'_> {
         // Parse then-body; stops at @else:, @end, or any @elseif prefix
         let then_body = self.parse_body(&["@else:", "@end"], &["@elseif "])?;
 
-        // Collect @elseif branches
-        let mut elseif_branches: Vec<(Condition, Vec<Node>)> = Vec::new();
-        while let Some(Token::Directive(d, _)) = self.peek() {
-            if !d.trim().starts_with("@elseif ") {
-                break;
-            }
-            // Consume the @elseif directive token
-            let elseif_dir = d.clone();
-            self.pos += 1;
-
-            // Extract condition string: strip "@elseif " prefix and trailing ":"
-            let elseif_cond_str = elseif_dir
-                .trim()
-                .strip_prefix("@elseif ")
-                .ok_or_else(|| MdsError::syntax("internal error: expected @elseif prefix"))?
-                .trim()
-                .strip_suffix(':')
-                .ok_or_else(|| MdsError::syntax("@elseif directive must end with ':'"))?
-                .trim();
-
-            let elseif_cond = parse_condition(elseif_cond_str)?;
-
-            // Parse body for this branch
-            let elseif_body = self.parse_body(&["@else:", "@end"], &["@elseif "])?;
-
-            if elseif_branches.len() >= MAX_ELSEIF_BRANCHES {
-                return Err(MdsError::syntax(format!(
-                    "@if block has more than {MAX_ELSEIF_BRANCHES} @elseif branches"
-                )));
-            }
-
-            elseif_branches.push((elseif_cond, elseif_body));
-        }
+        let elseif_branches = self.collect_elseif_branches()?;
 
         let else_body = if matches!(self.peek(), Some(Token::Directive(d, _)) if d.trim() == "@else:")
         {
@@ -297,6 +265,46 @@ impl Parser<'_> {
             else_body,
             offset,
         }))
+    }
+
+    /// Consume all consecutive `@elseif` directive tokens and return the parsed branches.
+    ///
+    /// The limit check runs **before** parsing each branch body so that adversarial
+    /// input that exceeds `MAX_ELSEIF_BRANCHES` cannot force unbounded parse work.
+    fn collect_elseif_branches(&mut self) -> Result<Vec<(Condition, Vec<Node>)>, MdsError> {
+        let mut branches: Vec<(Condition, Vec<Node>)> = Vec::new();
+        while let Some(Token::Directive(d, _)) = self.peek() {
+            if !d.trim().starts_with("@elseif ") {
+                break;
+            }
+
+            // Enforce the branch limit before doing any parse work for this iteration.
+            if branches.len() >= MAX_ELSEIF_BRANCHES {
+                return Err(MdsError::syntax(format!(
+                    "@if block has more than {MAX_ELSEIF_BRANCHES} @elseif branches"
+                )));
+            }
+
+            // Consume the @elseif directive token.
+            let elseif_dir = d.clone();
+            self.pos += 1;
+
+            // Extract condition string: strip "@elseif " prefix and trailing ":".
+            let elseif_cond_str = elseif_dir
+                .trim()
+                .strip_prefix("@elseif ")
+                .ok_or_else(|| MdsError::syntax("internal error: expected @elseif prefix"))?
+                .trim()
+                .strip_suffix(':')
+                .ok_or_else(|| MdsError::syntax("@elseif directive must end with ':'"))?
+                .trim();
+
+            let elseif_cond = parse_condition(elseif_cond_str)?;
+            let elseif_body = self.parse_body(&["@else:", "@end"], &["@elseif "])?;
+
+            branches.push((elseif_cond, elseif_body));
+        }
+        Ok(branches)
     }
 
     fn parse_for_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
@@ -1749,5 +1757,45 @@ mod tests {
         let (pos, op) = result.unwrap();
         assert_eq!(op, "==");
         assert_eq!(pos, 4, "== must be at byte 4");
+    }
+
+    // --- Tests for MAX_ELSEIF_BRANCHES limit ---
+
+    #[test]
+    fn parse_elseif_branch_at_limit_accepted() {
+        // Exactly MAX_ELSEIF_BRANCHES @elseif branches must be accepted.
+        let mut src = String::from("@if flag:\nfirst\n");
+        for i in 0..MAX_ELSEIF_BRANCHES {
+            src.push_str(&format!("@elseif flag{i}:\nbranch{i}\n"));
+        }
+        src.push_str("@end\n");
+        let tokens = tokenize(&src, "test.mds").unwrap();
+        let result = parse_with_ctx(&tokens, "", "");
+        assert!(
+            result.is_ok(),
+            "exactly MAX_ELSEIF_BRANCHES @elseif branches must be accepted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn parse_elseif_branch_limit_rejected() {
+        // MAX_ELSEIF_BRANCHES + 1 @elseif branches must be rejected with a
+        // descriptive error that mentions the branch limit.
+        let mut src = String::from("@if flag:\nfirst\n");
+        for i in 0..=MAX_ELSEIF_BRANCHES {
+            src.push_str(&format!("@elseif flag{i}:\nbranch{i}\n"));
+        }
+        src.push_str("@end\n");
+        let tokens = tokenize(&src, "test.mds").unwrap();
+        let result = parse_with_ctx(&tokens, "", "");
+        assert!(
+            result.is_err(),
+            "more than MAX_ELSEIF_BRANCHES @elseif branches must be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("branch") || err.contains(&MAX_ELSEIF_BRANCHES.to_string()),
+            "error must mention branch limit, got: {err}"
+        );
     }
 }
