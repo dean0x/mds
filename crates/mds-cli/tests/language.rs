@@ -682,6 +682,24 @@ fn if_negation_dot_path() {
     assert!(result.contains("debug_off_branch"), "negation of config.debug=false must enter then branch");
 }
 
+// ── @if negation with undefined variable tests ───────────────────────────────
+
+#[test]
+fn if_negation_undefined_variable_is_error() {
+    // `@if !undefined_var:` with no frontmatter defining undefined_var → error
+    let source = "@if !undefined_var:\nbranch_body\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(
+        result.is_err(),
+        "negation of undefined variable must produce an error, got: {:?}", result
+    );
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("undefined_var") || err.contains("undefined") || err.contains("not found"),
+        "error should mention the undefined variable, got: {err}"
+    );
+}
+
 // ── @if equality (==) tests ──────────────────────────────────────────────────
 
 #[test]
@@ -903,6 +921,32 @@ fn elseif_nested_if_in_body() {
     let result = mds::compile_str(source).unwrap();
     assert!(result.contains("pro_plus_body"), "nested @if inside elseif body must work");
     assert!(!result.contains("enterprise_body"), "enterprise must not appear");
+}
+
+#[test]
+fn elseif_mixed_equality_and_inequality_in_chain() {
+    // Chain: @if role == "admin" / @elseif role != "visitor" / @else
+    // role=mod → first branch (==) fails, second branch (!=) is true → middle branch
+    let source = "---\nrole: mod\n---\n\
+        @if role == \"admin\":\nadmin_only\n\
+        @elseif role != \"visitor\":\nregistered_user\n\
+        @else:\nanon_visitor\n\
+        @end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(result.contains("registered_user"), "mod != visitor so != branch must match");
+    assert!(!result.contains("admin_only"), "admin branch must not appear");
+    assert!(!result.contains("anon_visitor"), "else branch must not appear");
+
+    // role=visitor → first branch (==) fails, second branch (!=) is false → else branch
+    let source2 = "---\nrole: visitor\n---\n\
+        @if role == \"admin\":\nadmin_only\n\
+        @elseif role != \"visitor\":\nregistered_user\n\
+        @else:\nanon_visitor\n\
+        @end\n";
+    let result2 = mds::compile_str(source2).unwrap();
+    assert!(result2.contains("anon_visitor"), "visitor == visitor so != is false, must fall to else");
+    assert!(!result2.contains("registered_user"), "registered branch must not appear");
+    assert!(!result2.contains("admin_only"), "admin branch must not appear");
 }
 
 #[test]

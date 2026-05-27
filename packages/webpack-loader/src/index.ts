@@ -49,7 +49,21 @@ function getLazy(options: MdsPluginOptions, emitWarning: (err: Error) => void): 
   if (lazy === null) {
     capturedOptions = options;
     lazy = new LazyInit(async () => {
-      const mds = await esmImport() as typeof import('@mds/mds');
+      const importResult = esmImport();
+      // Runtime validation: esmImport() must return a thenable (Promise-like).
+      // new Function() bypasses TypeScript's type checker, so the return type
+      // annotation is not enforced at runtime. A non-thenable here would cause
+      // a silent hang rather than a clear error.
+      if (
+        importResult === null ||
+        typeof importResult !== 'object' ||
+        typeof (importResult as { then?: unknown }).then !== 'function'
+      ) {
+        throw new Error(
+          '_esmImport() did not return a thenable. The new Function() wrapper is broken in this environment.',
+        );
+      }
+      const mds = await importResult as typeof import('@mds/mds');
       const mdsAny = mds as Record<string, unknown>;
       if (typeof mdsAny['compileFile'] !== 'function' || typeof mdsAny['init'] !== 'function') {
         throw new Error(
