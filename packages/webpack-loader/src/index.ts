@@ -7,6 +7,10 @@ import { LazyInit, createMdsTransformer, formatMdsError } from '@mds/bundler-uti
 // compiler cannot see through the string literal.
 // See: https://github.com/microsoft/TypeScript/issues/43329
 //
+// The wrapper is intentionally parameter-less (calls `import('@mds/mds')`
+// directly) so that no arbitrary module ID can be passed through
+// new Function — eliminating the latent code-loading vector.
+//
 // CSP caveat: new Function() is functionally equivalent to eval() for
 // Content Security Policy purposes. Environments with `unsafe-eval` blocked
 // will reject this call. Webpack loaders run in Node.js (no CSP by default),
@@ -14,10 +18,9 @@ import { LazyInit, createMdsTransformer, formatMdsError } from '@mds/bundler-uti
 // in a CSP-restricted environment, remove the CSP restriction for Node.js
 // or switch to an ESM-only build pipeline.
 // eslint-disable-next-line @typescript-eslint/no-implied-eval
-const _esmImport: (id: string) => Promise<unknown> = new Function(
-  'id',
-  'return import(id)',
-) as (id: string) => Promise<unknown>;
+const esmImport: () => Promise<unknown> = new Function(
+  'return import("@mds/mds")',
+) as () => Promise<unknown>;
 
 // Hand-rolled rather than `import type { LoaderContext } from 'webpack'` because
 // webpack uses a CJS `export =` shape that is awkward to import in a pure-ESM
@@ -40,19 +43,28 @@ type Transformer = ReturnType<typeof createMdsTransformer>;
 // supported by a module-level singleton — use separate webpack processes
 // in that scenario.
 let lazy: LazyInit<Transformer> | null = null;
+let capturedOptions: MdsPluginOptions | null = null;
 
-function getLazy(options: MdsPluginOptions): LazyInit<Transformer> {
+function getLazy(options: MdsPluginOptions, emitWarning: (err: Error) => void): LazyInit<Transformer> {
   if (lazy === null) {
+    capturedOptions = options;
     lazy = new LazyInit(async () => {
-      const mds = await _esmImport('@mds/mds') as typeof import('@mds/mds');
-      if (typeof (mds as Record<string, unknown>)['compileFile'] !== 'function') {
+      const mds = await esmImport() as typeof import('@mds/mds');
+      const mdsAny = mds as Record<string, unknown>;
+      if (typeof mdsAny['compileFile'] !== 'function' || typeof mdsAny['init'] !== 'function') {
         throw new Error(
-          '@mds/mds module shape is unexpected: compileFile is not a function. ' +
+          '@mds/mds module shape is unexpected: compileFile and init must both be functions. ' +
           'Check that the installed version is compatible.',
         );
       }
       return createMdsTransformer(mds, options);
     });
+  } else if (capturedOptions !== null && JSON.stringify(options) !== JSON.stringify(capturedOptions)) {
+    emitWarning(new Error(
+      'mds-webpack-loader: options changed between invocations but the transformer singleton ' +
+      'was already initialised with the original options. The new options will be ignored. ' +
+      'Use separate webpack processes for different option sets.',
+    ));
   }
   return lazy;
 }
@@ -61,7 +73,7 @@ export default async function mdsLoader(this: LoaderContext): Promise<void> {
   const callback = this.async();
   try {
     const options = this.getOptions();
-    const t = await getLazy(options).get();
+    const t = await getLazy(options, this.emitWarning.bind(this)).get();
     const result = await t.transform(this.resourcePath);
     for (const dep of result.dependencies) {
       this.addDependency(dep);
@@ -86,6 +98,7 @@ export function _resetForTesting(): void {
   }
   lazy?.reset();
   lazy = null;
+  capturedOptions = null;
 }
 
 /**
@@ -102,6 +115,7 @@ export function _setTransformerForTesting(t: Transformer | null): void {
   if (t === null) {
     lazy?.reset();
     lazy = null;
+    capturedOptions = null;
     return;
   }
   lazy = new LazyInit(async () => t);

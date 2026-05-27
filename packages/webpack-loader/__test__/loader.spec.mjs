@@ -117,6 +117,38 @@ describe('mdsLoader', () => {
     assert.equal(ctx.emittedWarnings.length, 0);
   });
 
+  test('emitWarning called when options differ on subsequent invocation', async () => {
+    // First invocation captures options.
+    const ctx1 = createLoaderContext(SIMPLE_MDS, {
+      getOptions() { return { vars: { env: 'prod' } }; },
+    });
+    await mdsLoader.call(ctx1);
+    assert.equal(ctx1.callbackResult.err, null);
+    assert.equal(ctx1.emittedWarnings.length, 0, 'no warning on first call');
+
+    // Second invocation with different options should emit a warning.
+    const ctx2 = createLoaderContext(SIMPLE_MDS, {
+      getOptions() { return { vars: { env: 'dev' } }; },
+    });
+    await mdsLoader.call(ctx2);
+    assert.equal(ctx2.callbackResult.err, null);
+    assert.equal(ctx2.emittedWarnings.length, 1, 'should warn when options differ');
+    assert.ok(
+      ctx2.emittedWarnings[0].message.includes('options changed between invocations'),
+      'warning message should describe the problem',
+    );
+  });
+
+  test('no warning when options are identical on subsequent invocation', async () => {
+    const makeCtx = () => createLoaderContext(SIMPLE_MDS, {
+      getOptions() { return { vars: { env: 'prod' } }; },
+    });
+    await mdsLoader.call(makeCtx());
+    const ctx2 = makeCtx();
+    await mdsLoader.call(ctx2);
+    assert.equal(ctx2.emittedWarnings.length, 0, 'identical options should not warn');
+  });
+
   test('emitWarning called once per compiler warning, each wrapped in Error', async () => {
     // Inject a mock transformer that returns two warnings to exercise the
     // for-loop in the loader that calls this.emitWarning(new Error(warning)).
