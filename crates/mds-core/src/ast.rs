@@ -45,6 +45,16 @@ impl Condition {
             Condition::Truthy(p) | Condition::Not(p) | Condition::Eq(p, _) | Condition::NotEq(p, _) => p,
         }
     }
+
+    /// Return the root (first) segment of the condition path, or an error if the path is empty.
+    ///
+    /// An empty path is an internal invariant violation — the parser always produces a
+    /// non-empty path for a valid `@if` condition.
+    pub fn root(&self) -> Result<&str, crate::error::MdsError> {
+        self.path().first().map(String::as_str).ok_or_else(|| {
+            crate::error::MdsError::syntax("internal error: @if block has empty condition path")
+        })
+    }
 }
 
 /// YAML frontmatter block.

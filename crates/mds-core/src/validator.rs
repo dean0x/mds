@@ -132,10 +132,7 @@ fn validate_condition(
     source: &str,
     offset: usize,
 ) -> Result<(), MdsError> {
-    let path = condition.path();
-    let root = path.first().ok_or_else(|| {
-        MdsError::syntax("internal error: @if block has empty condition path")
-    })?;
+    let root = condition.root()?;
     scope.get_var(root).ok_or_else(|| {
         MdsError::undefined_var_at(root, file, source, offset, root.len())
     })?;

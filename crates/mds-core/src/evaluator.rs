@@ -343,37 +343,19 @@ fn values_equal(value: &Value, expected: &CondValue) -> bool {
     }
 }
 
+/// Resolve the dot-path for a condition, returning the runtime `Value`.
+fn resolve_condition_value(condition: &Condition, scope: &Scope) -> Result<Value, MdsError> {
+    let path = condition.path();
+    resolve_dot_path(condition.root()?, &path[1..], scope)
+}
+
 /// Evaluate a condition to a boolean, resolving the dot-path variable from scope.
 fn evaluate_condition(condition: &Condition, scope: &Scope) -> Result<bool, MdsError> {
     match condition {
-        Condition::Truthy(path) => {
-            let root = path.first().ok_or_else(|| {
-                MdsError::syntax("internal error: @if block has empty condition path")
-            })?;
-            let value = resolve_dot_path(root, &path[1..], scope)?;
-            Ok(value.is_truthy())
-        }
-        Condition::Not(path) => {
-            let root = path.first().ok_or_else(|| {
-                MdsError::syntax("internal error: @if block has empty condition path")
-            })?;
-            let value = resolve_dot_path(root, &path[1..], scope)?;
-            Ok(!value.is_truthy())
-        }
-        Condition::Eq(path, expected) => {
-            let root = path.first().ok_or_else(|| {
-                MdsError::syntax("internal error: @if block has empty condition path")
-            })?;
-            let value = resolve_dot_path(root, &path[1..], scope)?;
-            Ok(values_equal(&value, expected))
-        }
-        Condition::NotEq(path, expected) => {
-            let root = path.first().ok_or_else(|| {
-                MdsError::syntax("internal error: @if block has empty condition path")
-            })?;
-            let value = resolve_dot_path(root, &path[1..], scope)?;
-            Ok(!values_equal(&value, expected))
-        }
+        Condition::Truthy(_) => Ok(resolve_condition_value(condition, scope)?.is_truthy()),
+        Condition::Not(_) => Ok(!resolve_condition_value(condition, scope)?.is_truthy()),
+        Condition::Eq(_, expected) => Ok(values_equal(&resolve_condition_value(condition, scope)?, expected)),
+        Condition::NotEq(_, expected) => Ok(!values_equal(&resolve_condition_value(condition, scope)?, expected)),
     }
 }
 
