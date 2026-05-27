@@ -5,6 +5,82 @@ pub struct Module {
     pub body: Vec<Node>,
 }
 
+/// Maximum number of @elseif branches on a single @if block.
+/// @elseif branches are flat (no stack frames), so 256 is safe independently of
+/// MAX_NESTING_DEPTH (64), which limits recursive nesting depth.
+pub const MAX_ELSEIF_BRANCHES: usize = 256;
+
+/// A literal value on the RHS of an equality condition.
+///
+/// Only string, number, boolean, and null literals are supported.
+/// No variable-to-variable comparison.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CondValue {
+    /// A string literal: `"admin"` or `'admin'`
+    String(String),
+    /// A numeric literal: `42`, `3.14`, `-5`
+    ///
+    /// # Invariant
+    ///
+    /// The parser rejects non-finite values (`NaN`, `+Inf`, `-Inf`) via
+    /// `is_finite()` before constructing this variant, so any `Number` in a
+    /// well-formed AST holds a finite `f64`. `PartialEq` is derived for
+    /// convenience; callers must not compare two `Number` values expecting
+    /// IEEE 754 NaN-equality — the invariant guarantees NaN is never stored,
+    /// but the derive means two `NaN` values would compare unequal if the
+    /// invariant were ever violated.
+    Number(f64),
+    /// A boolean literal: `true` or `false`
+    Boolean(bool),
+    /// The null literal
+    Null,
+}
+
+/// A condition in an `@if` or `@elseif` directive.
+///
+/// # Why no `PartialEq`
+///
+/// `Condition` intentionally does **not** derive `PartialEq` even though `CondValue`
+/// does. `CondValue::Number(f64)` uses IEEE 754 semantics where `NaN != NaN`, so
+/// a blanket derived `PartialEq` on `Condition` would be surprising and error-prone
+/// (the evaluator handles NaN safety explicitly). If structural comparison of
+/// `Condition` values is needed in the future, implement `PartialEq` manually with a
+/// clear comment about the NaN case rather than deriving it.
+#[derive(Debug, Clone)]
+pub enum Condition {
+    /// `@if config.debug:` — truthy check on a dot-path variable
+    Truthy(Vec<String>),
+    /// `@if !config.debug:` — negated truthy check
+    Not(Vec<String>),
+    /// `@if role == "admin":` — strict equality
+    Eq(Vec<String>, CondValue),
+    /// `@if role != "admin":` — strict inequality
+    NotEq(Vec<String>, CondValue),
+}
+
+impl Condition {
+    /// Extract the dot-path from any condition variant.
+    pub fn path(&self) -> &[String] {
+        match self {
+            Condition::Truthy(p)
+            | Condition::Not(p)
+            | Condition::Eq(p, _)
+            | Condition::NotEq(p, _) => p,
+        }
+    }
+
+    /// Return the root (first) segment of the condition path, or an error if the path is empty.
+    ///
+    /// An empty path is an internal invariant violation — the parser always produces a
+    /// non-empty path for a valid `@if` condition.
+    #[must_use = "errors should be handled"]
+    pub fn root(&self) -> Result<&str, crate::error::MdsError> {
+        self.path().first().map(String::as_str).ok_or_else(|| {
+            crate::error::MdsError::syntax("internal error: @if block has empty condition path")
+        })
+    }
+}
+
 /// YAML frontmatter block.
 #[derive(Debug, Clone)]
 pub struct Frontmatter {
@@ -83,10 +159,11 @@ pub enum Arg {
 
 #[derive(Debug, Clone)]
 pub struct IfBlock {
-    /// Condition as a dot-separated path: single identifier is `vec!["name"]`,
-    /// dot path is `vec!["config", "debug"]`.
-    pub condition: Vec<String>,
+    /// The primary condition (`@if <condition>:`).
+    pub condition: Condition,
     pub then_body: Vec<Node>,
+    /// Zero or more `@elseif` branches, evaluated in order (short-circuit).
+    pub elseif_branches: Vec<(Condition, Vec<Node>)>,
     pub else_body: Option<Vec<Node>>,
     pub offset: usize,
 }

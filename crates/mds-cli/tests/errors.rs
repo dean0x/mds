@@ -249,19 +249,13 @@ fn type_error_for_non_array_in_for_loop() {
 }
 
 #[test]
-fn if_negation_error_message_is_actionable() {
-    // `@if !premium:` — negation is not supported; the error must explain what IS valid.
-    let source = "---\npremium: true\n---\n@if !premium:\nyes\n@end\n";
+fn if_negation_supported() {
+    // `@if !premium:` — negation is now supported.
+    // With premium=true, the negated condition is false → else branch.
+    let source = "---\npremium: true\n---\n@if !premium:\nnegated_yes\n@else:\nnegated_no\n@end\n";
     let result = mds::compile_str(source);
-    assert!(
-        result.is_err(),
-        "@if with negation must be rejected at parse time"
-    );
-    let err = format!("{}", result.unwrap_err());
-    assert!(
-        err.contains("variable name") || err.contains("negation") || err.contains("not supported"),
-        "error must explain what is valid and why '!premium' is rejected, got: {err}"
-    );
+    assert!(result.is_ok(), "@if with negation must succeed, got: {:?}", result);
+    assert!(result.unwrap().contains("negated_no"), "negation of true must take else branch");
 }
 
 #[test]
@@ -331,5 +325,125 @@ fn import_file_not_found_span_for_merge_import() {
     assert!(
         debug.contains("merge_test.mds") || debug.contains("1"),
         "merge import error should include source context, got: {debug}"
+    );
+}
+
+// ── @if condition parse error tests ─────────────────────────────────────────
+
+#[test]
+fn if_empty_after_operator_is_parse_error() {
+    // `@if var ==:` — missing RHS value
+    let source = "---\nvar: x\n---\n@if var ==:\nyes\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err(), "@if var ==: must be a parse error");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("expected value after '=='"),
+        "error must say expected value after '==', got: {err}"
+    );
+}
+
+#[test]
+fn if_bare_equals_is_parse_error() {
+    // `@if var = "a":` — single `=` must suggest `==`
+    let source = "---\nvar: a\n---\n@if var = \"a\":\nyes\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err(), "@if var = 'a': must be a parse error");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("'=='") || err.contains("use '=='"),
+        "error must suggest '==', got: {err}"
+    );
+}
+
+#[test]
+fn if_negation_empty_variable_is_parse_error() {
+    // `@if !:` — no variable name after `!`
+    let source = "---\nvar: true\n---\n@if !:\nyes\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err(), "@if !: must be a parse error");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("expected variable name after '!'"),
+        "error must say expected variable name, got: {err}"
+    );
+}
+
+#[test]
+fn if_double_negation_is_parse_error() {
+    // `@if !!var:` — double negation not supported
+    let source = "---\nvar: true\n---\n@if !!var:\nyes\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err(), "@if !!var: must be a parse error");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("double negation"),
+        "error must mention double negation, got: {err}"
+    );
+}
+
+#[test]
+fn elseif_after_else_is_parse_error() {
+    // `@elseif` appearing after `@else:` — not valid; the @else body only
+    // accepts @end as a terminator so @elseif is an unknown directive there.
+    let source = "---\nx: true\n---\n@if x:\nyes\n@else:\nno\n@elseif x:\nbad\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err(), "@elseif after @else: must be a parse error");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("@elseif") || err.contains("unknown directive"),
+        "error must mention @elseif or unknown directive, got: {err}"
+    );
+}
+
+#[test]
+fn if_negation_combined_with_comparison_is_parse_error() {
+    // `@if !var == "x":` — cannot combine negation with comparison
+    let source = "---\nvar: x\n---\n@if !var == \"x\":\nyes\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err(), "@if !var == 'x': must be a parse error");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("cannot combine negation") || err.contains("negation with comparison"),
+        "error must explain cannot combine negation with comparison, got: {err}"
+    );
+}
+
+#[test]
+fn if_unterminated_string_in_condition_is_parse_error() {
+    // `@if var == "unclosed:` — unterminated string literal
+    let source = "---\nvar: x\n---\n@if var == \"unclosed:\nyes\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err(), "unterminated string must be a parse error");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("unterminated string"),
+        "error must mention unterminated string, got: {err}"
+    );
+}
+
+#[test]
+fn if_eq_undefined_variable_is_error() {
+    // `@if missing == "x":` — undefined variable in equality
+    let source = "---\nvar: x\n---\n@if missing == \"x\":\nyes\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err(), "undefined variable in equality must be an error");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("missing") || err.contains("undefined"),
+        "error must mention the undefined variable, got: {err}"
+    );
+}
+
+#[test]
+fn if_negation_undefined_variable_is_error() {
+    // `@if !missing:` — undefined variable in negation
+    let source = "---\nvar: x\n---\n@if !missing:\nyes\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err(), "undefined variable in negation must be an error");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("missing") || err.contains("undefined"),
+        "error must mention the undefined variable, got: {err}"
     );
 }

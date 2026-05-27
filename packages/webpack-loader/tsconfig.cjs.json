@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "outDir": "dist-cjs",
+    "rootDir": "src",
+    "declaration": false,
+    "declarationMap": false,
+    "paths": {
+      "@mds/bundler-utils": ["../bundler-utils/dist/index.d.ts"],
+      "@mds/mds": ["../mds/dist/node.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "dist-cjs", "__test__"]
+}

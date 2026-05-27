@@ -1,16 +1,20 @@
 use std::collections::HashSet;
 
 use crate::ast::{
-    Arg, DefineBlock, ExportDirective, Expr, ForBlock, Frontmatter, IfBlock, ImportDirective,
-    IncludeDirective, Interpolation, Module, Node, TextNode,
+    Arg, Condition, CondValue, DefineBlock, ExportDirective, Expr, ForBlock, Frontmatter, IfBlock,
+    ImportDirective, IncludeDirective, Interpolation, Module, Node, TextNode, MAX_ELSEIF_BRANCHES,
 };
 use crate::error::MdsError;
 use crate::lexer::Token;
 use crate::limits::MAX_DOT_SEGMENTS;
 
 /// Maximum nesting depth for @if/@for/@define blocks.
-/// Prevents stack overflow from crafted inputs with thousands of nested blocks.
-pub(crate) const MAX_NESTING_DEPTH: usize = 256;
+///
+/// Prevents stack overflow from crafted inputs with deeply-nested blocks.
+/// 64 levels is generous for any real template while keeping recursive parse
+/// frames well within the 2 MB default thread stack on Linux/macOS (debug and
+/// release builds).  256 required an 8 MB stack in tests; 64 does not.
+pub(crate) const MAX_NESTING_DEPTH: usize = 64;
 
 /// Parse a stream of tokens into a Module AST with optional source context for error spans.
 ///
@@ -42,7 +46,7 @@ struct Parser<'a> {
 impl Parser<'_> {
     fn parse_module(&mut self) -> Result<Module, MdsError> {
         let frontmatter = self.parse_frontmatter();
-        let body = self.parse_body(&[])?;
+        let body = self.parse_body(&[], &[])?;
         Ok(Module { frontmatter, body })
     }
 
@@ -105,8 +109,16 @@ impl Parser<'_> {
     }
 
     /// Parse body nodes until we hit a terminator directive or end of tokens.
-    /// Terminators: @end, @else:
-    fn parse_body(&mut self, terminators: &[&str]) -> Result<Vec<Node>, MdsError> {
+    ///
+    /// `exact_terminators` — directives that stop parsing when they exactly match (e.g. `"@end"`, `"@else:"`).
+    /// `prefix_terminators` — stop when the directive *starts with* any of these prefixes (e.g. `"@elseif "`).
+    ///
+    /// Returns with `self.pos` pointing AT the terminator token (not past it).
+    fn parse_body(
+        &mut self,
+        exact_terminators: &[&str],
+        prefix_terminators: &[&str],
+    ) -> Result<Vec<Node>, MdsError> {
         let mut nodes = Vec::new();
 
         while self.pos < self.tokens.len() {
@@ -115,7 +127,10 @@ impl Parser<'_> {
             match token {
                 Token::Directive(dir, _offset) => {
                     let trimmed = dir.trim();
-                    if terminators.contains(&trimmed) {
+                    if exact_terminators.contains(&trimmed) {
+                        return Ok(nodes);
+                    }
+                    if prefix_terminators.iter().any(|p| trimmed.starts_with(p)) {
                         return Ok(nodes);
                     }
                     let node = self.parse_directive()?;
@@ -197,8 +212,22 @@ impl Parser<'_> {
             ));
         }
 
+        // Give targeted hints for @elseif used outside an @if block
+        if trimmed.starts_with("@elseif ") || trimmed == "@elseif" {
+            return Err(MdsError::syntax(
+                "@elseif must appear inside an @if block",
+            ));
+        }
+
+        // Give a targeted hint for @elseif: (missing condition after the colon)
+        if trimmed.starts_with("@elseif:") {
+            return Err(MdsError::syntax(
+                "found '@elseif:' without a condition — use '@elseif <condition>:' (condition required)",
+            ));
+        }
+
         Err(MdsError::syntax(format!(
-            "unknown directive: {trimmed}. Valid directives: @if, @else:, @end, @for, @define, @import, @export, @include"
+            "unknown directive: {trimmed}. Valid directives: @if, @elseif, @else:, @end, @for, @define, @import, @export, @include"
         )))
     }
 
@@ -209,33 +238,19 @@ impl Parser<'_> {
             .trim()
             .strip_suffix(':')
             .ok_or_else(|| MdsError::syntax("@if directive must end with ':'"))?
-            .trim()
-            .to_string();
+            .trim();
 
-        // Parse condition as dot-separated path (supports both `flag` and `config.debug`)
-        let condition: Vec<String> = condition_str
-            .split('.')
-            .map(|s| s.trim().to_string())
-            .collect();
-        if condition.len() > MAX_DOT_SEGMENTS {
-            return Err(MdsError::syntax(format!(
-                "@if condition dot path exceeds maximum segment count of {MAX_DOT_SEGMENTS}"
-            )));
-        }
-        for part in &condition {
-            if !is_valid_identifier(part) {
-                return Err(MdsError::syntax(format!(
-                    "@if condition must be a variable name or dot path, got '{condition_str}' — negation and expressions are not supported in v0.1"
-                )));
-            }
-        }
+        let condition = parse_condition(condition_str)?;
 
-        let then_body = self.parse_body(&["@else:", "@end"])?;
+        // Parse then-body; stops at @else:, @end, or any @elseif prefix
+        let then_body = self.parse_body(&["@else:", "@end"], &["@elseif "])?;
+
+        let elseif_branches = self.collect_elseif_branches()?;
 
         let else_body = if matches!(self.peek(), Some(Token::Directive(d, _)) if d.trim() == "@else:")
         {
             self.pos += 1; // skip @else:
-            Some(self.parse_body(&["@end"])?)
+            Some(self.parse_body(&["@end"], &[])?)
         } else {
             None
         };
@@ -245,10 +260,52 @@ impl Parser<'_> {
         self.depth -= 1;
         Ok(Node::If(IfBlock {
             condition,
+            elseif_branches,
             then_body,
             else_body,
             offset,
         }))
+    }
+
+    /// Consume all consecutive `@elseif` directive tokens and return the parsed branches.
+    ///
+    /// The limit check runs **before** parsing each branch body so that adversarial
+    /// input that exceeds `MAX_ELSEIF_BRANCHES` cannot force unbounded parse work.
+    fn collect_elseif_branches(&mut self) -> Result<Vec<(Condition, Vec<Node>)>, MdsError> {
+        let mut branches: Vec<(Condition, Vec<Node>)> = Vec::with_capacity(4);
+        while let Some(Token::Directive(d, _)) = self.peek() {
+            if !d.trim().starts_with("@elseif ") {
+                break;
+            }
+
+            // Enforce the branch limit before doing any parse work for this iteration.
+            if branches.len() >= MAX_ELSEIF_BRANCHES {
+                return Err(MdsError::syntax(format!(
+                    "@if block has more than {MAX_ELSEIF_BRANCHES} @elseif branches"
+                )));
+            }
+
+            // Consume the @elseif directive token.
+            let elseif_dir = d.clone();
+            self.pos += 1;
+
+            // Extract condition string: strip "@elseif " prefix and trailing ":".
+            // strip_prefix cannot fail here: the while guard already checked starts_with("@elseif ").
+            let elseif_cond_str = elseif_dir
+                .trim()
+                .strip_prefix("@elseif ")
+                .expect("loop guard guarantees @elseif prefix")
+                .trim()
+                .strip_suffix(':')
+                .ok_or_else(|| MdsError::syntax("@elseif directive must end with ':'"))?
+                .trim();
+
+            let elseif_cond = parse_condition(elseif_cond_str)?;
+            let elseif_body = self.parse_body(&["@else:", "@end"], &["@elseif "])?;
+
+            branches.push((elseif_cond, elseif_body));
+        }
+        Ok(branches)
     }
 
     fn parse_for_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
@@ -290,7 +347,7 @@ impl Parser<'_> {
             }
         }
 
-        let body = self.parse_body(&["@end"])?;
+        let body = self.parse_body(&["@end"], &[])?;
 
         self.consume_end("@for")?;
 
@@ -349,7 +406,7 @@ impl Parser<'_> {
             }
         }
 
-        let body = self.parse_body(&["@end"])?;
+        let body = self.parse_body(&["@end"], &[])?;
 
         // Trim surrounding newlines added by the block's colons and @end lines.
         let body = strip_trailing_newline(strip_leading_newline(body));
@@ -364,6 +421,235 @@ impl Parser<'_> {
             offset,
         }))
     }
+}
+
+/// Parse a dot-separated path string (e.g. `"config.debug"`) into a `Vec<String>`.
+///
+/// Returns an error if any segment is not a valid identifier or if the path
+/// exceeds `MAX_DOT_SEGMENTS`.
+fn parse_dot_path(s: &str) -> Result<Vec<String>, MdsError> {
+    let mut out: Vec<String> = Vec::with_capacity(4);
+    for raw in s.split('.') {
+        if out.len() >= MAX_DOT_SEGMENTS {
+            return Err(MdsError::syntax(format!(
+                "@if condition dot path exceeds maximum segment count of {MAX_DOT_SEGMENTS}"
+            )));
+        }
+        let part = raw.trim();
+        if !is_valid_identifier(part) {
+            return Err(MdsError::syntax(format!(
+                "@if condition must be a variable name or dot path, got '{s}'"
+            )));
+        }
+        out.push(part.to_string());
+    }
+    Ok(out)
+}
+
+/// Parse a literal value for the RHS of a comparison condition.
+///
+/// Accepts:
+/// - Quoted strings: `"admin"` or `'admin'`
+/// - Numbers: `42`, `-5`, `3.14`
+/// - Booleans: `true`, `false`
+/// - Null: `null`
+fn parse_cond_value(s: &str) -> Result<CondValue, MdsError> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(MdsError::syntax(
+            "comparison values must be string, number, boolean, or null",
+        ));
+    }
+
+    // Quoted string (single or double)
+    if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
+        || (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
+    {
+        let inner = &s[1..s.len() - 1];
+        return Ok(CondValue::String(unescape_string(inner)));
+    }
+
+    // Unterminated string
+    if s.starts_with('"') || s.starts_with('\'') {
+        return Err(MdsError::syntax(
+            "unterminated string literal in @if condition",
+        ));
+    }
+
+    // Boolean literals
+    if s == "true" {
+        return Ok(CondValue::Boolean(true));
+    }
+    if s == "false" {
+        return Ok(CondValue::Boolean(false));
+    }
+
+    // Null literal
+    if s == "null" {
+        return Ok(CondValue::Null);
+    }
+
+    // Numeric (integer or float, including negative)
+    if let Ok(n) = s.parse::<f64>() {
+        if !n.is_finite() {
+            return Err(MdsError::syntax(
+                "NaN and infinity are not valid condition values",
+            ));
+        }
+        return Ok(CondValue::Number(n));
+    }
+
+    Err(MdsError::syntax(
+        "comparison values must be string, number, boolean, or null",
+    ))
+}
+
+/// Scan `s` for the first unquoted `==` or `!=` operator.
+///
+/// Tracks whether the scanner is inside a single- or double-quoted string and
+/// only reports an operator position when outside any string literal. This
+/// handles cases like `@if msg == "a == b":` correctly (the `==` inside the
+/// string literal is ignored).
+///
+/// Returns `Some((byte_index, "=="` or `"!="))` pointing to the start of the
+/// operator, or `None` if no unquoted operator is present.
+///
+/// # Byte-level scan safety
+///
+/// This function receives a `&str`, which Rust guarantees is valid UTF-8.  The
+/// ASCII bytes we search for (`!`, `=`, `"`, `'`, `\`) are all single-byte
+/// characters in the range 0x00–0x7F.  In UTF-8, continuation bytes of
+/// multi-byte sequences always have their high bit set (≥ 0x80), so they can
+/// never be mistaken for any ASCII byte we inspect.  Consequently, scanning
+/// `s.as_bytes()` byte-by-byte and acting only on those ASCII sentinel values
+/// is sound: we never split a multi-byte code-point, and every byte index we
+/// return points to the first byte of an ASCII character that is also a valid
+/// `str` boundary.
+fn find_unquoted_operator(s: &str) -> Option<(usize, &'static str)> {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut string_char = b'"';
+
+    while i < len {
+        let ch = bytes[i];
+
+        if in_string {
+            // Check escape before close-quote: a backslash always consumes the
+            // next character, so the close-quote check must never run for the
+            // escaped character.
+            if ch == b'\\' && i + 1 < len {
+                i += 2;
+                continue;
+            }
+            if ch == string_char {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        // Outside a string
+        if ch == b'"' || ch == b'\'' {
+            in_string = true;
+            string_char = ch;
+            i += 1;
+            continue;
+        }
+
+        // Check for != (must check before single = check)
+        if ch == b'!' && i + 1 < len && bytes[i + 1] == b'=' {
+            return Some((i, "!="));
+        }
+
+        // Check for == (two consecutive '=', not just one)
+        if ch == b'=' && i + 1 < len && bytes[i + 1] == b'=' {
+            return Some((i, "=="));
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
+/// Parse the body of a negation condition (everything after the leading `!`).
+///
+/// Validates that the negation is not doubled (`!!`), not combined with a
+/// comparison operator, and not missing the variable name.  Returns
+/// `Condition::Not(path)` on success.
+fn parse_negation_condition(rest: &str) -> Result<Condition, MdsError> {
+    if rest.starts_with('!') {
+        return Err(MdsError::syntax("double negation is not supported"));
+    }
+    if find_unquoted_operator(rest).is_some() {
+        return Err(MdsError::syntax(
+            "cannot combine negation with comparison; use @if var != 'value': instead",
+        ));
+    }
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Err(MdsError::syntax("expected variable name after '!'"));
+    }
+    let path = parse_dot_path(rest)?;
+    Ok(Condition::Not(path))
+}
+
+/// Parse an `@if` or `@elseif` condition string into a `Condition`.
+///
+/// Accepted forms:
+/// - `var` / `config.debug` → `Condition::Truthy`
+/// - `!var` / `!config.debug` → `Condition::Not`
+/// - `var == "value"` / `var != 42` → `Condition::Eq` / `Condition::NotEq`
+fn parse_condition(s: &str) -> Result<Condition, MdsError> {
+    let s = s.trim();
+
+    // Negation prefix
+    if let Some(rest) = s.strip_prefix('!') {
+        return parse_negation_condition(rest);
+    }
+
+    // Equality/inequality operators
+    if let Some((op_pos, op)) = find_unquoted_operator(s) {
+        let lhs = s[..op_pos].trim();
+        let rhs_start = op_pos + op.len();
+        let rhs = s[rhs_start..].trim();
+
+        if rhs.is_empty() {
+            return Err(MdsError::syntax(format!(
+                "expected value after '{op}'"
+            )));
+        }
+
+        let path = parse_dot_path(lhs)?;
+        let value = parse_cond_value(rhs)?;
+
+        return match op {
+            "==" => Ok(Condition::Eq(path, value)),
+            "!=" => Ok(Condition::NotEq(path, value)),
+            other => Err(MdsError::syntax(format!(
+                "internal error: unrecognised operator '{other}' in @if condition"
+            ))),
+        };
+    }
+
+    // Check for bare `=` (not `==`) — give a targeted hint
+    // We look for `=` that is NOT followed by another `=` and NOT preceded by `!`
+    if let Some(eq_pos) = s.find('=') {
+        let before = &s[..eq_pos];
+        let after = &s[eq_pos + 1..];
+        // Bare `=` (not `==` and not `!=`)
+        if !after.starts_with('=') && !before.ends_with('!') {
+            return Err(MdsError::syntax(
+                "use '==' for comparison, not '='",
+            ));
+        }
+    }
+
+    // Default: truthy check
+    let path = parse_dot_path(s)?;
+    Ok(Condition::Truthy(path))
 }
 
 /// Parse an `@import` directive into a Node.
@@ -1167,12 +1453,17 @@ mod tests {
 
     #[test]
     fn parse_if_dot_path_condition() {
-        // @if config.debug: — condition is a multi-element Vec
+        // @if config.debug: — condition is Condition::Truthy with dot path
         let src = "@if config.debug:\nDebugging\n@end\n";
         let tokens = tokenize(src, "test.mds").unwrap();
         let module = parse_with_ctx(&tokens, "", "").unwrap();
         if let Node::If(block) = &module.body[0] {
-            assert_eq!(block.condition, &["config", "debug"]);
+            assert!(
+                matches!(&block.condition, Condition::Truthy(p) if p == &["config", "debug"]),
+                "expected Condition::Truthy([\"config\", \"debug\"]), got {:?}",
+                block.condition
+            );
+            assert!(block.elseif_branches.is_empty());
         } else {
             panic!("expected If node");
         }
@@ -1309,6 +1600,9 @@ mod tests {
     fn parse_nesting_depth_limit_rejected() {
         // Build a source string with MAX_NESTING_DEPTH + 1 nested @if blocks.
         // Each @if requires a condition variable — we use "x" consistently.
+        //
+        // MAX_NESTING_DEPTH=64 keeps recursive parse frames well within the
+        // 2 MB default thread stack, so no enlarged stack is required here.
         let depth = MAX_NESTING_DEPTH + 1;
         let mut src = String::new();
         for _ in 0..depth {
@@ -1334,6 +1628,9 @@ mod tests {
     #[test]
     fn parse_nesting_depth_at_limit_accepted() {
         // Exactly MAX_NESTING_DEPTH nested @if blocks must succeed.
+        //
+        // MAX_NESTING_DEPTH=64 keeps recursive parse frames well within the
+        // 2 MB default thread stack, so no enlarged stack is required here.
         let depth = MAX_NESTING_DEPTH;
         let mut src = String::new();
         for _ in 0..depth {
@@ -1359,5 +1656,168 @@ mod tests {
         );
         assert!(is_valid_identifier("hello"), "ascii ident must be accepted");
         assert!(is_valid_identifier("_foo_42"), "underscored ident ok");
+    }
+
+    // --- Tests for batch-1 fixes ---
+
+    // Fix: parser:212:error-msg — @elseif outside @if gives targeted error
+    #[test]
+    fn elseif_outside_if_gives_targeted_error() {
+        let src = "@elseif x:\nfoo\n@end\n";
+        let tokens = tokenize(src, "test.mds").unwrap();
+        let result = parse_with_ctx(&tokens, "", "");
+        assert!(result.is_err(), "@elseif outside @if must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("@elseif must appear inside an @if block"),
+            "error must mention @if block context, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn elseif_colon_without_condition_gives_targeted_error() {
+        // @elseif: (has colon but no condition) used as a top-level directive
+        let src = "@elseif:\nfoo\n@end\n";
+        let tokens = tokenize(src, "test.mds").unwrap();
+        let result = parse_with_ctx(&tokens, "", "");
+        assert!(result.is_err(), "@elseif: at top level must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("condition required") || msg.contains("@elseif"),
+            "error must mention missing condition, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_directive_lists_elseif() {
+        // An unrecognized directive gives an error listing valid directives
+        // including @elseif
+        let src = "@bogus\n";
+        let tokens = tokenize(src, "test.mds").unwrap();
+        let result = parse_with_ctx(&tokens, "", "");
+        assert!(result.is_err(), "@bogus must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("@elseif"),
+            "valid-directives list must include @elseif, got: {msg}"
+        );
+    }
+
+    // Fix: parser:464:nan-infinity — NaN/Infinity rejected in condition values
+    #[test]
+    fn condition_value_nan_rejected() {
+        let result = parse_cond_value("NaN");
+        assert!(result.is_err(), "NaN must be rejected as a condition value");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("NaN") || msg.contains("infinity"),
+            "error must mention NaN/infinity, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn condition_value_infinity_rejected() {
+        let result = parse_cond_value("inf");
+        assert!(
+            result.is_err(),
+            "infinity must be rejected as a condition value"
+        );
+    }
+
+    #[test]
+    fn condition_value_negative_infinity_rejected() {
+        let result = parse_cond_value("-inf");
+        assert!(
+            result.is_err(),
+            "-infinity must be rejected as a condition value"
+        );
+    }
+
+    #[test]
+    fn condition_value_finite_numbers_accepted() {
+        assert!(parse_cond_value("42").is_ok());
+        assert!(parse_cond_value("-5").is_ok());
+        assert!(parse_cond_value("3.14").is_ok());
+    }
+
+    // Fix: parser:436:escape-sequences — escape sequences in condition string literals
+    #[test]
+    fn condition_value_escaped_quote_in_string() {
+        // @if var == "say \"hi\"": — inner escaped quote must be unescaped
+        let result = parse_cond_value(r#""say \"hi\"""#);
+        assert!(result.is_ok(), "escaped quote in condition value must parse");
+        if let Ok(CondValue::String(s)) = result {
+            assert_eq!(s, r#"say "hi""#, "escaped quote must be unescaped");
+        } else {
+            panic!("expected CondValue::String");
+        }
+    }
+
+    #[test]
+    fn condition_value_unescaped_string_unchanged() {
+        // Plain strings with no escapes must pass through unchanged
+        let result = parse_cond_value(r#""hello world""#);
+        assert!(result.is_ok());
+        if let Ok(CondValue::String(s)) = result {
+            assert_eq!(s, "hello world");
+        } else {
+            panic!("expected CondValue::String");
+        }
+    }
+
+    // Fix: parser:493:escape-order — escaped close-quote inside string does not
+    // terminate the string prematurely in find_unquoted_operator
+    #[test]
+    fn find_unquoted_operator_escaped_close_quote_not_terminator() {
+        // In `var == "say \"hi\""`, the \" inside the string must not end the string.
+        // The operator == must still be found (outside the string).
+        let result = find_unquoted_operator(r#"var == "say \"hi\"""#);
+        assert!(
+            result.is_some(),
+            "== must be found outside the string literal"
+        );
+        let (pos, op) = result.unwrap();
+        assert_eq!(op, "==");
+        assert_eq!(pos, 4, "== must be at byte 4");
+    }
+
+    // --- Tests for MAX_ELSEIF_BRANCHES limit ---
+
+    #[test]
+    fn parse_elseif_branch_at_limit_accepted() {
+        // Exactly MAX_ELSEIF_BRANCHES @elseif branches must be accepted.
+        let mut src = String::from("@if flag:\nfirst\n");
+        for i in 0..MAX_ELSEIF_BRANCHES {
+            src.push_str(&format!("@elseif flag{i}:\nbranch{i}\n"));
+        }
+        src.push_str("@end\n");
+        let tokens = tokenize(&src, "test.mds").unwrap();
+        let result = parse_with_ctx(&tokens, "", "");
+        assert!(
+            result.is_ok(),
+            "exactly MAX_ELSEIF_BRANCHES @elseif branches must be accepted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn parse_elseif_branch_limit_rejected() {
+        // MAX_ELSEIF_BRANCHES + 1 @elseif branches must be rejected with a
+        // descriptive error that mentions the branch limit.
+        let mut src = String::from("@if flag:\nfirst\n");
+        for i in 0..=MAX_ELSEIF_BRANCHES {
+            src.push_str(&format!("@elseif flag{i}:\nbranch{i}\n"));
+        }
+        src.push_str("@end\n");
+        let tokens = tokenize(&src, "test.mds").unwrap();
+        let result = parse_with_ctx(&tokens, "", "");
+        assert!(
+            result.is_err(),
+            "more than MAX_ELSEIF_BRANCHES @elseif branches must be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("branch") || err.contains(&MAX_ELSEIF_BRANCHES.to_string()),
+            "error must mention branch limit, got: {err}"
+        );
     }
 }

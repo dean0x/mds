@@ -7,10 +7,13 @@
   "engines": {
     "node": ">=22.0.0"
   },
+  "main": "./dist-cjs/index.js",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist-cjs/index.js",
+      "default": "./dist-cjs/index.js"
     },
     "./mds": {
       "types": "./mds.d.ts"
@@ -18,10 +21,13 @@
   },
   "files": [
     "dist/",
+    "dist-cjs/",
     "mds.d.ts"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean:cjs": "node -e \"require('fs').rmSync('dist-cjs', { recursive: true, force: true })\"",
+    "prebuild": "npm run clean:cjs",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node ../../scripts/write-cjs-package.cjs dist-cjs",
     "test": "node --test __test__/*.spec.mjs"
   },
   "peerDependencies": {

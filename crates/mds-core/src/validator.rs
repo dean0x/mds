@@ -1,4 +1,4 @@
-use crate::ast::{Arg, Expr, Node};
+use crate::ast::{Arg, Condition, Expr, Node};
 use crate::error::MdsError;
 use crate::scope::Scope;
 use crate::value::Value;
@@ -26,15 +26,8 @@ fn validate_node(node: &Node, scope: &mut Scope, file: &str, source: &str) -> Re
             validate_expr(&interp.expr, scope, file, source, interp.offset, interp.len)
         }
         Node::If(block) => {
-            // Condition root must be a defined variable (truthiness is checked at evaluation time).
-            // Parser invariant: condition is always non-empty. Use .first() with an error return
-            // rather than a debug_assert!+index so this holds in release builds too.
-            let root = block.condition.first().ok_or_else(|| {
-                MdsError::syntax("internal error: @if block has empty condition path")
-            })?;
-            scope.get_var(root).ok_or_else(|| {
-                MdsError::undefined_var_at(root, file, source, block.offset, root.len())
-            })?;
+            // Validate that the root variable of each condition is defined in scope.
+            validate_condition(&block.condition, scope, file, source, block.offset)?;
             // INVARIANT: @if does not push a scope frame. then_body and else_body are
             // validated against the same &mut Scope. This is safe because no directive
             // that modifies scope (e.g. @define, @for) is valid at block level inside
@@ -42,6 +35,11 @@ fn validate_node(node: &Node, scope: &mut Scope, file: &str, source: &str) -> Re
             // scope bindings are added at this level, each branch must get its own
             // push()/pop() frame to prevent bindings from leaking across branches.
             validate(&block.then_body, scope, file, source)?;
+            // Validate all @elseif branches
+            for (elseif_cond, elseif_body) in &block.elseif_branches {
+                validate_condition(elseif_cond, scope, file, source, block.offset)?;
+                validate(elseif_body, scope, file, source)?;
+            }
             if let Some(else_body) = &block.else_body {
                 validate(else_body, scope, file, source)?;
             }
@@ -124,6 +122,21 @@ fn validate_node(node: &Node, scope: &mut Scope, file: &str, source: &str) -> Re
             })
             .map(|_| ()),
     }
+}
+
+/// Validate that the root variable of a condition path is defined in scope.
+fn validate_condition(
+    condition: &Condition,
+    scope: &Scope,
+    file: &str,
+    source: &str,
+    offset: usize,
+) -> Result<(), MdsError> {
+    let root = condition.root()?;
+    scope
+        .get_var(root)
+        .ok_or_else(|| MdsError::undefined_var_at(root, file, source, offset, root.len()))
+        .map(|_| ())
 }
 
 fn validate_expr(

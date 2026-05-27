@@ -1,6 +1,6 @@
 import { open, realpath } from 'node:fs/promises';
-import { constants } from 'node:fs';
-import { resolve, dirname, basename } from 'node:path';
+import { constants, existsSync } from 'node:fs';
+import { resolve, dirname, relative } from 'node:path';
 
 // O_NOFOLLOW prevents the kernel from following a symlink at the final path
 // component. Using it closes the TOCTOU window between lstat and open.
@@ -10,8 +10,81 @@ const O_NOFOLLOW: number = (constants as Record<string, number>)['O_NOFOLLOW'] ?
 
 const MAX_PATH_SEGMENTS = 256;
 const MAX_IMPORT_DEPTH = 64;
+const MAX_TRAVERSAL_DEPTH = 256;
+// Maximum concurrent file opens per fan-out level. Keeps file descriptor usage
+// predictable even when a module imports many siblings at once.
+const MAX_CONCURRENT_OPENS = 16;
+const PROJECT_ROOT_MARKERS = ['.git', '.mdsroot'] as const;
 export const DEFAULT_MAX_MODULES = 256;
 export const DEFAULT_MAX_AGGREGATE_SIZE = 10 * 1024 * 1024; // 10 MiB
+
+/**
+ * Cache from start-directory → project-root result. The project root is
+ * invariant within a single build, so repeated calls from the same start
+ * directory (one per Webpack loader invocation) skip the traversal entirely.
+ * Each traversal performs up to MAX_TRAVERSAL_DEPTH × |markers| synchronous
+ * I/O calls, which can block the event loop on deep trees or network FSes.
+ */
+const projectRootCache = new Map<string, string>();
+
+/**
+ * Walk up from a directory to find the project root.
+ *
+ * Looks for `.git` or `.mdsroot` markers — the same markers the Rust
+ * NativeFs::find_project_root uses. Falls back to the given directory if no
+ * marker is found within MAX_TRAVERSAL_DEPTH parent directories.
+ *
+ * Results are cached by start directory: the project root is invariant within
+ * a build, so repeated calls incur only a single Map lookup after the first.
+ *
+ * ARCHITECTURE EXCEPTION: Uses synchronous `existsSync` despite the otherwise
+ * fully-async module pattern. This is a deliberate trade-off: (a) the result
+ * is cached so the sync traversal runs at most once per unique start directory
+ * per process, and (b) keeping this function synchronous avoids propagating
+ * `async` through every call site (including test utilities that call it
+ * directly). The blocking window is bounded by MAX_TRAVERSAL_DEPTH (256) ×
+ * |markers| (2) I/O calls on an uncached first call — acceptable for a
+ * one-time startup cost on local filesystems.
+ */
+export function findProjectRoot(start: string): string {
+  const normalized = resolve(start);
+  const cached = projectRootCache.get(normalized);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const result = _findProjectRootUncached(normalized);
+  projectRootCache.set(normalized, result);
+  return result;
+}
+
+/**
+ * Clear the project root cache. Intended for use in tests only — production
+ * code should never call this because the cache is an intentional correctness
+ * optimization (project root is invariant within a build).
+ *
+ * @internal
+ */
+export function _clearProjectRootCacheForTesting(): void {
+  projectRootCache.clear();
+}
+
+function _findProjectRootUncached(start: string): string {
+  let dir = start;
+  for (let i = 0; i < MAX_TRAVERSAL_DEPTH; i++) {
+    for (const marker of PROJECT_ROOT_MARKERS) {
+      if (existsSync(resolve(dir, marker))) {
+        return dir;
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) {
+      return start;
+    }
+    dir = parent;
+  }
+  return start;
+}
 
 /**
  * Open a file descriptor with O_NOFOLLOW | O_RDONLY, translating the ELOOP /
@@ -111,9 +184,19 @@ export function normalizeVirtualKey(base: string, relative: string): string {
  * Recursively resolve an MDS file and all its imports into a flat modules map
  * suitable for passing to the WASM compile/check functions.
  *
+ * The returned `entryFilename` is a **project-root-relative** slash path
+ * (e.g. `"src/templates/foo.mds"`), computed via `path.relative(projectRoot,
+ * absoluteEntry)`. This mirrors the virtual key used in the `modules` map and
+ * is the value that must be passed as the `filename` argument to
+ * `build_modules()` / `check()` on the WASM side.
+ *
+ * Note: prior to this change `entryFilename` was the basename of the entry
+ * file. Callers that relied on the basename form must be updated to use the
+ * relative path.
+ *
  * Security checks performed:
  * - Rejects symlinks (O_NOFOLLOW open; realpath check on Windows fallback)
- * - Rejects paths that escape the project root (entry file's directory)
+ * - Rejects paths that escape the project root (discovered via .git/.mdsroot markers)
  * - Rejects paths with null bytes or empty segments
  * - Enforces module count and aggregate size limits
  */
@@ -126,8 +209,8 @@ export async function buildModulesMap(
   const maxAggregateSize = options?.maxAggregateSize ?? DEFAULT_MAX_AGGREGATE_SIZE;
 
   const absoluteEntry = resolve(entryPath);
-  const projectRoot = dirname(absoluteEntry);
-  const entryFilename = basename(absoluteEntry);
+  const projectRoot = findProjectRoot(dirname(absoluteEntry));
+  const entryFilename = relative(projectRoot, absoluteEntry);
 
   // Security: entry file must not be at filesystem root — that would disable the
   // path traversal guard (projectRoot === '/' makes startsWith checks meaningless).
@@ -271,17 +354,22 @@ export async function buildModulesMap(
     const importPaths = scanImports(content);
     const absoluteDir = dirname(absolutePath);
 
-    // Parallelize child reads at each level.
-    await Promise.all(
-      importPaths.map(async (importPath) => {
+    // Bounded-concurrency fan-out: limit simultaneous child opens to
+    // MAX_CONCURRENT_OPENS to avoid exhausting file descriptors on modules
+    // with many siblings. Each slot runs the next import as soon as it
+    // finishes, so throughput is preserved for the common case.
+    const queue = importPaths.slice();
+    async function worker(): Promise<void> {
+      let importPath: string | undefined;
+      while ((importPath = queue.shift()) !== undefined) {
         const childAbsolute = validateImportPath(importPath, absoluteDir);
-
         // Compute virtual key using normalizeVirtualKey to mirror Rust's VirtualFs::normalize().
         const childVirtualKey = normalizeVirtualKey(virtualKey, importPath);
-
         await scan(childAbsolute, childVirtualKey, depth + 1);
-      }),
-    );
+      }
+    }
+    const slots = Math.min(MAX_CONCURRENT_OPENS, importPaths.length);
+    await Promise.all(Array.from({ length: slots }, worker));
   }
 
   await scan(absoluteEntry, entryFilename);

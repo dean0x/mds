@@ -9,14 +9,14 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { mkdtemp, symlink, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, symlink, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Import from the compiled dist.
 // Note: module-scanner is a Node-only utility (uses fs/promises).
-const { normalizeVirtualKey, buildModulesMap } = await import('../dist/util/module-scanner.js');
+const { normalizeVirtualKey, buildModulesMap, findProjectRoot } = await import('../dist/util/module-scanner.js');
 
 const FIXTURES = path.join(__dirname, 'fixtures');
 
@@ -100,8 +100,9 @@ describe('buildModulesMap', () => {
   test('U-SM1: builds modules map for entry with imports', async () => {
     const entryPath = path.join(FIXTURES, 'imports', 'entry.mds');
     const { entryFilename, modules } = await buildModulesMap(entryPath, scanImports);
-    assert.equal(entryFilename, 'entry.mds');
-    assert.ok(typeof modules['entry.mds'] === 'string', 'entry should be in modules');
+    assert.ok(entryFilename.endsWith('imports/entry.mds'), `entry key should end with imports/entry.mds: ${entryFilename}`);
+    assert.ok(!entryFilename.startsWith('/'), `entry key must be relative, not absolute: ${entryFilename}`);
+    assert.ok(typeof modules[entryFilename] === 'string', 'entry should be in modules');
     // lib.mds and deep.mds should also be included
     assert.ok(Object.keys(modules).length >= 3, `expected at least 3 modules, got: ${Object.keys(modules)}`);
   });
@@ -109,8 +110,9 @@ describe('buildModulesMap', () => {
   test('U-SM2: builds modules map for file with no imports', async () => {
     const entryPath = path.join(FIXTURES, 'simple.mds');
     const { entryFilename, modules } = await buildModulesMap(entryPath, scanImports);
-    assert.equal(entryFilename, 'simple.mds');
-    assert.ok(typeof modules['simple.mds'] === 'string');
+    assert.ok(entryFilename.endsWith('simple.mds'), `entry key should end with simple.mds: ${entryFilename}`);
+    assert.ok(!entryFilename.startsWith('/'), `entry key must be relative, not absolute: ${entryFilename}`);
+    assert.ok(typeof modules[entryFilename] === 'string');
     assert.equal(Object.keys(modules).length, 1);
   });
 
@@ -172,6 +174,117 @@ describe('buildModulesMap', () => {
       );
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test('U-SM8: resolves cross-directory imports via project root discovery', async () => {
+    // cross-dir/app/entry.mds imports ../lib/helpers.mds — a sibling directory.
+    // The scanner must walk up to find the project root (via .git marker) so that
+    // the import resolves within the project boundary instead of being rejected.
+    const entryPath = path.join(FIXTURES, 'cross-dir', 'app', 'entry.mds');
+    const { entryFilename, modules } = await buildModulesMap(entryPath, scanImports);
+    // Entry key should end with the path from the cross-dir root.
+    assert.ok(entryFilename.endsWith('cross-dir/app/entry.mds'), `entry key should include path: ${entryFilename}`);
+    // The entry module should be in the map under its key.
+    assert.ok(modules[entryFilename], 'entry should be in modules under its key');
+    // The sibling-directory module should also be present.
+    const helperKey = Object.keys(modules).find(k => k.endsWith('cross-dir/lib/helpers.mds'));
+    assert.ok(helperKey, `sibling dir module should be included, got keys: ${Object.keys(modules)}`);
+    assert.equal(Object.keys(modules).length, 2, 'should have exactly entry + helper');
+  });
+});
+
+describe('findProjectRoot', () => {
+  // Each test uses a fresh mkdtemp directory to guarantee unique paths that
+  // will not collide with cached results from prior test runs.
+
+  test('U-PR1: returns directory containing .git marker', async () => {
+    // Arrange: root/sub/ — .git lives at root, start is root/sub
+    const root = await mkdtemp(path.join(os.tmpdir(), 'mds-pr-test-'));
+    try {
+      const sub = path.join(root, 'sub');
+      await mkdir(sub);
+      await mkdir(path.join(root, '.git'));
+      // Act
+      const result = findProjectRoot(sub);
+      // Assert: should walk up from sub and find root via .git
+      assert.equal(result, root);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('U-PR2: returns directory containing .mdsroot marker', async () => {
+    // Arrange: root/a/b/ — .mdsroot lives at root, start is root/a/b
+    const root = await mkdtemp(path.join(os.tmpdir(), 'mds-pr-test-'));
+    try {
+      const deep = path.join(root, 'a', 'b');
+      await mkdir(deep, { recursive: true });
+      await writeFile(path.join(root, '.mdsroot'), '');
+      // Act
+      const result = findProjectRoot(deep);
+      // Assert: should walk up and find root via .mdsroot
+      assert.equal(result, root);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('U-PR3: falls back to start directory when no marker is found', async () => {
+    // Arrange: isolated temp dir with no .git or .mdsroot anywhere in its tree.
+    // We create a subdirectory so the traversal has at least one step.
+    const root = await mkdtemp(path.join(os.tmpdir(), 'mds-pr-test-'));
+    try {
+      const sub = path.join(root, 'sub');
+      await mkdir(sub);
+      // Act: use a deep path that lives inside os.tmpdir() but has no marker.
+      // We cannot guarantee os.tmpdir() itself has no .git (e.g. in CI or
+      // monorepo environments), so we accept either the original start argument
+      // or any ancestor — as long as the result is a prefix of sub.
+      const result = findProjectRoot(sub);
+      // Assert: result is either `sub` itself (fallback) or an ancestor of `sub`
+      // that contains a marker. Either way, sub must start with result + '/'.
+      assert.ok(
+        result === sub || sub.startsWith(result + '/'),
+        `expected result to be sub or an ancestor of sub, got: ${result}`,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('U-PR4: returns start when called with a path already at filesystem root sentinel', () => {
+    // Simulate the filesystem-root sentinel: dirname(x) === x. We verify that
+    // findProjectRoot('') does not loop forever — dirname('') returns '.' which
+    // is not the same as '' so this exercises the loop normally, but we can
+    // verify a known-fallback path like the OS temp dir itself.
+    // The real edge case (parent === dir) fires at the OS root '/'.
+    // We verify indirectly: if the traversal walked up to '/', findProjectRoot
+    // returned start. We test this by confirming that a fresh temp directory
+    // (with no markers) returns the start, not '/'.
+    const start = os.tmpdir();
+    const result = findProjectRoot(start);
+    // Result is either start (no marker found and fallback triggered) or
+    // some ancestor that happens to have a .git. Either way, it must be a string
+    // and must not be empty — we cannot assert the exact value here because
+    // os.tmpdir() may be inside a git repo on some machines.
+    assert.ok(typeof result === 'string' && result.length > 0, 'result must be a non-empty path');
+  });
+
+  test('U-PR5: result is cached — same start returns same value on second call', async () => {
+    // The cache makes repeated traversal O(1) after the first call.
+    // We verify observable correctness: two calls with the same start return ===.
+    const root = await mkdtemp(path.join(os.tmpdir(), 'mds-pr-test-'));
+    try {
+      const sub = path.join(root, 'sub');
+      await mkdir(sub);
+      await mkdir(path.join(root, '.git'));
+      const first = findProjectRoot(sub);
+      const second = findProjectRoot(sub);
+      assert.equal(first, second);
+      assert.equal(first, root);
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

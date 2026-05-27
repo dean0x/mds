@@ -89,13 +89,86 @@ Free tier content here.
 @end
 ```
 
+**Negation** (`!`):
+
+```mds
+@if !debug_mode:
+Production content here.
+@end
+```
+
+**Equality comparison** (`==` / `!=`):
+
+```mds
+@if role == "admin":
+Admin panel content.
+@elseif role == "mod":
+Moderator controls.
+@else:
+Regular user view.
+@end
+```
+
+Comparison RHS must be a string, number, boolean, or null literal:
+
+```mds
+@if count == 0:
+No results found.
+@end
+
+@if active == true:
+Service is active.
+@end
+
+@if status != "disabled":
+Feature is available.
+@end
+```
+
+Single-quoted string literals are equally valid in comparisons:
+
+```mds
+@if role == 'admin':
+Admin panel content.
+@end
+
+@if status != 'disabled':
+Feature is available.
+@end
+```
+
+Escape sequences (`\\`, `\"`, `\'`) are supported inside both single- and double-quoted comparison literals, matching function argument strings (see §4.5).
+
+**`@elseif`** chains:
+
+```mds
+@if tier == "enterprise":
+Enterprise features.
+@elseif tier == "pro":
+Pro features.
+@elseif tier == "starter":
+Starter features.
+@else:
+Free tier.
+@end
+```
+
 **Rules:**
 
-- Condition is a variable name or dot path (truthy/falsy check): `@if premium:` or `@if config.debug:`
+- Condition forms:
+  - Truthy check: `@if var:` or `@if config.debug:`
+  - Negation: `@if !var:` or `@if !config.debug:`
+  - Equality: `@if var == "value":` / `@if var != "value":` (both double and single quotes are valid: `@if var == 'value':`)
 - Falsy values: `false`, `null`, empty string `""`, empty array `[]`, empty object `{}`, `0`, `NaN`
 - Everything else is truthy
+- Equality is **strict** — no type coercion: `@if count == "3":` is false when count is the number 3
+- `NaN == NaN` is false (IEEE 754)
+- `@elseif` branches are evaluated in order; first matching branch wins (short-circuit)
+- `@elseif` must appear before `@else:`; `@else:` cannot be followed by `@elseif`
+- Cannot combine negation with comparison: `@if !var == "x":` is a parse error — use `@if var != "x":`
+- `@if !!var:` (double negation) is a parse error
+- Maximum 256 `@elseif` branches per `@if` block
 - Nesting: plain `@end`, resolved by innermost matching
-- No `@elseif` in v0.1 (use nested `@if` or restructure)
 
 ---
 
@@ -473,7 +546,9 @@ Maximum config file size: 1 MB.
 ---
 name: Alice
 items: [apple, banana]
-premium: true
+tier: premium
+count: 2
+debug: false
 ---
 
 @import "./footer.mds" as footer
@@ -489,10 +564,16 @@ Hello {name}!
 Your items:
 {list(items)}
 
-@if premium:
-Thanks for being premium!
+@if tier == "premium":
+Thanks for being a premium member!
+@elseif tier == "pro":
+Thanks for being a pro member!
 @else:
 Upgrade for premium features.
+@end
+
+@if !debug:
+You have {count} items.
 @end
 
 @include footer
@@ -504,7 +585,9 @@ Upgrade for premium features.
 ---
 name: Alice
 items: [apple, banana]
-premium: true
+tier: premium
+count: 2
+debug: false
 ---
 Hello Alice!
 
@@ -512,7 +595,9 @@ Your items:
 - apple
 - banana
 
-Thanks for being premium!
+Thanks for being a premium member!
+
+You have 2 items.
 
 [footer content here]
 ```
@@ -588,7 +673,7 @@ File association gives standard Markdown highlighting, but `@` directives and `{
 
 **Phase 1 — TextMate injection grammar (VS Code, Sublime Text)**
 
-A single JSON file (`mds.tmLanguage.json`) that injects into the Markdown grammar scope, adding keyword highlighting for `@import`, `@if`, `@for`, `@define`, `@end`, `@export`, `@include` and interpolation highlighting for `{var}`. Shipped as a VS Code extension.
+A single JSON file (`mds.tmLanguage.json`) that injects into the Markdown grammar scope, adding keyword highlighting for `@import`, `@if`, `@elseif`, `@else`, `@for`, `@define`, `@end`, `@export`, `@include` and interpolation highlighting for `{var}`. Shipped as a VS Code extension.
 
 **Phase 2 — Tree-sitter grammar (Neovim, Helix, Zed)**
 
@@ -607,16 +692,15 @@ A language server (Rust) providing diagnostics, completions, go-to-definition fo
 These are intentionally deferred to keep the language simple and the compiler focused:
 
 - Structured JSON output (chat message arrays)
-- TypeScript/JS integration or runtime bindings
+- TypeScript/JS integration or runtime bindings (shipped post-v0.1: see `@mds/mds` npm package)
 - Built-in functions (upper, lower, join, etc.)
-- `@elseif` chains
 - Recursion
 - Macros, async functions, streaming
 - Default function arguments
 - URL-based imports (remote modules)
 - Source maps
 - Template inheritance
-- Conditional expressions (comparisons, logical operators in `@if`)
+- Logical operators in `@if` (`&&`, `||`): use `@elseif` chains instead
 
 ---
 
@@ -639,7 +723,10 @@ wildcard_reexport := "@export" "*" "from" quoted_path
 
 define          := "@define" identifier "(" params? "):" body "@end"
 include         := "@include" identifier
-if_block        := "@if" dot_path ":" body ("@else:" body)? "@end"
+if_block        := "@if" condition ":" body ("@elseif" condition ":" body)* ("@else:" body)? "@end"
+condition       := "!" dot_path | dot_path ("==" | "!=") cond_value | dot_path
+cond_value      := quoted_string | number | "true" | "false" | "null"
+number          := "-"? [0-9]+ ("." [0-9]+)?   (* not NaN or Infinity — those are rejected at parse time *)
 for_block       := "@for" loop_vars "in" dot_path ":" body "@end"
 loop_vars       := identifier | identifier "," identifier
 
@@ -653,6 +740,10 @@ escaped_brace   := "\{" | "\}"
 
 identifier      := [a-zA-Z_][a-zA-Z0-9_]*
 identifier_list := identifier ("," identifier)*
+quoted_string   := "\"" dq_chars "\"" | "'" sq_chars "'"
+dq_chars        := (escape_seq | [^"\\])*
+sq_chars        := (escape_seq | [^'\\])*
+escape_seq      := "\\\\" | "\\\"" | "\\'"
 quoted_path     := "\"" path_chars "\""
 ```
 
@@ -660,4 +751,6 @@ quoted_path     := "\"" path_chars "\""
 
 ## 12. Status
 
-v0.1 — Initial release. The compiler is feature-complete as described in this specification.
+v0.1 — Initial release. The core compiler is feature-complete as described in this specification.
+
+Post-v0.1 additions (not yet released): negation in `@if` conditions (`!dot_path`), equality/inequality comparisons (`==`, `!=`), `@elseif` directive, NaN and Infinity rejection at parse time. These features are implemented and tested but will ship in the next release.
