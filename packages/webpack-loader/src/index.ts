@@ -38,6 +38,12 @@ function getLazy(options: MdsPluginOptions): LazyInit<Transformer> {
   if (lazy === null) {
     lazy = new LazyInit(async () => {
       const mds = await _esmImport('@mds/mds') as typeof import('@mds/mds');
+      if (typeof (mds as Record<string, unknown>)['compileFile'] !== 'function') {
+        throw new Error(
+          '@mds/mds module shape is unexpected: compileFile is not a function. ' +
+          'Check that the installed version is compatible.',
+        );
+      }
       return createMdsTransformer(mds, options);
     });
   }

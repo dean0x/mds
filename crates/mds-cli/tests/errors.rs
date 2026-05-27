@@ -259,19 +259,6 @@ fn if_negation_supported() {
 }
 
 #[test]
-fn if_double_negation_error() {
-    // `@if !!premium:` — double negation is a parse error.
-    let source = "---\npremium: true\n---\n@if !!premium:\nyes\n@end\n";
-    let result = mds::compile_str(source);
-    assert!(result.is_err(), "double negation must be rejected");
-    let err = format!("{}", result.unwrap_err());
-    assert!(
-        err.contains("double negation"),
-        "error must mention double negation, got: {err}"
-    );
-}
-
-#[test]
 fn import_file_not_found_includes_source_span() {
     // When an @import directive references a non-existent file, the error must
     // include the source location (file:line:col) pointing at the @import line.
@@ -392,6 +379,20 @@ fn if_double_negation_is_parse_error() {
     assert!(
         err.contains("double negation"),
         "error must mention double negation, got: {err}"
+    );
+}
+
+#[test]
+fn elseif_after_else_is_parse_error() {
+    // `@elseif` appearing after `@else:` — not valid; the @else body only
+    // accepts @end as a terminator so @elseif is an unknown directive there.
+    let source = "---\nx: true\n---\n@if x:\nyes\n@else:\nno\n@elseif x:\nbad\n@end\n";
+    let result = mds::compile_str(source);
+    assert!(result.is_err(), "@elseif after @else: must be a parse error");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("@elseif") || err.contains("unknown directive"),
+        "error must mention @elseif or unknown directive, got: {err}"
     );
 }
 

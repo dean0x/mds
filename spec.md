@@ -125,6 +125,18 @@ Feature is available.
 @end
 ```
 
+Single-quoted string literals are equally valid in comparisons:
+
+```mds
+@if role == 'admin':
+Admin panel content.
+@end
+
+@if status != 'disabled':
+Feature is available.
+@end
+```
+
 **`@elseif`** chains:
 
 ```mds
@@ -144,7 +156,7 @@ Free tier.
 - Condition forms:
   - Truthy check: `@if var:` or `@if config.debug:`
   - Negation: `@if !var:` or `@if !config.debug:`
-  - Equality: `@if var == "value":` / `@if var != "value":`
+  - Equality: `@if var == "value":` / `@if var != "value":` (both double and single quotes are valid: `@if var == 'value':`)
 - Falsy values: `false`, `null`, empty string `""`, empty array `[]`, empty object `{}`, `0`, `NaN`
 - Everything else is truthy
 - Equality is **strict** — no type coercion: `@if count == "3":` is false when count is the number 3
@@ -714,6 +726,7 @@ escaped_brace   := "\{" | "\}"
 
 identifier      := [a-zA-Z_][a-zA-Z0-9_]*
 identifier_list := identifier ("," identifier)*
+quoted_string   := "\"" string_chars "\"" | "'" string_chars "'"
 quoted_path     := "\"" path_chars "\""
 ```
 
