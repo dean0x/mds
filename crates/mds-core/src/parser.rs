@@ -272,7 +272,7 @@ impl Parser<'_> {
     /// The limit check runs **before** parsing each branch body so that adversarial
     /// input that exceeds `MAX_ELSEIF_BRANCHES` cannot force unbounded parse work.
     fn collect_elseif_branches(&mut self) -> Result<Vec<(Condition, Vec<Node>)>, MdsError> {
-        let mut branches: Vec<(Condition, Vec<Node>)> = Vec::new();
+        let mut branches: Vec<(Condition, Vec<Node>)> = Vec::with_capacity(4);
         while let Some(Token::Directive(d, _)) = self.peek() {
             if !d.trim().starts_with("@elseif ") {
                 break;
@@ -428,21 +428,22 @@ impl Parser<'_> {
 /// Returns an error if any segment is not a valid identifier or if the path
 /// exceeds `MAX_DOT_SEGMENTS`.
 fn parse_dot_path(s: &str) -> Result<Vec<String>, MdsError> {
-    let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() > MAX_DOT_SEGMENTS {
-        return Err(MdsError::syntax(format!(
-            "@if condition dot path exceeds maximum segment count of {MAX_DOT_SEGMENTS}"
-        )));
-    }
-    for part in &parts {
-        let part = part.trim();
+    let mut out: Vec<String> = Vec::with_capacity(4);
+    for raw in s.split('.') {
+        if out.len() >= MAX_DOT_SEGMENTS {
+            return Err(MdsError::syntax(format!(
+                "@if condition dot path exceeds maximum segment count of {MAX_DOT_SEGMENTS}"
+            )));
+        }
+        let part = raw.trim();
         if !is_valid_identifier(part) {
             return Err(MdsError::syntax(format!(
                 "@if condition must be a variable name or dot path, got '{s}'"
             )));
         }
+        out.push(part.to_string());
     }
-    Ok(parts.iter().map(|s| s.trim().to_string()).collect())
+    Ok(out)
 }
 
 /// Parse a literal value for the RHS of a comparison condition.

@@ -11,6 +11,9 @@ const O_NOFOLLOW: number = (constants as Record<string, number>)['O_NOFOLLOW'] ?
 const MAX_PATH_SEGMENTS = 256;
 const MAX_IMPORT_DEPTH = 64;
 const MAX_TRAVERSAL_DEPTH = 256;
+// Maximum concurrent file opens per fan-out level. Keeps file descriptor usage
+// predictable even when a module imports many siblings at once.
+const MAX_CONCURRENT_OPENS = 16;
 const PROJECT_ROOT_MARKERS = ['.git', '.mdsroot'] as const;
 export const DEFAULT_MAX_MODULES = 256;
 export const DEFAULT_MAX_AGGREGATE_SIZE = 10 * 1024 * 1024; // 10 MiB
@@ -351,17 +354,22 @@ export async function buildModulesMap(
     const importPaths = scanImports(content);
     const absoluteDir = dirname(absolutePath);
 
-    // Parallelize child reads at each level.
-    await Promise.all(
-      importPaths.map(async (importPath) => {
+    // Bounded-concurrency fan-out: limit simultaneous child opens to
+    // MAX_CONCURRENT_OPENS to avoid exhausting file descriptors on modules
+    // with many siblings. Each slot runs the next import as soon as it
+    // finishes, so throughput is preserved for the common case.
+    const queue = importPaths.slice();
+    async function worker(): Promise<void> {
+      let importPath: string | undefined;
+      while ((importPath = queue.shift()) !== undefined) {
         const childAbsolute = validateImportPath(importPath, absoluteDir);
-
         // Compute virtual key using normalizeVirtualKey to mirror Rust's VirtualFs::normalize().
         const childVirtualKey = normalizeVirtualKey(virtualKey, importPath);
-
         await scan(childAbsolute, childVirtualKey, depth + 1);
-      }),
-    );
+      }
+    }
+    const slots = Math.min(MAX_CONCURRENT_OPENS, importPaths.length);
+    await Promise.all(Array.from({ length: slots }, worker));
   }
 
   await scan(absoluteEntry, entryFilename);
