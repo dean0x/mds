@@ -4,10 +4,22 @@ MDS is a template language for composable LLM prompt engineering. Write prompts 
 
 ## Quick Start
 
-**Install** (from source):
+**Install the CLI:**
+
+```bash
+cargo install mds-cli        # installs the `mds` binary from crates.io
+```
+
+Or build from source:
 
 ```bash
 cargo install --path crates/mds-cli
+```
+
+**Use from JavaScript/TypeScript** (Node or browser):
+
+```bash
+npm install @mdscript/mds
 ```
 
 **Create your first template** (`hello.mds`):
@@ -78,13 +90,13 @@ import systemPrompt from './prompts/system.mds';
 
 | Package | Bundler | Version |
 |---------|---------|---------|
-| [`@mds/vite-plugin`](packages/vite-plugin/README.md) | Vite | ^5 \|\| ^6 |
-| [`@mds/rollup-plugin`](packages/rollup-plugin/README.md) | Rollup | ^3 \|\| ^4 |
-| [`@mds/webpack-loader`](packages/webpack-loader/README.md) | Webpack | ^5 |
+| [`@mdscript/vite-plugin`](packages/vite-plugin/README.md) | Vite | ^5 \|\| ^6 |
+| [`@mdscript/rollup-plugin`](packages/rollup-plugin/README.md) | Rollup | ^3 \|\| ^4 |
+| [`@mdscript/webpack-loader`](packages/webpack-loader/README.md) | Webpack | ^5 |
 
-All plugins require `@mds/mds` as a peer dependency and accept `{ vars?: Record<string, unknown> }` for runtime template variables. See each package README for configuration details.
+All plugins require `@mdscript/mds` as a peer dependency and accept `{ vars?: Record<string, unknown> }` for runtime template variables. See each package README for configuration details.
 
-TypeScript module declarations (`.mds` → `string`) are provided by `@mds/bundler-utils/mds`.
+TypeScript module declarations (`.mds` → `string`) are provided by `@mdscript/bundler-utils/mds`.
 
 ## Library Usage
 
@@ -102,6 +114,11 @@ let output = mds::compile(Path::new("template.mds"), Some(vars))?;
 // Validation only (no rendering)
 mds::check(Path::new("template.mds"), None)?;
 ```
+
+## Examples
+
+Runnable templates, a Node.js API demo, and Vite/Rollup/Webpack integration apps
+live in [`examples/`](examples/).
 
 ## Language Reference
 

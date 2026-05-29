@@ -1,5 +1,5 @@
 /**
- * Integration tests for @mds/bundler-utils using real @mds/mds.
+ * Integration tests for @mdscript/bundler-utils using real @mdscript/mds.
  */
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,7 +16,7 @@ const CONSUMER_MDS = join(FIXTURES, 'import_consumer.mds');
 const ENTRY_MDS = join(FIXTURES, 'imports/entry.mds');
 
 // ---------------------------------------------------------------------------
-// Load real @mds/mds
+// Load real @mdscript/mds
 // ---------------------------------------------------------------------------
 const mds = await import('../../mds/dist/node.js');
 await mds.init();

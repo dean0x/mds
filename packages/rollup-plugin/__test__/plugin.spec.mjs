@@ -1,5 +1,5 @@
 /**
- * Tests for @mds/rollup-plugin.
+ * Tests for @mdscript/rollup-plugin.
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';

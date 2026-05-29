@@ -7,3 +7,7 @@ crates/mds-napi/index.d.ts
 crates/mds-napi/package-lock.json
 packages/*/dist/
 packages/*/dist-cjs/
+
+# Example app build output (sources are tracked, builds are not)
+examples/*/dist/
+examples/*/package-lock.json

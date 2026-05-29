@@ -1,0 +1,128 @@
+name: Release
+
+# Triggered by pushing a version tag, e.g. `git tag v0.1.0 && git push --tags`.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the GitHub Release
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # crates.io — READY. Publishes the library then the CLI (CLI depends on the
+  # library, so order and index-propagation matter).
+  # Requires repo secret: CARGO_REGISTRY_TOKEN
+  # ---------------------------------------------------------------------------
+  publish-crates:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify tag matches workspace version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CRATE_VER="$(cargo metadata --no-deps --format-version 1 \
+            | grep -o '"name":"mds-core","version":"[^"]*"' \
+            | grep -o '[0-9][^"]*' | head -1)"
+          echo "tag=$TAG crate=$CRATE_VER"
+          test "$TAG" = "$CRATE_VER" || { echo "::error::tag v$TAG != crate version $CRATE_VER"; exit 1; }
+      - name: Publish mds-core
+        run: cargo publish -p mds-core --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+      - name: Wait for crates.io index to update
+        run: sleep 30
+      - name: Publish mds-cli
+        run: cargo publish -p mds-cli --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+
+  # ---------------------------------------------------------------------------
+  # GitHub Release — READY. Cuts a release with notes once crates publish.
+  # ---------------------------------------------------------------------------
+  github-release:
+    name: GitHub Release
+    needs: [publish-crates]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # ===========================================================================
+  # npm publishing (native addon + universal + bundler packages) — NOT YET
+  # WIRED. Blocked on the "napi packaging" task:
+  #   1. Populate the `napi` config in crates/mds-napi/package.json with the
+  #      target triples (currently `"triples": {}`) so the per-platform
+  #      `@mdscript/mds-<triple>` packages can be generated and published.
+  #   2. Add the NPM_TOKEN repo secret and register the @mdscript org.
+  #   3. Validate the cross-compile matrix on a real CI run (musl/arm/windows
+  #      cross toolchains are environment-sensitive).
+  #
+  # The job below is the canonical napi-rs build matrix, left commented until
+  # the packaging config above exists — publishing it half-configured would
+  # ship broken packages. See README/CHANGELOG for the intended package set.
+  # ===========================================================================
+  #
+  # build-napi:
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       settings:
+  #         - { host: macos-latest,   target: aarch64-apple-darwin }
+  #         - { host: macos-latest,   target: x86_64-apple-darwin }
+  #         - { host: ubuntu-latest,  target: x86_64-unknown-linux-gnu }
+  #         - { host: ubuntu-latest,  target: x86_64-unknown-linux-musl }
+  #         - { host: ubuntu-latest,  target: aarch64-unknown-linux-gnu }
+  #         - { host: ubuntu-latest,  target: aarch64-unknown-linux-musl }
+  #         - { host: windows-latest, target: x86_64-pc-windows-msvc }
+  #   runs-on: ${{ matrix.settings.host }}
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-node@v4
+  #       with: { node-version: 22, cache: npm }
+  #     - uses: dtolnay/rust-toolchain@stable
+  #       with: { targets: ${{ matrix.settings.target }} }
+  #     - uses: Swatinem/rust-cache@v2
+  #     - run: npm ci
+  #     - name: Build addon
+  #       working-directory: crates/mds-napi
+  #       run: npx napi build --platform --release --target ${{ matrix.settings.target }} --no-js
+  #     - uses: actions/upload-artifact@v4
+  #       with:
+  #         name: bindings-${{ matrix.settings.target }}
+  #         path: crates/mds-napi/*.node
+  #
+  # publish-npm:
+  #   needs: [build-napi]
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-node@v4
+  #       with: { node-version: 22, cache: npm, registry-url: "https://registry.npmjs.org" }
+  #     - run: npm ci
+  #     - uses: actions/download-artifact@v4
+  #       with: { path: crates/mds-napi/artifacts }
+  #     - name: Stage platform packages & publish addon
+  #       working-directory: crates/mds-napi
+  #       run: |
+  #         npx napi create-npm-dirs
+  #         npx napi artifacts --output-dir .
+  #         npx napi prepublish -t npm
+  #       env:
+  #         NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+  #     - name: Build & publish universal + bundler packages
+  #       run: |
+  #         npm run build --workspaces --if-present
+  #         npm publish -w @mdscript/mds --access public
+  #         npm publish -w @mdscript/bundler-utils --access public
+  #         npm publish -w @mdscript/vite-plugin --access public
+  #         npm publish -w @mdscript/rollup-plugin --access public
+  #         npm publish -w @mdscript/webpack-loader --access public
+  #       env:
+  #         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

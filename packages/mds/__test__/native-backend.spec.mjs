@@ -1,5 +1,5 @@
 /**
- * Native backend tests for @mds/mds universal package.
+ * Native backend tests for @mdscript/mds universal package.
  * Tests: U-N1 through U-N6
  *
  * Verifies that the native NAPI backend behaves correctly in isolation.

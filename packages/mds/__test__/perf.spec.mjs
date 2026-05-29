@@ -1,5 +1,5 @@
 /**
- * Performance benchmarks for @mds/mds universal package.
+ * Performance benchmarks for @mdscript/mds universal package.
  * Tests: U-PF1 through U-PF5
  *
  * These are lightweight benchmarks that verify the API can handle

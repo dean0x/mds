@@ -1,5 +1,5 @@
 /**
- * Tests for @mds/vite-plugin.
+ * Tests for @mdscript/vite-plugin.
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';

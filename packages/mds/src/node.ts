@@ -17,7 +17,7 @@ const rawBackend = process.env['MDS_BACKEND'];
 const forceBackend: BackendType | undefined =
   rawBackend === 'native' || rawBackend === 'wasm' ? rawBackend : undefined;
 if (rawBackend !== undefined && forceBackend === undefined) {
-  console.warn(`@mds/mds: ignoring unknown MDS_BACKEND value "${rawBackend}"; expected "native" or "wasm"`);
+  console.warn(`@mdscript/mds: ignoring unknown MDS_BACKEND value "${rawBackend}"; expected "native" or "wasm"`);
 }
 
 // ---------------------------------------------------------------------------
@@ -156,12 +156,12 @@ async function ensureBackend(options?: InitOptions): Promise<void> {
     return;
   }
 
-  console.warn('@mds/mds: native addon unavailable, falling back to WASM');
+  console.warn('@mdscript/mds: native addon unavailable, falling back to WASM');
   try {
     backend = await loadWasmNodeBackend(options);
   } catch (wasmErr) {
     throw new Error(
-      `@mds/mds: no backend available. Native: ${nativeResult.error.message}. WASM: ${String(wasmErr)}`,
+      `@mdscript/mds: no backend available. Native: ${nativeResult.error.message}. WASM: ${String(wasmErr)}`,
     );
   }
 }
@@ -190,7 +190,7 @@ export function init(options?: InitOptions): Promise<void> {
 function assertReady(): MdsNodeBackend {
   if (backend === undefined) {
     throw new Error(
-      '@mds/mds: call await init() before using compile/check/compileFile/checkFile/getBackend',
+      '@mdscript/mds: call await init() before using compile/check/compileFile/checkFile/getBackend',
     );
   }
   return backend;

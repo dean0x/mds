@@ -125,7 +125,7 @@ export function validateWasmShape(mod: unknown): asserts mod is WasmModule {
   for (const name of ['compile', 'check', 'scanImports'] as const) {
     if (typeof m[name] !== 'function') {
       throw new Error(
-        `@mds/mds: WASM module is missing required export "${name}". ` +
+        `@mdscript/mds: WASM module is missing required export "${name}". ` +
         `Ensure the module is built with: wasm-pack build crates/mds-wasm --target web --out-dir pkg`,
       );
     }
@@ -154,7 +154,7 @@ export async function initWasmNode(options?: InitOptions): Promise<WasmModule> {
   }
   if (nodeFailures >= MAX_INIT_RETRIES) {
     throw new Error(
-      `@mds/mds: WASM backend failed to initialize after ${MAX_INIT_RETRIES} attempts. Check that the WASM module is built and accessible.`,
+      `@mdscript/mds: WASM backend failed to initialize after ${MAX_INIT_RETRIES} attempts. Check that the WASM module is built and accessible.`,
     );
   }
   cachedNodePromise = _initNode(options).catch((err) => {
@@ -204,7 +204,7 @@ async function _initNode(options?: InitOptions): Promise<WasmModule> {
 
   const cause = lastError !== undefined ? ` Caused by: ${lastError.message}` : '';
   throw new Error(
-    `@mds/mds: failed to load WASM module. Build it first with: wasm-pack build crates/mds-wasm --target nodejs --out-dir pkg${cause}`,
+    `@mdscript/mds: failed to load WASM module. Build it first with: wasm-pack build crates/mds-wasm --target nodejs --out-dir pkg${cause}`,
   );
 }
 
@@ -229,7 +229,7 @@ export async function initWasmBrowser(options?: InitOptions): Promise<WasmModule
   }
   if (browserFailures >= MAX_BROWSER_RETRIES) {
     throw new Error(
-      `@mds/mds: WASM browser backend failed to initialize after ${MAX_BROWSER_RETRIES} attempts. ` +
+      `@mdscript/mds: WASM browser backend failed to initialize after ${MAX_BROWSER_RETRIES} attempts. ` +
       `Ensure 'mds-wasm' is bundled or provide a valid wasmUrl option.`,
     );
   }
@@ -260,7 +260,7 @@ async function _initBrowser(options?: InitOptions): Promise<WasmModule> {
     imported = await import('mds-wasm');
   } catch (err) {
     throw new Error(
-      `@mds/mds: failed to load WASM module in browser environment. ` +
+      `@mdscript/mds: failed to load WASM module in browser environment. ` +
       `Ensure 'mds-wasm' is bundled or provide a wasmUrl option. Caused by: ${String(err)}`,
     );
   }
@@ -271,7 +271,7 @@ async function _initBrowser(options?: InitOptions): Promise<WasmModule> {
 
   if (typeof wasmMod.default !== 'function') {
     throw new Error(
-      '@mds/mds: WASM module missing default() initializer. ' +
+      '@mdscript/mds: WASM module missing default() initializer. ' +
       'Build with: wasm-pack build crates/mds-wasm --target web --out-dir pkg',
     );
   }
@@ -288,7 +288,7 @@ async function _initBrowser(options?: InitOptions): Promise<WasmModule> {
       msg.includes('fetch')
     ) {
       throw new Error(
-        `@mds/mds: WASM initialization blocked — check your Content Security Policy. ` +
+        `@mdscript/mds: WASM initialization blocked — check your Content Security Policy. ` +
         `Add 'wasm-unsafe-eval' to script-src. Original: ${msg}`,
       );
     }
