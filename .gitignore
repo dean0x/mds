@@ -5,6 +5,9 @@ crates/mds-wasm/pkg-web/
 node_modules/
 crates/mds-napi/index.d.ts
 crates/mds-napi/package-lock.json
+# napi-rs generated staging (created in CI by `napi create-npm-dirs`/`artifacts`)
+crates/mds-napi/npm/
+crates/mds-napi/artifacts/
 packages/*/dist/
 packages/*/dist-cjs/
 

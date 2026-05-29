@@ -179,13 +179,13 @@ async function _initNode(options?: InitOptions): Promise<WasmModule> {
   const require = createRequire(import.meta.url);
 
   const candidates: readonly string[] = [
-    // Workspace: pkg is built next to mds-wasm crate
+    // Workspace dev path: pkg is built next to the mds-wasm crate. Tried first so
+    // local development and CI use the freshly built artifact without a publish.
     new URL('../../../../crates/mds-wasm/pkg/mds_wasm.js', import.meta.url).pathname,
-    // Future npm package path: 'mds-wasm' is not yet published to npm and is
-    // not listed in package.json dependencies. This candidate is forward-looking
-    // — when the package is published, it will be resolvable here without code
-    // changes. Until then, it is skipped silently (MODULE_NOT_FOUND).
-    'mds-wasm',
+    // Published package: resolved for installed consumers via @mdscript/mds's
+    // dependency on @mdscript/mds-wasm. Skipped silently (MODULE_NOT_FOUND) in dev
+    // when only the workspace path above is present.
+    '@mdscript/mds-wasm',
   ];
 
   let lastError: Error | undefined;
@@ -230,7 +230,7 @@ export async function initWasmBrowser(options?: InitOptions): Promise<WasmModule
   if (browserFailures >= MAX_BROWSER_RETRIES) {
     throw new Error(
       `@mdscript/mds: WASM browser backend failed to initialize after ${MAX_BROWSER_RETRIES} attempts. ` +
-      `Ensure 'mds-wasm' is bundled or provide a valid wasmUrl option.`,
+      `Ensure '@mdscript/mds-wasm' is bundled or provide a valid wasmUrl option.`,
     );
   }
   cachedBrowserPromise = _initBrowser(options).catch((err) => {
@@ -249,19 +249,19 @@ export async function initWasmBrowser(options?: InitOptions): Promise<WasmModule
  * @internal
  */
 async function _initBrowser(options?: InitOptions): Promise<WasmModule> {
-  // Dynamic import — bundler resolves 'mds-wasm' or the caller provides the module.
-  // In browser environments, the bundler inlines the WASM module at build time.
-  // TypeScript cannot resolve 'mds-wasm' at compile time (it's a bundler alias).
-  // The shape is validated with validateWasmShape below.
+  // Dynamic import — bundler resolves '@mdscript/mds-wasm' or the caller provides
+  // the module. In browser environments, the bundler inlines the WASM module at
+  // build time. TypeScript cannot resolve the package's browser export at compile
+  // time, so the shape is validated with validateWasmShape below.
   let imported: unknown;
   try {
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore — 'mds-wasm' is a bundler-resolved module alias, not a npm dependency
-    imported = await import('mds-wasm');
+    // @ts-ignore — '@mdscript/mds-wasm' is resolved by the bundler at build time
+    imported = await import('@mdscript/mds-wasm');
   } catch (err) {
     throw new Error(
       `@mdscript/mds: failed to load WASM module in browser environment. ` +
-      `Ensure 'mds-wasm' is bundled or provide a wasmUrl option. Caused by: ${String(err)}`,
+      `Ensure '@mdscript/mds-wasm' is bundled or provide a wasmUrl option. Caused by: ${String(err)}`,
     );
   }
   // validateWasmShape throws a descriptive error naming the missing member —

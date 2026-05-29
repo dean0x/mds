@@ -36,8 +36,11 @@
     "test:native": "node --test __test__/native-backend.spec.mjs",
     "test:perf": "node --test __test__/perf.spec.mjs"
   },
+  "dependencies": {
+    "@mdscript/mds-wasm": "^0.1.0"
+  },
   "optionalDependencies": {
-    "mds-napi": "file:../../crates/mds-napi"
+    "@mdscript/mds-napi": "^0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

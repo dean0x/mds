@@ -107,7 +107,7 @@ async function loadNativeBackend(): Promise<{ backend: MdsNodeBackend; error: nu
   try {
     const { createRequire } = await import('node:module');
     const require = createRequire(import.meta.url);
-    const addon = require('mds-napi') as object;
+    const addon = require('@mdscript/mds-napi') as object;
     const { createNativeBackend } = await import('./backend/native.js');
     const b = createNativeBackend(addon as Parameters<typeof createNativeBackend>[0]);
     return { backend: b, error: null };
