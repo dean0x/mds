@@ -5,9 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] — 2026-05-29
+## [Unreleased]
 
-Initial public release of the MDS (Markdown Script) compiler.
+First public release of the MDS (Markdown Script) compiler. The release step
+stamps the version number and date at tag time.
 
 ### Language features
 
@@ -90,4 +91,4 @@ Initial public release of the MDS (Markdown Script) compiler.
 
 - 292 Rust tests (integration, unit, and doc-tests) plus the JavaScript package suites
 
-[0.1.0]: https://github.com/dean0x/mds/releases/tag/v0.1.0
+[Unreleased]: https://github.com/dean0x/mds/commits/main
