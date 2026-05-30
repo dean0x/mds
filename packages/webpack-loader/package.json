@@ -32,7 +32,7 @@
     "clean:cjs": "node -e \"require('fs').rmSync('dist-cjs', { recursive: true, force: true })\"",
     "prebuild": "npm run clean:cjs",
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node ../../scripts/write-cjs-package.cjs dist-cjs",
-    "test": "NODE_ENV=test node --test __test__/*.spec.mjs"
+    "test": "node --test __test__/*.spec.mjs"
   },
   "dependencies": {
     "@mdscript/bundler-utils": "^0.1.0"
