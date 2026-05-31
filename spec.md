@@ -219,7 +219,7 @@ Invocation:
 
 - Functions are pure text templates (no side effects)
 - Arguments are positional
-- Functions can call other functions (no recursion in v0.1)
+- Functions can call other functions; direct recursion is rejected at compile time, and indirect call chains are bounded by a maximum call depth of 128
 - Function body has its own scope; params shadow outer vars
 - No default arguments in v0.1
 - String arguments accept both double-quoted (`"value"`) and single-quoted (`'value'`) literals; both support `\\`, `\"`, and `\'` escape sequences
@@ -415,14 +415,18 @@ When the input file has YAML frontmatter, the compiled output preserves it:
 ### Error Format
 
 ```
-error[E001]: undefined variable 'username'
-  --> src/welcome.mds:12:8
-   |
-12 | Hello {username}!
-   |        ^^^^^^^^ not defined in frontmatter or imports
+mds::undefined_var
+
+  × undefined variable 'username'
+   ╭─[src/welcome.mds:1:7]
+ 1 │ Hello {username}!
+   ·       ────┬───
+   ·           ╰── not defined
+   ╰────
+  help: define 'username' in frontmatter or imports
 ```
 
-Errors include file path, line number, column, and a contextual explanation. Compilation fails fast on first error — no partial output.
+Errors include a diagnostic code (`mds::*`), file path, line number, column, a visual span, and a contextual explanation. Compilation fails fast on first error — no partial output.
 
 ---
 
@@ -694,7 +698,7 @@ These are intentionally deferred to keep the language simple and the compiler fo
 - Structured JSON output (chat message arrays)
 - TypeScript/JS *language* features — note that runtime bindings for calling the compiler from JS/TS *are* provided (see the `@mdscript/mds` npm package); this item refers to in-template scripting, which is out of scope
 - Built-in functions (upper, lower, join, etc.)
-- Recursion
+- Unbounded recursion — direct recursion is rejected; indirect chains are capped at depth 128 (see §4.5)
 - Macros, async functions, streaming
 - Default function arguments
 - URL-based imports (remote modules)
