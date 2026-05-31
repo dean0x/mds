@@ -16,8 +16,7 @@ name = "mds"
 [dependencies]
 indexmap = { workspace = true }
 serde = { workspace = true }
-# Pre-release (0.0.x); track for 0.1.x stability milestone
-serde_yml = { workspace = true }
+serde_yaml_ng = { workspace = true }
 serde_json = { workspace = true }
 miette = { workspace = true }
 thiserror = { workspace = true }

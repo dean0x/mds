@@ -7,15 +7,15 @@ use crate::error::MdsError;
 const MAX_VALUE_DEPTH: usize = 64;
 
 /// Return a human-readable type name for a YAML value, used in error diagnostics.
-fn yaml_type_name(v: &serde_yml::Value) -> &'static str {
+fn yaml_type_name(v: &serde_yaml_ng::Value) -> &'static str {
     match v {
-        serde_yml::Value::Null => "null",
-        serde_yml::Value::Bool(_) => "boolean",
-        serde_yml::Value::Number(_) => "integer/float",
-        serde_yml::Value::String(_) => "string",
-        serde_yml::Value::Sequence(_) => "sequence",
-        serde_yml::Value::Mapping(_) => "mapping",
-        serde_yml::Value::Tagged(_) => "tagged",
+        serde_yaml_ng::Value::Null => "null",
+        serde_yaml_ng::Value::Bool(_) => "boolean",
+        serde_yaml_ng::Value::Number(_) => "integer/float",
+        serde_yaml_ng::Value::String(_) => "string",
+        serde_yaml_ng::Value::Sequence(_) => "sequence",
+        serde_yaml_ng::Value::Mapping(_) => "mapping",
+        serde_yaml_ng::Value::Tagged(_) => "tagged",
     }
 }
 
@@ -47,40 +47,40 @@ impl Value {
         }
     }
 
-    /// Convert a serde_yml::Value into our Value enum.
-    pub(crate) fn from_yaml(yaml: serde_yml::Value) -> Result<Value, MdsError> {
+    /// Convert a serde_yaml_ng::Value into our Value enum.
+    pub(crate) fn from_yaml(yaml: serde_yaml_ng::Value) -> Result<Value, MdsError> {
         Self::from_yaml_inner(yaml, 0)
     }
 
-    fn from_yaml_inner(yaml: serde_yml::Value, depth: usize) -> Result<Value, MdsError> {
+    fn from_yaml_inner(yaml: serde_yaml_ng::Value, depth: usize) -> Result<Value, MdsError> {
         if depth > MAX_VALUE_DEPTH {
             return Err(MdsError::yaml_error(format!(
                 "value nesting exceeds maximum depth of {MAX_VALUE_DEPTH}"
             )));
         }
         match yaml {
-            serde_yml::Value::Null => Ok(Value::Null),
-            serde_yml::Value::Bool(b) => Ok(Value::Boolean(b)),
-            serde_yml::Value::Number(n) => n
+            serde_yaml_ng::Value::Null => Ok(Value::Null),
+            serde_yaml_ng::Value::Bool(b) => Ok(Value::Boolean(b)),
+            serde_yaml_ng::Value::Number(n) => n
                 .as_i64()
                 .map(|i| i as f64)
                 .or_else(|| n.as_f64())
                 .map(Value::Number)
                 .ok_or_else(|| MdsError::yaml_error(format!("unsupported number: {n:?}"))),
-            serde_yml::Value::String(s) => Ok(Value::String(s)),
-            serde_yml::Value::Sequence(seq) => seq
+            serde_yaml_ng::Value::String(s) => Ok(Value::String(s)),
+            serde_yaml_ng::Value::Sequence(seq) => seq
                 .into_iter()
                 .map(|v| Self::from_yaml_inner(v, depth + 1))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Value::Array),
-            serde_yml::Value::Mapping(mapping) => {
+            serde_yaml_ng::Value::Mapping(mapping) => {
                 let mut map = HashMap::new();
                 for (k, v) in mapping {
                     // MDS only supports string keys in objects. Reject non-string keys
                     // with a clear diagnostic rather than silently discarding the entry,
                     // which would leave the user with confusing 'field not found' errors.
                     let key = match k {
-                        serde_yml::Value::String(s) => s,
+                        serde_yaml_ng::Value::String(s) => s,
                         other => {
                             return Err(MdsError::yaml_error(format!(
                                 "MDS only supports string keys in objects; found {} key — use a quoted string key instead",
@@ -93,7 +93,7 @@ impl Value {
                 }
                 Ok(Value::Object(map))
             }
-            serde_yml::Value::Tagged(t) => Self::from_yaml_inner(t.value, depth + 1),
+            serde_yaml_ng::Value::Tagged(t) => Self::from_yaml_inner(t.value, depth + 1),
         }
     }
 
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn yaml_value_depth_limit_rejects_deeply_nested_sequence() {
-        use serde_yml::Value as YamlValue;
+        use serde_yaml_ng::Value as YamlValue;
 
         // Build a YAML sequence nested 65 levels deep (just past the limit of 64).
         let mut nested = YamlValue::Null;
@@ -358,8 +358,8 @@ mod tests {
 
     #[test]
     fn from_yaml_mapping() {
-        use serde_yml::Value as YamlValue;
-        let mut mapping = serde_yml::Mapping::new();
+        use serde_yaml_ng::Value as YamlValue;
+        let mut mapping = serde_yaml_ng::Mapping::new();
         mapping.insert(
             YamlValue::String("key".to_string()),
             YamlValue::String("val".to_string()),
@@ -374,10 +374,10 @@ mod tests {
     }
 
     /// Assert that `from_yaml` rejects a mapping whose sole key is `key_value`.
-    fn assert_non_string_yaml_key_rejected(key_value: serde_yml::Value) {
-        let mut mapping = serde_yml::Mapping::new();
-        mapping.insert(key_value, serde_yml::Value::String("value".to_string()));
-        let result = Value::from_yaml(serde_yml::Value::Mapping(mapping));
+    fn assert_non_string_yaml_key_rejected(key_value: serde_yaml_ng::Value) {
+        let mut mapping = serde_yaml_ng::Mapping::new();
+        mapping.insert(key_value, serde_yaml_ng::Value::String("value".to_string()));
+        let result = Value::from_yaml(serde_yaml_ng::Value::Mapping(mapping));
         assert!(result.is_err(), "non-string YAML key must return an error");
         let err = format!("{}", result.unwrap_err());
         assert!(
@@ -388,17 +388,17 @@ mod tests {
 
     #[test]
     fn from_yaml_non_string_key_integer_returns_error() {
-        assert_non_string_yaml_key_rejected(serde_yml::Value::Number(42.into()));
+        assert_non_string_yaml_key_rejected(serde_yaml_ng::Value::Number(42.into()));
     }
 
     #[test]
     fn from_yaml_non_string_key_boolean_returns_error() {
-        assert_non_string_yaml_key_rejected(serde_yml::Value::Bool(true));
+        assert_non_string_yaml_key_rejected(serde_yaml_ng::Value::Bool(true));
     }
 
     #[test]
     fn from_yaml_non_string_key_null_returns_error() {
-        assert_non_string_yaml_key_rejected(serde_yml::Value::Null);
+        assert_non_string_yaml_key_rejected(serde_yaml_ng::Value::Null);
     }
 
     #[test]
@@ -414,12 +414,12 @@ mod tests {
 
     #[test]
     fn yaml_nested_object_depth_limit() {
-        use serde_yml::Value as YamlValue;
+        use serde_yaml_ng::Value as YamlValue;
 
         // Build a YAML mapping nested 65 levels deep (just past the limit of 64).
         let mut nested = YamlValue::Null;
         for _ in 0..65 {
-            let mut mapping = serde_yml::Mapping::new();
+            let mut mapping = serde_yaml_ng::Mapping::new();
             mapping.insert(YamlValue::String("child".to_string()), nested);
             nested = YamlValue::Mapping(mapping);
         }
