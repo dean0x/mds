@@ -1,18 +1,19 @@
 name: Release
 
-# Two entry points:
-#   * push a version tag (v*) -> full coordinated release (crates + all npm pkgs)
-#   * workflow_dispatch       -> DRY RUN: build the napi matrix, stage the
-#                                platform packages, run the name + version gates,
-#                                upload artifacts. Publishes NOTHING.
-#
-# The dry run lets the risky musl/arm cross-compile + the A3 name<->loader gate be
-# validated before the real, deferred release.
+# Three entry points:
+#   * push a version tag (v*) -> full coordinated release
+#   * workflow_dispatch with version -> automated release (bump, commit, tag, publish)
+#   * workflow_dispatch without version -> DRY RUN (build + verify, no publish)
 on:
   push:
     tags:
       - "v*"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.2.0). Leave empty for dry-run."
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -22,13 +23,50 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Prepare — only runs on workflow_dispatch with a version input.
+  # Bumps all manifests, stamps CHANGELOG, commits to main, creates the tag.
+  # Subsequent jobs see the updated code via the tag ref.
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: Prepare v${{ inputs.version }}
+    if: inputs.version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: v${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Bump versions and stamp CHANGELOG
+        run: node scripts/bump-version.mjs "${{ inputs.version }}"
+      - name: Verify version consistency
+        run: node scripts/verify-versions.mjs
+      - name: Commit, tag, and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "release: v${{ inputs.version }}"
+          git tag "v${{ inputs.version }}"
+          git push origin main "v${{ inputs.version }}"
+
+  # ---------------------------------------------------------------------------
   # D1 — version-consistency gate. Cheap; fails fast before any build/publish.
   # ---------------------------------------------------------------------------
   version-gate:
     name: Version gate
+    needs: [prepare]
+    if: ${{ !cancelled() && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version && format('v{0}', inputs.version) || github.ref }}
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - name: "Assert synchronized versions, no file: refs"
@@ -80,6 +118,8 @@ jobs:
     runs-on: ${{ matrix.settings.host }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version && format('v{0}', inputs.version) || github.ref }}
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - uses: dtolnay/rust-toolchain@stable
@@ -114,6 +154,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version && format('v{0}', inputs.version) || github.ref }}
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - run: npm ci
@@ -141,8 +183,8 @@ jobs:
             crates/mds-napi/*.node
 
   # ===========================================================================
-  # Everything below publishes — gated to tag pushes only. workflow_dispatch
-  # stops after stage-and-verify-napi above (the dry run).
+  # Everything below publishes — gated to tag pushes or dispatch with version.
+  # Plain workflow_dispatch (no version) stops above (dry run).
   # ===========================================================================
 
   # ---------------------------------------------------------------------------
@@ -152,15 +194,18 @@ jobs:
   publish-crates:
     name: Publish to crates.io
     needs: [version-gate]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.version != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version && format('v{0}', inputs.version) || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Verify tag matches workspace version
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${{ inputs.version || github.ref_name }}"
+          TAG="${TAG#v}"
           CRATE_VER="$(cargo metadata --no-deps --format-version 1 \
             | grep -o '"name":"mds-core","version":"[^"]*"' \
             | grep -o '[0-9][^"]*' | head -1)"
@@ -185,7 +230,7 @@ jobs:
   publish-npm:
     name: Publish to npm
     needs: [stage-and-verify-napi, publish-crates]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.version != ''
     runs-on: ubuntu-latest
     permissions:
       id-token: write # OIDC for npm provenance
@@ -196,6 +241,8 @@ jobs:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version && format('v{0}', inputs.version) || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -245,13 +292,18 @@ jobs:
   github-release:
     name: GitHub Release
     needs: [publish-crates, publish-npm]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.version != ''
     runs-on: ubuntu-latest
     permissions:
-      contents: write # create the GitHub Release
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version && format('v{0}', inputs.version) || github.ref }}
       - name: Create release
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+        run: |
+          TAG="${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}"
+          gh release create "$TAG" --title "$TAG" --generate-notes 2>&1 \
+            || gh release edit "$TAG" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}

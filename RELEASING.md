@@ -80,18 +80,34 @@ their `.node` filenames drift from the hand-written `crates/mds-napi/index.js`
 loader, the published universal package will fail to load the native binary at
 runtime on the affected platform. Do not proceed past a failing gate.
 
-## Release (ordered)
+## Release
 
-1. **Stamp the CHANGELOG.** Replace `## [Unreleased]` with `## [X.Y.Z] — <date>`
-   and update the link reference at the bottom. Commit on the release branch and
-   merge to `main`.
+### Automated (recommended)
+
+One command does everything: bumps all versions, stamps the CHANGELOG, commits,
+tags, and publishes:
+
+```bash
+gh workflow run release.yml -f version=X.Y.Z
+```
+
+The `prepare` job bumps all Cargo.toml and package.json files, stamps the
+CHANGELOG, commits to `main`, creates the `vX.Y.Z` tag, and pushes. The
+remaining jobs then build and publish.
+
+### Manual (alternative)
+
+1. **Bump versions:** `node scripts/bump-version.mjs X.Y.Z` (updates all
+   manifests and stamps the CHANGELOG). Commit and push to `main`.
 2. **Tag and push:**
    ```bash
-   git checkout main && git pull
    git tag vX.Y.Z
    git push origin vX.Y.Z
    ```
-3. The `release.yml` workflow then runs, in order:
+
+### What happens after tagging
+
+The `release.yml` workflow runs, in order:
    1. **version-gate** — synchronized-version check (fails fast).
    2. **build-napi** — cross-compiles the addon for all 7 targets.
    3. **stage-and-verify-napi** — `napi create-npm-dirs` + `artifacts`, copies
