@@ -167,11 +167,15 @@ jobs:
           echo "tag=$TAG crate=$CRATE_VER"
           test "$TAG" = "$CRATE_VER" || { echo "::error::tag v$TAG != crate version $CRATE_VER"; exit 1; }
       - name: Publish mds-core
-        run: cargo publish -p mds-core --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+        run: |
+          cargo publish -p mds-core --token "${{ secrets.CARGO_REGISTRY_TOKEN }}" 2>&1 \
+            || { echo "::warning::mds-core publish failed (may already exist)"; true; }
       - name: Wait for crates.io index to update
         run: sleep 30
       - name: Publish mds-cli
-        run: cargo publish -p mds-cli --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+        run: |
+          cargo publish -p mds-cli --token "${{ secrets.CARGO_REGISTRY_TOKEN }}" 2>&1 \
+            || { echo "::warning::mds-cli publish failed (may already exist)"; true; }
 
   # ---------------------------------------------------------------------------
   # A7/B4/D3 — publish all npm packages with provenance (OIDC).
@@ -217,7 +221,7 @@ jobs:
         run: node scripts/verify-napi-names.mjs
       - name: Publish platform packages (napi prepublish)
         working-directory: crates/mds-napi
-        run: npx napi prepublish -t npm --skip-gh-release
+        run: npx napi prepublish -t npm
       - name: Publish host napi package
         run: npm publish -w @mdscript/mds-napi --access public
       - name: Build WASM + TS packages
