@@ -37,12 +37,12 @@ input. The compiler enforces several defense-in-depth controls:
 
 ### Filesystem boundary (`crates/mds-core/src/fs.rs`, `resolver.rs`)
 
-- **Path-traversal prevention** — import paths and the `output_dir` config value
+- **Path-traversal prevention**: import paths and the `output_dir` config value
   are rejected if they escape the project root (`..` traversal).
-- **Symlink rejection** — symlinked import paths are refused. Resolution is
+- **Symlink rejection**: symlinked import paths are refused. Resolution is
   written to be TOCTOU-safe (the resolved target is validated, not just the
   pre-resolution path).
-- **Null-byte rejection** — paths containing NUL bytes are rejected at the API
+- **Null-byte rejection**: paths containing NUL bytes are rejected at the API
   boundary rather than being passed to the OS.
 - **Non-UTF-8 paths** are rejected at the public API boundary with an explicit
   error instead of producing corrupted output.

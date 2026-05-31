@@ -37,9 +37,9 @@ stamps the version number and date at tag time.
 
 ### CLI (`mds` binary)
 
-- `mds build` — compile `.mds` to Markdown with auto-detection, `--out-dir`, `--set`, `--vars`
-- `mds check` — validate without rendering
-- `mds init` — create a starter template
+- `mds build`: compile `.mds` to Markdown with auto-detection, `--out-dir`, `--set`, `--vars`
+- `mds check`: validate without rendering
+- `mds init`: create a starter template
 - Stdin mode (`mds build -`)
 - Categorized exit codes (0 success / 1 template error / 2 I/O error / 3 resource limit)
 - Rich miette diagnostics with source spans
@@ -60,30 +60,30 @@ stamps the version number and date at tag time.
 
 ### Library API (`mds-core` crate, imported as `mds`)
 
-- `compile()`, `compile_str()`, `compile_str_with()`, `compile_file()` — render to `String`
-- `check()`, `check_str()`, `check_str_with()` — validate without rendering
-- `compile_collecting_warnings()`, `compile_str_collecting_warnings()` — render and
+- `compile()`, `compile_str()`, `compile_str_with()`, `compile_file()`: render to `String`
+- `check()`, `check_str()`, `check_str_with()`: validate without rendering
+- `compile_collecting_warnings()`, `compile_str_collecting_warnings()`: render and
   return `(String, Vec<String>)` for caller-controlled warning output
-- `check_collecting_warnings()`, `check_str_collecting_warnings()` — validate and
+- `check_collecting_warnings()`, `check_str_collecting_warnings()`: validate and
   return `((), Vec<String>)` for caller-controlled warning output
-- `load_vars_file()` — load runtime variables from JSON
+- `load_vars_file()`: load runtime variables from JSON
 - `#[non_exhaustive]` on the public `MdsError` and `Value` enums
 
 ### JavaScript / TypeScript packages
 
-- **`@mdscript/mds`** — universal bindings for the MDS compiler
+- **`@mdscript/mds`**: universal bindings for the MDS compiler
   - Node.js entry auto-selects the native addon (`mds-napi`) with WASM fallback
   - Browser entry via WASM; requires `init()` before use
   - API: `compile`, `check`, `compileFile`, `checkFile`, `getBackend`, `init`, `isMdsError`
   - `isMdsError()` identifies MDS errors by an `Error` instance whose `code` starts with `"mds::"`
   - `MDS_BACKEND` environment variable to force the `native` or `wasm` backend
   - Full TypeScript types with JSDoc
-- **Bundler integration** — import `.mds` templates natively in JS/TS bundlers
-  - `@mdscript/bundler-utils` — shared transform, frontmatter detection, error
+- **Bundler integration**: import `.mds` templates natively in JS/TS bundlers
+  - `@mdscript/bundler-utils`: shared transform, frontmatter detection, error
     formatting, and a concurrency-safe `LazyInit<T>` utility
-  - `@mdscript/vite-plugin` — Vite transform hook with HMR support (`vite ^5 || ^6`)
-  - `@mdscript/rollup-plugin` — Rollup 3/4 transform hook
-  - `@mdscript/webpack-loader` — Webpack 5 async loader (ships ESM + CommonJS)
+  - `@mdscript/vite-plugin`: Vite transform hook with HMR support (`vite ^5 || ^6`)
+  - `@mdscript/rollup-plugin`: Rollup 3/4 transform hook
+  - `@mdscript/webpack-loader`: Webpack 5 async loader (ships ESM + CommonJS)
   - All plugins accept `{ vars?: Record<string, unknown> }` for template variables
   - TypeScript module declarations (`.mds` → `string`) via `@mdscript/bundler-utils/mds`
 

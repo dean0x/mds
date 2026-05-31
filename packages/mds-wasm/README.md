@@ -6,7 +6,7 @@ compiler.
 This package is the portable fallback used by [`@mdscript/mds`](https://www.npmjs.com/package/@mdscript/mds)
 when the native addon (`@mdscript/mds-napi`) is unavailable, and it powers the
 browser build. **Most users should depend on `@mdscript/mds`, not this package
-directly** — `@mdscript/mds` selects the native addon on Node and this WASM build
+directly**. `@mdscript/mds` selects the native addon on Node and this WASM build
 on the web (or as a Node fallback) automatically.
 
 ## What's inside
@@ -33,4 +33,4 @@ Requires [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) and the
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).

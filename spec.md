@@ -13,11 +13,11 @@ MDS (Markdown Script) is a domain-specific language for composing, reusing, and 
 
 ## 2. Design Principles
 
-1. Looks like Markdown — not code
-2. Minimal new syntax — leverage existing conventions (YAML frontmatter, `@` directives)
-3. Composable — imports, functions, modules
-4. Deterministic — same input always produces same output
-5. Fail fast — clear errors with file:line:col, no partial output
+1. Looks like Markdown, not code
+2. Minimal new syntax: leverage existing conventions (YAML frontmatter, `@` directives)
+3. Composable: imports, functions, modules
+4. Deterministic: same input always produces same output
+5. Fail fast: clear errors with file:line:col, no partial output
 
 ---
 
@@ -51,7 +51,7 @@ config:
 - Types supported: string, number, boolean, array, object (nested YAML mappings)
 - Runtime vars (CLI `--vars vars.json`) override frontmatter values
 - Object values support dot-notation field access: `{config.key}`, `{a.b.c}`
-- Objects cannot be interpolated directly — access a specific field instead
+- Objects cannot be interpolated directly; access a specific field instead
 
 ---
 
@@ -161,11 +161,11 @@ Free tier.
   - Equality: `@if var == "value":` / `@if var != "value":` (both double and single quotes are valid: `@if var == 'value':`)
 - Falsy values: `false`, `null`, empty string `""`, empty array `[]`, empty object `{}`, `0`, `NaN`
 - Everything else is truthy
-- Equality is **strict** — no type coercion: `@if count == "3":` is false when count is the number 3
+- Equality is **strict**, no type coercion: `@if count == "3":` is false when count is the number 3
 - `NaN == NaN` is false (IEEE 754)
 - `@elseif` branches are evaluated in order; first matching branch wins (short-circuit)
 - `@elseif` must appear before `@else:`; `@else:` cannot be followed by `@elseif`
-- Cannot combine negation with comparison: `@if !var == "x":` is a parse error — use `@if var != "x":`
+- Cannot combine negation with comparison: `@if !var == "x":` is a parse error. Use `@if var != "x":` instead
 - `@if !!var:` (double negation) is a parse error
 - Maximum 256 `@elseif` branches per `@if` block
 - Nesting: plain `@end`, resolved by innermost matching
@@ -230,7 +230,7 @@ Invocation:
 
 MDS supports three import styles:
 
-**Alias import** — namespaces all exports under an alias:
+**Alias import** - namespaces all exports under an alias:
 
 ```mds
 @import "./utils.mds" as utils
@@ -238,7 +238,7 @@ MDS supports three import styles:
 {utils.greet("Alice")}
 ```
 
-**Merge import** — exports merge directly into current scope:
+**Merge import** - exports merge directly into current scope:
 
 ```mds
 @import "./base.mds"
@@ -246,7 +246,7 @@ MDS supports three import styles:
 {greet("Alice")}
 ```
 
-**Selective import** — pick specific exports by name:
+**Selective import** - pick specific exports by name:
 
 ```mds
 @import { greet, farewell } from "./utils.mds"
@@ -270,7 +270,7 @@ MDS supports three import styles:
 
 MDS supports three export styles:
 
-**Named export** — export a locally defined symbol:
+**Named export** - export a locally defined symbol:
 
 ```mds
 @define greet(name):
@@ -280,14 +280,14 @@ Hello {name}!
 @export greet
 ```
 
-**Re-export from** — re-export a symbol from another module without importing it locally:
+**Re-export from** - re-export a symbol from another module without importing it locally:
 
 ```mds
 @export greet from "./greetings.mds"
 @export farewell from "./greetings.mds"
 ```
 
-**Wildcard re-export** — re-export everything from another module:
+**Wildcard re-export** - re-export everything from another module:
 
 ```mds
 @export * from "./formatting.mds"
@@ -360,13 +360,13 @@ Welcome {name}, you're joining as {role}.
 ```
 
 ```mds
-# prompts/index.mds — barrel file
+# prompts/index.mds - barrel file
 @export * from "./greetings.mds"
 @export * from "./formatting.mds"
 ```
 
 ```mds
-# main.mds — consumer
+# main.mds - consumer
 ---
 user: Alice
 tools: [search, code, browse]
@@ -426,18 +426,18 @@ mds::undefined_var
   help: define 'username' in frontmatter or imports
 ```
 
-Errors include a diagnostic code (`mds::*`), file path, line number, column, a visual span, and a contextual explanation. Compilation fails fast on first error — no partial output.
+Errors include a diagnostic code (`mds::*`), file path, line number, column, a visual span, and a contextual explanation. Compilation fails fast on first error; no partial output.
 
 ---
 
 ## 6. Scoping Rules
 
-1. **File scope** — frontmatter vars visible everywhere in that file
-2. **Runtime override** — `--vars` JSON values override frontmatter vars of the same name
-3. **Block scope** — `@for` loop vars scoped to their `@for...@end` block
-4. **Function scope** — params scoped to function body, shadow outer vars
-5. **Import scope** — namespaced (aliased) or merged (unaliased), never implicit leaking
-6. **Shadowing** — inner scope wins, no warning (intentional override)
+1. **File scope**: frontmatter vars visible everywhere in that file
+2. **Runtime override**: `--vars` JSON values override frontmatter vars of the same name
+3. **Block scope**: `@for` loop vars scoped to their `@for...@end` block
+4. **Function scope**: params scoped to function body, shadow outer vars
+5. **Import scope**: namespaced (aliased) or merged (unaliased), never implicit leaking
+6. **Shadowing**: inner scope wins, no warning (intentional override)
 
 ---
 
@@ -646,7 +646,7 @@ name = "markdown"
 file-types = ["md", "markdown", "mds"]
 ```
 
-**Sublime Text** — create `MDS.sublime-settings` in `Packages/User/`:
+**Sublime Text** - create `MDS.sublime-settings` in `Packages/User/`:
 ```json
 { "extensions": ["mds"] }
 ```
@@ -675,15 +675,15 @@ The compiler uses this detection order:
 
 File association gives standard Markdown highlighting, but `@` directives and `{var}` interpolation appear as plain text. Full MDS highlighting requires dedicated editor support:
 
-**Phase 1 — TextMate injection grammar (VS Code, Sublime Text)**
+**Phase 1 - TextMate injection grammar (VS Code, Sublime Text)**
 
 A single JSON file (`mds.tmLanguage.json`) that injects into the Markdown grammar scope, adding keyword highlighting for `@import`, `@if`, `@elseif`, `@else`, `@for`, `@define`, `@end`, `@export`, `@include` and interpolation highlighting for `{var}`. Shipped as a VS Code extension.
 
-**Phase 2 — Tree-sitter grammar (Neovim, Helix, Zed)**
+**Phase 2 - Tree-sitter grammar (Neovim, Helix, Zed)**
 
-A `tree-sitter-mds` grammar that extends Markdown parsing. Provides structural parsing — enabling code folding, text object selections, and indentation rules in addition to highlighting.
+A `tree-sitter-mds` grammar that extends Markdown parsing. Provides structural parsing, enabling code folding, text object selections, and indentation rules in addition to highlighting.
 
-**Phase 3 — LSP server**
+**Phase 3 - LSP server**
 
 A language server (Rust) providing diagnostics, completions, go-to-definition for `@import` paths, hover info for variables, and validation errors. Works across all editors that support LSP.
 
@@ -696,9 +696,9 @@ A language server (Rust) providing diagnostics, completions, go-to-definition fo
 These are intentionally deferred to keep the language simple and the compiler focused:
 
 - Structured JSON output (chat message arrays)
-- TypeScript/JS *language* features — note that runtime bindings for calling the compiler from JS/TS *are* provided (see the `@mdscript/mds` npm package); this item refers to in-template scripting, which is out of scope
+- TypeScript/JS *language* features (note: runtime bindings for calling the compiler from JS/TS *are* provided via the `@mdscript/mds` npm package; this item refers to in-template scripting, which is out of scope)
 - Built-in functions (upper, lower, join, etc.)
-- Unbounded recursion — direct recursion is rejected; indirect chains are capped at depth 128 (see §4.5)
+- Unbounded recursion: direct recursion is rejected; indirect chains are capped at depth 128 (see §4.5)
 - Macros, async functions, streaming
 - Default function arguments
 - URL-based imports (remote modules)
@@ -730,7 +730,7 @@ include         := "@include" identifier
 if_block        := "@if" condition ":" body ("@elseif" condition ":" body)* ("@else:" body)? "@end"
 condition       := "!" dot_path | dot_path ("==" | "!=") cond_value | dot_path
 cond_value      := quoted_string | number | "true" | "false" | "null"
-number          := "-"? [0-9]+ ("." [0-9]+)?   (* not NaN or Infinity — those are rejected at parse time *)
+number          := "-"? [0-9]+ ("." [0-9]+)?   (* not NaN or Infinity; those are rejected at parse time *)
 for_block       := "@for" loop_vars "in" dot_path ":" body "@end"
 loop_vars       := identifier | identifier "," identifier
 
@@ -755,4 +755,4 @@ quoted_path     := "\"" path_chars "\""
 
 ## 12. Status
 
-v0.1.0 — Initial public release. The core compiler is feature-complete as described in this specification, including negation in `@if` conditions (`!dot_path`), equality/inequality comparisons (`==`, `!=`), the `@elseif` directive, and `NaN`/`Infinity` rejection at parse time.
+v0.1.0 - Initial public release. The core compiler is feature-complete as described in this specification, including negation in `@if` conditions (`!dot_path`), equality/inequality comparisons (`==`, `!=`), the `@elseif` directive, and `NaN`/`Infinity` rejection at parse time.

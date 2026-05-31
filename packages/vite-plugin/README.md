@@ -41,8 +41,8 @@ import content from './system-prompt.mds';
 // content is a compiled Markdown string
 
 import content, { metadata } from './system-prompt.mds';
-// metadata.warnings     — string[]
-// metadata.dependencies — string[] of imported file paths
+// metadata.warnings     - string[]
+// metadata.dependencies - string[] of imported file paths
 ```
 
 ## TypeScript setup

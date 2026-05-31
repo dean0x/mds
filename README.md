@@ -1,11 +1,11 @@
-# MDS — Markdown Script
+# MDS - Markdown Script
 
 [![CI](https://github.com/dean0x/mds/actions/workflows/ci.yml/badge.svg)](https://github.com/dean0x/mds/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/mds-cli.svg)](https://crates.io/crates/mds-cli)
 [![npm](https://img.shields.io/npm/v/@mdscript/mds.svg)](https://www.npmjs.com/package/@mdscript/mds)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-MDS is a template language for composable LLM prompt engineering. Write prompts with variables, loops, conditionals, functions, and imports — then compile them to clean Markdown.
+MDS is a template language for composable LLM prompt engineering. Write prompts with variables, loops, conditionals, functions, and imports, then compile them to clean Markdown.
 
 ## Quick Start
 
@@ -52,14 +52,14 @@ mds build hello.mds -o -     # stdout
 
 ## Features
 
-- **Variables** — YAML frontmatter or runtime `--set KEY=VALUE` flags
-- **Conditionals** — `@if`/`@elseif`/`@else`/`@end` blocks with negation (`!`) and equality comparisons (`==`/`!=`)
-- **Loops** — `@for item in list:` iteration over arrays
-- **Functions** — `@define` reusable blocks with parameters
-- **Imports** — `@import` for modular prompt libraries (alias, merge, selective)
-- **Exports** — `@export` for building prompt component libraries
-- **Security** — path traversal guards, symlink rejection, file size limits
-- **Rich errors** — source-span diagnostics with line/column context
+- **Variables**: YAML frontmatter or runtime `--set KEY=VALUE` flags
+- **Conditionals**: `@if`/`@elseif`/`@else`/`@end` blocks with negation (`!`) and equality comparisons (`==`/`!=`)
+- **Loops**: `@for item in list:` iteration over arrays
+- **Functions**: `@define` reusable blocks with parameters
+- **Imports**: `@import` for modular prompt libraries (alias, merge, selective)
+- **Exports**: `@export` for building prompt component libraries
+- **Security**: path traversal guards, symlink rejection, file size limits
+- **Rich errors**: source-span diagnostics with line/column context
 
 ## CLI Reference
 
@@ -132,8 +132,7 @@ See [spec.md](spec.md) for the full MDS v0.1 language specification.
 ## Contributing
 
 Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for the local
-workflow and quality gates, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for
-community expectations.
+workflow and quality gates.
 
 ## Security
 
@@ -144,4 +143,4 @@ resource limits, and supported versions.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

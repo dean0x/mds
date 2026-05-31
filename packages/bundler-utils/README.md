@@ -32,9 +32,9 @@ const transformer = createMdsTransformer(mds, { vars: { env: 'production' } });
 // Transform a .mds file to a JavaScript module
 if (await transformer.shouldTransform('/path/to/file.mds')) {
   const result = await transformer.transform('/path/to/file.mds');
-  // result.code        — JS module source
-  // result.dependencies — absolute paths of transitively imported files
-  // result.warnings    — non-fatal compiler warnings
+  // result.code        - JS module source
+  // result.dependencies - absolute paths of transitively imported files
+  // result.warnings    - non-fatal compiler warnings
 }
 ```
 
@@ -74,7 +74,7 @@ const lazy = new LazyInit(async () => {
   return createMdsTransformer(mds, options);
 });
 
-// Concurrent calls share the in-flight promise — factory runs once.
+// Concurrent calls share the in-flight promise; factory runs once.
 const transformer = await lazy.get();
 
 // Reset clears state; the next get() re-invokes the factory.
@@ -83,10 +83,10 @@ lazy.reset();
 
 Key properties:
 
-- **Single init** — factory is called exactly once until `reset()`.
-- **Deduplication** — concurrent `get()` calls share the in-flight promise.
-- **Retry on rejection** — a failed factory clears pending state so the next call retries.
-- **TOCTOU safety** — a generation counter prevents stale in-flight results from
+- **Single init**: factory is called exactly once until `reset()`.
+- **Deduplication**: concurrent `get()` calls share the in-flight promise.
+- **Retry on rejection**: a failed factory clears pending state so the next call retries.
+- **TOCTOU safety**: a generation counter prevents stale in-flight results from
   overwriting state after `reset()`.
 
 ## Options

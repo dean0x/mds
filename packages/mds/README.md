@@ -38,7 +38,7 @@ console.log(getBackend()); // 'native' | 'wasm'
 ## Browser usage
 
 The browser entry requires an explicit `init()` call before any compile/check
-operations. `init()` is idempotent — safe to call multiple times.
+operations. `init()` is idempotent and safe to call multiple times.
 
 ```ts
 import { init, compile, check, isMdsError } from '@mdscript/mds';
@@ -59,7 +59,7 @@ Set the `MDS_BACKEND` environment variable in Node.js to force a specific backen
 | Value | Behavior |
 |-------|----------|
 | *(unset)* | Native addon, WASM fallback |
-| `native` | Native only — throws if addon unavailable |
+| `native` | Native only, throws if addon unavailable |
 | `wasm` | WASM only |
 
 ```sh
