@@ -112,19 +112,37 @@ TypeScript module declarations (`.mds` → `string`) are provided by `@mdscript/
 
 ## Library Usage
 
+### TypeScript / JavaScript
+
+```ts
+import { init, compile, compileFile, isMdsError } from '@mdscript/mds';
+
+await init();
+
+// Compile a string
+const { output } = compile('---\nname: World\n---\nHello {name}!\n');
+
+// Override variables at runtime
+const result = compile(source, { vars: { env: 'production' } });
+
+// Compile a file (resolves @import directives)
+const { output, dependencies } = await compileFile('./prompts/system.mds');
+
+// Error handling
+try {
+  compile('Hello {undefined_var}!');
+} catch (err) {
+  if (isMdsError(err)) console.error(err.code, err.span);
+}
+```
+
+`@mdscript/mds` uses a native addon on Node.js with an automatic WASM fallback, and runs in the browser via WASM.
+
+### Rust
+
 ```rust
-// Compile from string
-let output = mds::compile_str("---\nname: World\n---\nHello {name}!\n")?;
-
-// Compile from file
 let output = mds::compile(Path::new("template.mds"), None)?;
-
-// With runtime variables
-let vars = mds::load_vars_file(Path::new("vars.json"))?;
-let output = mds::compile(Path::new("template.mds"), Some(vars))?;
-
-// Validation only (no rendering)
-mds::check(Path::new("template.mds"), None)?;
+let output = mds::compile_str("---\nname: World\n---\nHello {name}!\n")?;
 ```
 
 ## Examples
