@@ -10,7 +10,14 @@
   },
   "homepage": "https://github.com/dean0x/mds#readme",
   "bugs": "https://github.com/dean0x/mds/issues",
-  "keywords": ["markdown", "template", "llm", "prompt", "compiler", "mds"],
+  "keywords": [
+    "markdown",
+    "template",
+    "llm",
+    "prompt",
+    "compiler",
+    "mds"
+  ],
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
@@ -43,7 +50,7 @@
     "@mdscript/mds-napi": "^0.1.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "typescript": "^5.4.0"
+    "@types/node": "^25.9.1",
+    "typescript": "^6.0.3"
   }
 }
