@@ -39,12 +39,12 @@
   },
   "peerDependencies": {
     "@mdscript/mds": "^0.1.0",
-    "webpack": "^5.0.0"
+    "webpack": "^5.107.2"
   },
   "devDependencies": {
     "@mdscript/mds": "file:../mds",
     "@types/node": "^22.0.0",
     "typescript": "^5.4.0",
-    "webpack": "^5.0.0"
+    "webpack": "^5.107.2"
   }
 }
