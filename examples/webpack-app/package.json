@@ -7,9 +7,9 @@
     "build": "webpack --config webpack.config.mjs"
   },
   "dependencies": {
+    "@mdscript/bundler-utils": "file:../../packages/bundler-utils",
     "@mdscript/mds": "file:../../packages/mds",
-    "@mdscript/webpack-loader": "file:../../packages/webpack-loader",
-    "@mdscript/bundler-utils": "file:../../packages/bundler-utils"
+    "@mdscript/webpack-loader": "file:../../packages/webpack-loader"
   },
   "devDependencies": {
     "webpack": "^5.0.0",

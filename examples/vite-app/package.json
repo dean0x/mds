@@ -8,12 +8,12 @@
     "dev": "vite"
   },
   "dependencies": {
+    "@mdscript/bundler-utils": "file:../../packages/bundler-utils",
     "@mdscript/mds": "file:../../packages/mds",
-    "@mdscript/vite-plugin": "file:../../packages/vite-plugin",
-    "@mdscript/bundler-utils": "file:../../packages/bundler-utils"
+    "@mdscript/vite-plugin": "file:../../packages/vite-plugin"
   },
   "devDependencies": {
-    "vite": "^6.0.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "vite": "^8.0.0"
   }
 }

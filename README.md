@@ -95,7 +95,7 @@ import systemPrompt from './prompts/system.mds';
 
 | Package | Bundler | Version |
 |---------|---------|---------|
-| [`@mdscript/vite-plugin`](packages/vite-plugin/README.md) | Vite | ^5 \|\| ^6 |
+| [`@mdscript/vite-plugin`](packages/vite-plugin/README.md) | Vite | ^5 \|\| ^6 \|\| ^7 \|\| ^8 |
 | [`@mdscript/rollup-plugin`](packages/rollup-plugin/README.md) | Rollup | ^3 \|\| ^4 |
 | [`@mdscript/webpack-loader`](packages/webpack-loader/README.md) | Webpack | ^5 |
 
