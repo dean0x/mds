@@ -1,3 +1,18 @@
+//! Parser helper functions extracted from `parser.rs`.
+//!
+//! This module contains the low-level parsing primitives used by the main
+//! [`super::parser`] module. Responsibilities are organised by concern:
+//!
+//! - **Condition parsing** — `parse_condition`, `parse_negation_condition`,
+//!   `find_unquoted_operator`, `parse_cond_value`, `parse_dot_path`
+//! - **Directive parsing** — `parse_import_directive`, `parse_export_directive`,
+//!   `parse_for_vars`
+//! - **Interpolation parsing** — `parse_interpolation_expr`, `parse_dot_expr`,
+//!   `parse_args`, `parse_args_inner`, `parse_single_arg_inner`
+//! - **Utilities** — `parse_quoted_path`, `validate_dot_path_parts`,
+//!   `unescape_string`, `is_valid_identifier`, `is_directive_token`,
+//!   `strip_leading_newline`, `strip_trailing_newline`
+
 use crate::ast::{
     Arg, CondValue, Condition, ExportDirective, Expr, ImportDirective, Interpolation, Node,
 };
@@ -549,6 +564,12 @@ pub(super) fn parse_args_inner(args_str: &str, depth: usize) -> Result<Vec<Arg>,
         return Ok(Vec::new());
     }
 
+    // State machine variables:
+    //   current     — token accumulator for the argument being built
+    //   in_string   — true while scanning inside a quoted string literal
+    //   string_char — the quote character that opened the current string ('"' or '\'')
+    //   escaped     — true when the previous character was a backslash inside a string
+    //   paren_depth — tracks nested parentheses so commas inside calls are not treated as separators
     let mut args = Vec::new();
     let mut current = String::new();
     let mut in_string = false;
