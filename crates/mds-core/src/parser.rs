@@ -2,19 +2,11 @@ use std::collections::HashSet;
 
 use crate::ast::{
     Arg, CondValue, Condition, DefineBlock, ExportDirective, Expr, ForBlock, Frontmatter, IfBlock,
-    ImportDirective, IncludeDirective, Interpolation, Module, Node, TextNode, MAX_ELSEIF_BRANCHES,
+    ImportDirective, IncludeDirective, Interpolation, Module, Node, TextNode,
 };
 use crate::error::MdsError;
 use crate::lexer::Token;
-use crate::limits::MAX_DOT_SEGMENTS;
-
-/// Maximum nesting depth for @if/@for/@define blocks.
-///
-/// Prevents stack overflow from crafted inputs with deeply-nested blocks.
-/// 64 levels is generous for any real template while keeping recursive parse
-/// frames well within the 2 MB default thread stack on Linux/macOS (debug and
-/// release builds).  256 required an 8 MB stack in tests; 64 does not.
-pub(crate) const MAX_NESTING_DEPTH: usize = 64;
+use crate::limits::{MAX_DOT_SEGMENTS, MAX_ELSEIF_BRANCHES, MAX_NESTING_DEPTH};
 
 /// Parse a stream of tokens into a Module AST with optional source context for error spans.
 ///
