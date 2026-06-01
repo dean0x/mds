@@ -10,7 +10,15 @@
   },
   "homepage": "https://github.com/dean0x/mds#readme",
   "bugs": "https://github.com/dean0x/mds/issues",
-  "keywords": ["mds", "vite", "vite-plugin", "markdown", "template", "llm", "prompt"],
+  "keywords": [
+    "mds",
+    "vite",
+    "vite-plugin",
+    "markdown",
+    "template",
+    "llm",
+    "prompt"
+  ],
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
@@ -37,8 +45,8 @@
   },
   "devDependencies": {
     "@mdscript/mds": "file:../mds",
-    "@types/node": "^22.0.0",
-    "typescript": "^5.4.0",
+    "@types/node": "^25.9.1",
+    "typescript": "^6.0.3",
     "vite": "^8.0.0"
   }
 }
