@@ -1,3 +1,14 @@
+//! MDS template parser.
+//!
+//! This module is split across three files to keep each unit manageable:
+//!
+//! - **`parser.rs`** (this file) — top-level [`parse_with_ctx`] entry point and the
+//!   [`Parser`] state machine that walks the token stream and builds the AST.
+//! - **`parser_helpers.rs`** — low-level parsing primitives (condition parsing,
+//!   directive parsing, interpolation parsing, argument parsing, identifier
+//!   validation, and related utilities).
+//! - **`parser_tests.rs`** — integration and unit tests for both modules.
+
 use std::collections::HashSet;
 
 use crate::ast::{
