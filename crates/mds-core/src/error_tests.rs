@@ -97,7 +97,7 @@ fn serialize_undefined_var_with_span() {
 
 #[test]
 fn serialize_arity_code() {
-    let e = MdsError::arity_at("greet", 1, 3, "f.mds", "source text", 0, 6);
+    let e = MdsError::arity_at("greet", 1, 1, 3, "f.mds", "source text", 0, 6);
     let s = e.serialize();
     assert_eq!(s.code, "mds::arity");
     assert!(
@@ -254,7 +254,7 @@ fn undefined_fn_display_contains_name() {
 
 #[test]
 fn arity_display_contains_name_and_counts() {
-    let e = MdsError::arity("greet", 1, 3);
+    let e = MdsError::arity("greet", 1, 1, 3);
     let msg = e.to_string();
     assert!(msg.contains("greet"));
     assert!(msg.contains('1'));
@@ -263,7 +263,7 @@ fn arity_display_contains_name_and_counts() {
 
 #[test]
 fn arity_display_singular_argument() {
-    let e = MdsError::arity("f", 1, 0);
+    let e = MdsError::arity("f", 1, 1, 0);
     assert!(
         e.to_string().contains("argument"),
         "should say 'argument' not 'arguments' for 1"
@@ -272,10 +272,36 @@ fn arity_display_singular_argument() {
 
 #[test]
 fn arity_display_plural_arguments() {
-    let e = MdsError::arity("f", 2, 0);
+    let e = MdsError::arity("f", 2, 2, 0);
     assert!(
         e.to_string().contains("arguments"),
         "should say 'arguments' for 2"
+    );
+}
+
+#[test]
+fn arity_display_range() {
+    let e = MdsError::arity("f", 1, 3, 0);
+    let msg = e.to_string();
+    assert!(
+        msg.contains("1-3"),
+        "should display range '1-3' for min=1 max=3, got: {msg}"
+    );
+}
+
+#[test]
+fn builtin_error_display_and_serialize() {
+    let e = MdsError::builtin_error("upper() requires a string argument, got number");
+    let msg = e.to_string();
+    assert!(
+        msg.contains("upper()"),
+        "builtin error should contain the message, got: {msg}"
+    );
+    let s = e.serialize();
+    assert_eq!(s.code, "mds::builtin_type_error");
+    assert!(
+        s.span.is_none(),
+        "builtin error without span should have None span"
     );
 }
 

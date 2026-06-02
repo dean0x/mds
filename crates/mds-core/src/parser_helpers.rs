@@ -669,6 +669,25 @@ pub(super) fn parse_single_arg_inner(s: &str, depth: usize) -> Result<Arg, MdsEr
             name,
             args: nested_args,
         })
+    } else if s == "true" {
+        Ok(Arg::BooleanLiteral(true))
+    } else if s == "false" {
+        Ok(Arg::BooleanLiteral(false))
+    } else if s == "null" {
+        Ok(Arg::NullLiteral)
+    } else if s.chars().next().is_some_and(|c| {
+        c.is_ascii_digit()
+            || (c == '-' && s.len() > 1 && s[1..].starts_with(|d: char| d.is_ascii_digit()))
+    }) {
+        // Numeric literal: integer or float, including negative.
+        // Checked before member access so `3.14` is parsed as a number, not a dot-path.
+        match s.parse::<f64>() {
+            Ok(n) if n.is_finite() => Ok(Arg::NumberLiteral(n)),
+            Ok(_) => Err(MdsError::syntax(format!(
+                "NaN and infinity are not valid argument values: '{s}'"
+            ))),
+            Err(_) => Err(MdsError::syntax(format!("invalid numeric argument: '{s}'"))),
+        }
     } else if s.contains('.') && !s.contains('(') {
         // Object member access as argument: config.name or a.b.c
         let parts: Vec<&str> = s.split('.').collect();

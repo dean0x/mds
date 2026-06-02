@@ -139,6 +139,12 @@ pub enum Expr {
 #[derive(Debug, Clone)]
 pub enum Arg {
     StringLiteral(String),
+    /// A numeric literal argument: `func(42)` or `func(-3.14)`
+    NumberLiteral(f64),
+    /// A boolean literal argument: `func(true)` or `func(false)`
+    BooleanLiteral(bool),
+    /// A null literal argument: `func(null)`
+    NullLiteral,
     Var(String),
     /// Nested function call: `{outer(inner("arg"))}`
     Call {

@@ -170,6 +170,7 @@ fn validate_expr(
                 return Err(MdsError::arity_at(
                     name,
                     func.params.len(),
+                    func.params.len(),
                     args.len(),
                     file,
                     source,
@@ -195,6 +196,7 @@ fn validate_expr(
             if args.len() != func.params.len() {
                 return Err(MdsError::arity_at(
                     &qualified,
+                    func.params.len(),
                     func.params.len(),
                     args.len(),
                     file,
@@ -224,7 +226,10 @@ fn validate_var_args(
     }
     for arg in args {
         match arg {
-            Arg::StringLiteral(_) => {}
+            Arg::StringLiteral(_)
+            | Arg::NumberLiteral(_)
+            | Arg::BooleanLiteral(_)
+            | Arg::NullLiteral => {}
             Arg::Var(var_name) => {
                 scope.get_var(var_name).ok_or_else(|| {
                     MdsError::undefined_var_at(var_name, file, source, offset, var_name.len())
@@ -248,6 +253,7 @@ fn validate_var_args(
                 if inner_args.len() != func.params.len() {
                     return Err(MdsError::arity_at(
                         name,
+                        func.params.len(),
                         func.params.len(),
                         inner_args.len(),
                         file,

@@ -668,3 +668,91 @@ fn parse_elseif_branch_limit_rejected() {
         "error must mention branch limit, got: {err}"
     );
 }
+
+// ── Arg literal parsing ───────────────────────────────────────────────────
+
+#[test]
+fn parse_arg_boolean_true() {
+    let arg = parse_single_arg("true").unwrap();
+    assert!(matches!(arg, Arg::BooleanLiteral(true)));
+}
+
+#[test]
+fn parse_arg_boolean_false() {
+    let arg = parse_single_arg("false").unwrap();
+    assert!(matches!(arg, Arg::BooleanLiteral(false)));
+}
+
+#[test]
+fn parse_arg_null() {
+    let arg = parse_single_arg("null").unwrap();
+    assert!(matches!(arg, Arg::NullLiteral));
+}
+
+#[test]
+fn parse_arg_integer() {
+    let arg = parse_single_arg("42").unwrap();
+    assert!(matches!(arg, Arg::NumberLiteral(n) if n == 42.0));
+}
+
+#[test]
+fn parse_arg_float() {
+    let arg = parse_single_arg("1.5").unwrap();
+    match arg {
+        Arg::NumberLiteral(n) => assert!((n - 1.5).abs() < 1e-9),
+        other => panic!("expected NumberLiteral, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_arg_negative_integer() {
+    let arg = parse_single_arg("-5").unwrap();
+    assert!(matches!(arg, Arg::NumberLiteral(n) if n == -5.0));
+}
+
+#[test]
+fn parse_arg_negative_float() {
+    let arg = parse_single_arg("-1.5").unwrap();
+    match arg {
+        Arg::NumberLiteral(n) => assert!((n - (-1.5)).abs() < 1e-9),
+        other => panic!("expected NumberLiteral, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_arg_identifier_not_confused_with_number() {
+    let arg = parse_single_arg("myVar").unwrap();
+    assert!(matches!(arg, Arg::Var(_)));
+}
+
+// ── Arity range display ───────────────────────────────────────────────────
+
+#[test]
+fn arity_range_exact_one_argument() {
+    let e = crate::error::MdsError::arity("f", 1, 1, 0);
+    let msg = e.to_string();
+    assert!(
+        msg.contains("1 argument") && !msg.contains("arguments"),
+        "should say '1 argument', got: {msg}"
+    );
+}
+
+#[test]
+fn arity_range_exact_plural_arguments() {
+    let e = crate::error::MdsError::arity("f", 2, 2, 0);
+    let msg = e.to_string();
+    assert!(
+        msg.contains("2 arguments"),
+        "should say '2 arguments', got: {msg}"
+    );
+}
+
+#[test]
+fn arity_range_min_max() {
+    let e = crate::error::MdsError::arity("f", 1, 3, 0);
+    let msg = e.to_string();
+    assert!(
+        msg.contains("1-3"),
+        "should display range '1-3', got: {msg}"
+    );
+}

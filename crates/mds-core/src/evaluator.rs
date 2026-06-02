@@ -158,7 +158,7 @@ fn evaluate_expr(
         }
         Expr::Call { name, args } => {
             let resolved_args = resolve_args(args, scope, ctx, 0)?;
-            call_function(name, &resolved_args, scope, ctx)
+            Ok(call_function(name, &resolved_args, scope, ctx)?.to_string())
         }
         Expr::QualifiedCall {
             namespace,
@@ -166,7 +166,7 @@ fn evaluate_expr(
             args,
         } => {
             let resolved_args = resolve_args(args, scope, ctx, 0)?;
-            call_qualified_function(namespace, name, &resolved_args, scope, ctx)
+            Ok(call_qualified_function(namespace, name, &resolved_args, scope, ctx)?.to_string())
         }
         Expr::MemberAccess { object, fields } => {
             // Give a targeted error when the name refers to an imported namespace rather
@@ -203,6 +203,9 @@ fn resolve_args(
     args.iter()
         .map(|arg| match arg {
             Arg::StringLiteral(s) => Ok(Value::String(s.clone())),
+            Arg::NumberLiteral(n) => Ok(Value::Number(*n)),
+            Arg::BooleanLiteral(b) => Ok(Value::Boolean(*b)),
+            Arg::NullLiteral => Ok(Value::Null),
             Arg::Var(name) => scope
                 .get_var(name)
                 .cloned()
@@ -212,8 +215,7 @@ fn resolve_args(
                 args: inner_args,
             } => {
                 let resolved = resolve_args(inner_args, scope, ctx, depth + 1)?;
-                let result = call_function(name, &resolved, scope, ctx)?;
-                Ok(Value::String(result))
+                call_function(name, &resolved, scope, ctx)
             }
             Arg::MemberAccess { object, fields } => resolve_dot_path(object, fields, scope),
         })
@@ -252,7 +254,12 @@ fn invoke_function(
         )));
     }
     if args.len() != func.params.len() {
-        return Err(MdsError::arity(call_key, func.params.len(), args.len()));
+        return Err(MdsError::arity(
+            call_key,
+            func.params.len(),
+            func.params.len(),
+            args.len(),
+        ));
     }
     scope.push();
     // Restore captured lexical scope from definition site so the function body
@@ -299,12 +306,12 @@ fn call_function(
     args: &[Value],
     scope: &mut Scope,
     ctx: &mut EvalContext,
-) -> Result<String, MdsError> {
+) -> Result<Value, MdsError> {
     let func = scope
         .get_function(name)
         .ok_or_else(|| MdsError::undefined_fn(name))?
         .clone();
-    invoke_function(&func, name, args, scope, ctx)
+    invoke_function(&func, name, args, scope, ctx).map(Value::String)
 }
 
 fn call_qualified_function(
@@ -313,7 +320,7 @@ fn call_qualified_function(
     args: &[Value],
     scope: &mut Scope,
     ctx: &mut EvalContext,
-) -> Result<String, MdsError> {
+) -> Result<Value, MdsError> {
     let qualified_name = format!("{namespace}.{name}");
 
     let ns = scope
@@ -326,7 +333,7 @@ fn call_qualified_function(
         .ok_or_else(|| MdsError::undefined_fn(&qualified_name))?
         .clone();
 
-    invoke_function(&func, &qualified_name, args, scope, ctx)
+    invoke_function(&func, &qualified_name, args, scope, ctx).map(Value::String)
 }
 
 /// Compare a runtime `Value` against a literal `CondValue` using strict equality.
