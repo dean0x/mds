@@ -1,6 +1,5 @@
-use crate::ast::{Arg, Condition, Expr, ForBlock, IfBlock, Node};
+use crate::ast::{required_param_count, Arg, Condition, Expr, ForBlock, IfBlock, Node};
 use crate::error::MdsError;
-use crate::evaluator::required_param_count;
 use crate::scope::Scope;
 use crate::value::Value;
 

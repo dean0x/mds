@@ -260,7 +260,7 @@ MDS provides 18 built-in functions that can be called without `@define`:
 | `length(s_or_arr)` | 1 | String character count or array element count |
 | `first(arr)` | 1 | First element or null for empty |
 | `last(arr)` | 1 | Last element or null for empty |
-| `reverse(s_or_arr)` | 1 | Reverse string or array |
+| `reverse(s_or_arr)` | 1 | Reverse string (by Unicode scalar value) or array. Note: string reversal operates on Unicode scalar values, not grapheme clusters — combining diacriticals and multi-codepoint sequences (e.g. flag emoji) will not reverse correctly |
 | `sort(arr)` | 1 | Sort homogeneous array (strings or numbers) |
 | `unique(arr)` | 1 | Deduplicate (order-preserving) |
 | `string(v)` | 1 | Convert any value to string |

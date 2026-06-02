@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::ast::{
-    Arg, CondValue, Condition, Expr, ForBlock, IfBlock, IncludeDirective, Node, Param,
+    required_param_count, Arg, CondValue, Condition, Expr, ForBlock, IfBlock, IncludeDirective,
+    Node,
 };
 use crate::error::MdsError;
 use crate::limits::{MAX_DOT_SEGMENTS, MAX_ELSEIF_BRANCHES};
@@ -250,11 +251,6 @@ pub(crate) fn condvalue_to_value(cv: &CondValue) -> Value {
     }
 }
 
-/// Count required (no-default) parameters in a param list.
-pub(crate) fn required_param_count(params: &[Param]) -> usize {
-    params.iter().filter(|p| p.default.is_none()).count()
-}
-
 /// Restore the closure captures recorded at function-definition time into the
 /// current scope frame.
 ///
@@ -349,6 +345,9 @@ fn call_function(
     }
     // Fall back to built-ins.
     if let Some(meta) = crate::builtins::get_builtin(name) {
+        // Defense-in-depth arity check: the validator enforces this at compile
+        // time, but we guard here too so the evaluator is safe when called
+        // without prior validation (e.g. in unit tests or future API consumers).
         if args.len() < meta.min_args || args.len() > meta.max_args {
             return Err(MdsError::arity(
                 name,
@@ -357,7 +356,10 @@ fn call_function(
                 args.len(),
             ));
         }
-        return crate::builtins::call_builtin(name, args);
+        // Call the handler directly using the meta reference we already hold,
+        // avoiding a second linear scan through BUILTINS that call_builtin
+        // would perform internally.
+        return (meta.handler)(args);
     }
     Err(MdsError::undefined_fn(name))
 }
@@ -419,8 +421,11 @@ fn evaluate_condition(condition: &Condition, scope: &Scope) -> Result<bool, MdsE
         )),
         // Short-circuit And: return false on first false operand.
         // Parser invariant: And operands are always leaf conditions (parse_and_level calls
-        // parse_simple_condition for each part). The debug_assert guards against future
-        // grammar changes that could introduce deeper And-nesting without updating this evaluator.
+        // parse_simple_condition for each part). The total operand count is bounded at
+        // parse time by MAX_LOGICAL_OPERANDS (limits.rs), preventing adversarial trees.
+        // The debug_assert below is a dev-only canary (elided in release builds): it fires
+        // in tests if a future grammar change introduces And-in-And nesting without updating
+        // this evaluator, surfacing the breakage before it reaches production.
         Condition::And(operands) => {
             for operand in operands {
                 debug_assert!(
@@ -435,7 +440,9 @@ fn evaluate_condition(condition: &Condition, scope: &Scope) -> Result<bool, MdsE
         }
         // Short-circuit Or: return true on first true operand.
         // Parser invariant: Or operands are always And-level results (And or leaf), never Or.
-        // The debug_assert guards against future grammar changes introducing Or-in-Or nesting.
+        // The total operand count is bounded at parse time by MAX_LOGICAL_OPERANDS (limits.rs).
+        // The debug_assert is a dev-only canary that fires in tests if a future grammar
+        // change introduces Or-in-Or nesting without updating this evaluator.
         Condition::Or(operands) => {
             for operand in operands {
                 debug_assert!(
@@ -645,7 +652,7 @@ fn evaluate_include(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Condition, DefineBlock, Interpolation, TextNode};
+    use crate::ast::{Condition, DefineBlock, Interpolation, Param, TextNode};
     use std::sync::Arc;
 
     fn text(s: &str) -> Node {
@@ -770,7 +777,7 @@ mod tests {
         // Simulate that here by pre-registering the function in scope.
         let define = DefineBlock {
             name: "greet".to_string(),
-            params: vec![crate::ast::Param::required("name")],
+            params: vec![Param::required("name")],
             body: vec![
                 text("Hello "),
                 Node::Interpolation(Interpolation {
@@ -996,6 +1003,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, "Hello Bob!\n");
+    }
+
+    #[test]
+    fn evaluate_default_param_number() {
+        // condvalue_to_value: CondValue::Number → Value::Number
+        let result = crate::compile_str("@define show(x = 42):\n{x}\n@end\n{show()}\n").unwrap();
+        assert!(
+            result.contains("42"),
+            "Number default should produce its numeric value, got: {result}"
+        );
+    }
+
+    #[test]
+    fn evaluate_default_param_boolean_true() {
+        // condvalue_to_value: CondValue::Boolean(true) → Value::Boolean(true)
+        let result = crate::compile_str(
+            "@define show(flag = true):\n@if flag:\nyes\n@else:\nno\n@end\n@end\n{show()}\n",
+        )
+        .unwrap();
+        assert!(
+            result.contains("yes"),
+            "Boolean true default should be truthy, got: {result}"
+        );
+    }
+
+    #[test]
+    fn evaluate_default_param_boolean_false() {
+        // condvalue_to_value: CondValue::Boolean(false) → Value::Boolean(false)
+        let result = crate::compile_str(
+            "@define show(flag = false):\n@if flag:\nyes\n@else:\nno\n@end\n@end\n{show()}\n",
+        )
+        .unwrap();
+        assert!(
+            result.contains("no"),
+            "Boolean false default should be falsy, got: {result}"
+        );
+    }
+
+    #[test]
+    fn evaluate_default_param_null() {
+        // condvalue_to_value: CondValue::Null → Value::Null (falsy)
+        let result = crate::compile_str(
+            "@define show(x = null):\n@if x:\nset\n@else:\nnull_branch\n@end\n@end\n{show()}\n",
+        )
+        .unwrap();
+        assert!(
+            result.contains("null_branch"),
+            "Null default should be falsy, got: {result}"
+        );
     }
 
     #[test]

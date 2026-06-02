@@ -218,6 +218,18 @@ impl Param {
     }
 }
 
+/// Count the number of required (no-default) parameters in a param list.
+///
+/// A parameter is required when its `default` field is `None`. Optional parameters
+/// (those with `Some(CondValue)`) may be omitted at call sites and receive their
+/// default value at runtime via `condvalue_to_value`.
+///
+/// Defined here alongside `Param` because it is purely a property of the AST
+/// type — both the validator and evaluator import it from this module.
+pub(crate) fn required_param_count(params: &[Param]) -> usize {
+    params.iter().filter(|p| p.default.is_none()).count()
+}
+
 #[derive(Debug, Clone)]
 pub struct DefineBlock {
     pub name: String,

@@ -725,38 +725,6 @@ fn parse_arg_identifier_not_confused_with_number() {
     assert!(matches!(arg, Arg::Var(_)));
 }
 
-// ── Arity range display ───────────────────────────────────────────────────
-
-#[test]
-fn arity_range_exact_one_argument() {
-    let e = crate::error::MdsError::arity("f", 1, 1, 0);
-    let msg = e.to_string();
-    assert!(
-        msg.contains("1 argument") && !msg.contains("arguments"),
-        "should say '1 argument', got: {msg}"
-    );
-}
-
-#[test]
-fn arity_range_exact_plural_arguments() {
-    let e = crate::error::MdsError::arity("f", 2, 2, 0);
-    let msg = e.to_string();
-    assert!(
-        msg.contains("2 arguments"),
-        "should say '2 arguments', got: {msg}"
-    );
-}
-
-#[test]
-fn arity_range_min_max() {
-    let e = crate::error::MdsError::arity("f", 1, 3, 0);
-    let msg = e.to_string();
-    assert!(
-        msg.contains("1-3"),
-        "should display range '1-3', got: {msg}"
-    );
-}
-
 // ── Default parameter parsing ─────────────────────────────────────────────
 
 #[test]

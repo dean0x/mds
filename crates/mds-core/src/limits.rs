@@ -36,3 +36,10 @@ pub(crate) const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 /// Exported as `pub(crate)` so `src/lib.rs` can re-export it, and `fs.rs`
 /// can import it for the `find_project_root` upward directory walk.
 pub(crate) const MAX_TRAVERSAL_DEPTH: usize = 256;
+
+/// Maximum size of the compiled output string in bytes (50 MB).
+///
+/// Checked by the evaluator after each node and by built-ins that can amplify
+/// output (e.g. `replace()`) to prevent runaway memory use from adversarial
+/// inputs. Shared with `builtins.rs` to ensure a single authoritative limit.
+pub(crate) const MAX_OUTPUT_SIZE: usize = 50 * 1024 * 1024;

@@ -16,6 +16,7 @@
 use std::collections::HashSet;
 
 use crate::error::MdsError;
+use crate::limits::MAX_OUTPUT_SIZE;
 use crate::value::Value;
 
 /// Metadata and dispatch handler for a built-in function.
@@ -169,6 +170,7 @@ pub(crate) fn get_builtin(name: &str) -> Option<&'static BuiltinMeta> {
 ///
 /// Returns `MdsError::BuiltinError` when an argument has the wrong type, and
 /// `MdsError::arity` when the wrong number of arguments is passed.
+#[cfg(test)]
 pub(crate) fn call_builtin(name: &str, args: &[Value]) -> Result<Value, MdsError> {
     match get_builtin(name) {
         Some(def) => (def.handler)(args),
@@ -234,7 +236,17 @@ fn builtin_replace(args: &[Value]) -> Result<Value, MdsError> {
             "replace() search string must not be empty",
         ));
     }
-    Ok(Value::String(s.replace(from, to)))
+    let result = s.replace(from, to);
+    // Guard against amplification: a single-char search replaced by a long
+    // string on large input can produce a result far exceeding MAX_OUTPUT_SIZE
+    // before the evaluator's per-node output check fires.
+    if result.len() > MAX_OUTPUT_SIZE {
+        return Err(MdsError::builtin_error(format!(
+            "replace() output exceeds maximum size of {} bytes",
+            MAX_OUTPUT_SIZE
+        )));
+    }
+    Ok(Value::String(result))
 }
 
 fn builtin_split(args: &[Value]) -> Result<Value, MdsError> {
@@ -355,17 +367,26 @@ fn builtin_join(args: &[Value]) -> Result<Value, MdsError> {
         other => return Err(type_err("join", "first", "array", other.type_name())),
     };
     let sep = require_string_at(args, 1, "join", "second")?;
-    let parts: Result<Vec<String>, MdsError> = arr
-        .iter()
-        .map(|v| match v {
-            Value::String(s) => Ok(s.clone()),
-            other => Err(MdsError::builtin_error(format!(
-                "join() requires an array of strings, but found {} in array",
-                other.type_name()
-            ))),
-        })
-        .collect();
-    Ok(Value::String(parts?.join(sep)))
+    // Single-pass fold: validate element types and build output string without
+    // an intermediate Vec<String> allocation, halving transient memory use.
+    let mut out = String::new();
+    for (i, v) in arr.iter().enumerate() {
+        match v {
+            Value::String(s) => {
+                if i > 0 {
+                    out.push_str(sep);
+                }
+                out.push_str(s);
+            }
+            other => {
+                return Err(MdsError::builtin_error(format!(
+                    "join() requires an array of strings, but found {} in array",
+                    other.type_name()
+                )));
+            }
+        }
+    }
+    Ok(Value::String(out))
 }
 
 fn builtin_length(args: &[Value]) -> Result<Value, MdsError> {
@@ -394,6 +415,10 @@ fn builtin_last(args: &[Value]) -> Result<Value, MdsError> {
 
 fn builtin_reverse(args: &[Value]) -> Result<Value, MdsError> {
     match &args[0] {
+        // String reversal operates on Unicode scalar values (Rust `char`), not
+        // grapheme clusters. This means combining diacriticals and multi-codepoint
+        // sequences such as flag emoji (e.g. "🇺🇸" = U+1F1FA U+1F1F8) will be
+        // reversed incorrectly. This is a documented limitation — see spec §4.5.
         Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
         Value::Array(a) => {
             let mut reversed = a.clone();
@@ -417,51 +442,10 @@ fn builtin_sort(args: &[Value]) -> Result<Value, MdsError> {
     if arr.is_empty() {
         return Ok(Value::Array(vec![]));
     }
-
-    // Validate homogeneity BEFORE cloning so a type error on a large array
-    // pays no allocation cost.
+    // Dispatch on the first element's type; helpers validate and sort.
     match &arr[0] {
-        Value::String(_) => {
-            for item in arr {
-                if !matches!(item, Value::String(_)) {
-                    return Err(MdsError::builtin_error(format!(
-                        "sort() requires a homogeneous array; found {} mixed with string",
-                        item.type_name()
-                    )));
-                }
-            }
-            let mut sorted = arr.to_vec();
-            sorted.sort_by(|a, b| match (a, b) {
-                (Value::String(a), Value::String(b)) => a.cmp(b),
-                _ => unreachable!(),
-            });
-            Ok(Value::Array(sorted))
-        }
-        Value::Number(_) => {
-            // Check homogeneity and finiteness together before cloning.
-            for item in arr {
-                match item {
-                    Value::Number(n) if !n.is_finite() => {
-                        return Err(MdsError::builtin_error(format!(
-                            "sort() cannot sort non-finite number: {n}"
-                        )));
-                    }
-                    Value::Number(_) => {}
-                    _ => {
-                        return Err(MdsError::builtin_error(format!(
-                            "sort() requires a homogeneous array; found {} mixed with number",
-                            item.type_name()
-                        )));
-                    }
-                }
-            }
-            let mut sorted = arr.to_vec();
-            sorted.sort_by(|a, b| match (a, b) {
-                (Value::Number(a), Value::Number(b)) => a.total_cmp(b),
-                _ => unreachable!(),
-            });
-            Ok(Value::Array(sorted))
-        }
+        Value::String(_) => sort_strings(arr),
+        Value::Number(_) => sort_numbers(arr),
         other => Err(MdsError::builtin_error(format!(
             "sort() requires an array of strings or numbers, got array of {}",
             other.type_name()
@@ -469,10 +453,67 @@ fn builtin_sort(args: &[Value]) -> Result<Value, MdsError> {
     }
 }
 
+/// Sort a non-empty homogeneous array of strings alphabetically.
+///
+/// Validates homogeneity BEFORE cloning so a type error on a large array pays
+/// no allocation cost.
+fn sort_strings(arr: &[Value]) -> Result<Value, MdsError> {
+    for item in arr {
+        if !matches!(item, Value::String(_)) {
+            return Err(MdsError::builtin_error(format!(
+                "sort() requires a homogeneous array; found {} mixed with string",
+                item.type_name()
+            )));
+        }
+    }
+    let mut sorted = arr.to_vec();
+    sorted.sort_by(|a, b| match (a, b) {
+        (Value::String(a), Value::String(b)) => a.cmp(b),
+        _ => unreachable!(),
+    });
+    Ok(Value::Array(sorted))
+}
+
+/// Sort a non-empty homogeneous array of finite numbers ascending.
+///
+/// Validates homogeneity and finiteness together before cloning to avoid
+/// paying allocation cost on large arrays with type or NaN errors.
+fn sort_numbers(arr: &[Value]) -> Result<Value, MdsError> {
+    for item in arr {
+        match item {
+            Value::Number(n) if !n.is_finite() => {
+                return Err(MdsError::builtin_error(format!(
+                    "sort() cannot sort non-finite number: {n}"
+                )));
+            }
+            Value::Number(_) => {}
+            _ => {
+                return Err(MdsError::builtin_error(format!(
+                    "sort() requires a homogeneous array; found {} mixed with number",
+                    item.type_name()
+                )));
+            }
+        }
+    }
+    let mut sorted = arr.to_vec();
+    sorted.sort_by(|a, b| match (a, b) {
+        (Value::Number(a), Value::Number(b)) => a.total_cmp(b),
+        _ => unreachable!(),
+    });
+    Ok(Value::Array(sorted))
+}
+
 /// Produce a type-discriminated key for use in `builtin_unique`'s seen-set.
 /// The prefix ensures that values of different types never collide even if
 /// their `Display` representations are identical (e.g. `Null` and `String("")`
 /// both display as `""`, but get keys `"null:"` vs `"s:"`).
+///
+/// **Complexity note**: For scalar values (String, Number, Boolean, Null) this
+/// is O(1). For `Array` and `Object` variants the key is generated via
+/// `Display`, which serializes the full nested structure — O(m) where m is the
+/// element count. The total cost for an array of n nested values is therefore
+/// O(n*m). This is bounded in practice by `MAX_FILE_SIZE` (10 MB), so no
+/// additional guard is needed here.
 fn unique_key(v: &Value) -> String {
     match v {
         Value::String(s) => format!("s:{s}"),
@@ -607,6 +648,20 @@ mod tests {
         assert!(
             err.to_string().contains("search string must not be empty"),
             "expected empty-search guard, got: {err}"
+        );
+    }
+
+    #[test]
+    fn replace_output_size_guard_fires() {
+        // "x" replaced by a 1 MB string, repeated >50 times, would exceed 50 MB.
+        // We use a modest amplification that fits in memory but exceeds the limit.
+        let big_replacement = "a".repeat(1024 * 1024); // 1 MB
+                                                       // Input: 60 occurrences of "x" separated by spaces → output would be ~60 MB.
+        let input: String = vec!["x"; 60].join(" ");
+        let err = call_builtin("replace", &[s(&input), s("x"), s(&big_replacement)]).unwrap_err();
+        assert!(
+            err.to_string().contains("maximum size"),
+            "expected output size guard, got: {err}"
         );
     }
 
@@ -763,6 +818,18 @@ mod tests {
         let mixed = Value::Array(vec![s("a"), Value::Number(1.0)]);
         let err = call_builtin("join", &[mixed, s(",")]).unwrap_err();
         assert!(err.to_string().contains("number") || err.to_string().contains("string"));
+    }
+
+    #[test]
+    fn join_empty_array_returns_empty_string() {
+        let result = call_builtin("join", &[Value::Array(vec![]), s(",")]).unwrap();
+        assert_eq!(result, s(""));
+    }
+
+    #[test]
+    fn join_single_element_no_separator() {
+        let result = call_builtin("join", &[arr(&["only"]), s(", ")]).unwrap();
+        assert_eq!(result, s("only"));
     }
 
     #[test]
