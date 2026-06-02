@@ -298,12 +298,13 @@ fn invoke_function(
         } else {
             // Required params were already checked above; this arm only fires for
             // optional params not supplied by the caller.
-            condvalue_to_value(
-                param
-                    .default
-                    .as_ref()
-                    .expect("BUG: non-optional param missing but arity check passed"),
-            )
+            let default = param.default.as_ref().ok_or_else(|| {
+                MdsError::syntax(format!(
+                    "internal error: non-optional param '{}' missing but arity check passed",
+                    param.name
+                ))
+            })?;
+            condvalue_to_value(default)
         };
         scope.set_var(&param.name, value);
     }
@@ -408,18 +409,31 @@ fn evaluate_condition(condition: &Condition, scope: &Scope) -> Result<bool, MdsE
             &resolve_condition_value(condition, scope)?,
             expected,
         )),
-        // Short-circuit And: return false on first false operand
+        // Short-circuit And: return false on first false operand.
+        // Parser invariant: And operands are always leaf conditions (parse_and_level calls
+        // parse_simple_condition for each part). The debug_assert guards against future
+        // grammar changes that could introduce deeper And-nesting without updating this evaluator.
         Condition::And(operands) => {
             for operand in operands {
+                debug_assert!(
+                    !matches!(operand, Condition::And(_) | Condition::Or(_)),
+                    "And operand should be a leaf condition, not And/Or"
+                );
                 if !evaluate_condition(operand, scope)? {
                     return Ok(false);
                 }
             }
             Ok(true)
         }
-        // Short-circuit Or: return true on first true operand
+        // Short-circuit Or: return true on first true operand.
+        // Parser invariant: Or operands are always And-level results (And or leaf), never Or.
+        // The debug_assert guards against future grammar changes introducing Or-in-Or nesting.
         Condition::Or(operands) => {
             for operand in operands {
+                debug_assert!(
+                    !matches!(operand, Condition::Or(_)),
+                    "Or operand should not be Or (parser flattens same-level operators)"
+                );
                 if evaluate_condition(operand, scope)? {
                     return Ok(true);
                 }

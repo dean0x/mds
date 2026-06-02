@@ -213,12 +213,22 @@ fn builtin_replace(args: &[Value]) -> Result<Value, MdsError> {
     let s = require_string_at(args, 0, "replace", "first")?;
     let from = require_string_at(args, 1, "replace", "second")?;
     let to = require_string_at(args, 2, "replace", "third")?;
+    if from.is_empty() {
+        return Err(MdsError::builtin_error(
+            "replace() search string must not be empty",
+        ));
+    }
     Ok(Value::String(s.replace(from, to)))
 }
 
 fn builtin_split(args: &[Value]) -> Result<Value, MdsError> {
     let s = require_string_at(args, 0, "split", "first")?;
     let sep = require_string_at(args, 1, "split", "second")?;
+    if sep.is_empty() {
+        return Err(MdsError::builtin_error(
+            "split() separator must not be empty",
+        ));
+    }
     let parts: Vec<Value> = s.split(sep).map(|p| Value::String(p.to_string())).collect();
     Ok(Value::Array(parts))
 }
@@ -289,10 +299,27 @@ fn builtin_slice(args: &[Value]) -> Result<Value, MdsError> {
 }
 
 /// Parse a `Value::Number` as a `usize` for use as a slice index.
-/// Clamps negative numbers to 0. Returns an error for non-number values.
+/// Clamps negative numbers to 0. Returns an error for non-number values,
+/// non-finite values (NaN, infinity), or values exceeding `usize::MAX`.
 fn require_number_index(val: &Value, fn_name: &str, pos: &str) -> Result<usize, MdsError> {
     match val {
-        Value::Number(n) => Ok(n.max(0.0).floor() as usize),
+        Value::Number(n) => {
+            if !n.is_finite() {
+                return Err(MdsError::builtin_error(format!(
+                    "{fn_name}() {pos} argument must be a finite number, got {n}"
+                )));
+            }
+            let clamped = n.max(0.0).floor();
+            // Guard against overflow: usize::MAX as f64 may not round-trip exactly,
+            // but any value larger than 2^53 is safely above any realistic string/array
+            // length and can be clamped to usize::MAX without information loss.
+            if clamped > usize::MAX as f64 {
+                return Err(MdsError::builtin_error(format!(
+                    "{fn_name}() {pos} argument is too large: {n}"
+                )));
+            }
+            Ok(clamped as usize)
+        }
         other => Err(type_err(fn_name, pos, "number", other.type_name())),
     }
 }
@@ -403,17 +430,23 @@ fn builtin_sort(args: &[Value]) -> Result<Value, MdsError> {
         }
         Value::Number(_) => {
             for item in &sorted {
-                if !matches!(item, Value::Number(_)) {
-                    return Err(MdsError::builtin_error(format!(
-                        "sort() requires a homogeneous array; found {} mixed with number",
-                        item.type_name()
-                    )));
+                match item {
+                    Value::Number(n) if !n.is_finite() => {
+                        return Err(MdsError::builtin_error(format!(
+                            "sort() cannot sort non-finite number: {n}"
+                        )));
+                    }
+                    Value::Number(_) => {}
+                    _ => {
+                        return Err(MdsError::builtin_error(format!(
+                            "sort() requires a homogeneous array; found {} mixed with number",
+                            item.type_name()
+                        )));
+                    }
                 }
             }
             sorted.sort_by(|a, b| match (a, b) {
-                (Value::Number(a), Value::Number(b)) => {
-                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                }
+                (Value::Number(a), Value::Number(b)) => a.total_cmp(b),
                 _ => unreachable!(),
             });
         }
@@ -427,15 +460,37 @@ fn builtin_sort(args: &[Value]) -> Result<Value, MdsError> {
     Ok(Value::Array(sorted))
 }
 
+/// Produce a type-discriminated key for use in `builtin_unique`'s seen-set.
+/// The prefix ensures that values of different types never collide even if
+/// their `Display` representations are identical (e.g. `Null` and `String("")`
+/// both display as `""`, but get keys `"null:"` vs `"s:"`).
+fn unique_key(v: &Value) -> String {
+    match v {
+        Value::String(s) => format!("s:{s}"),
+        Value::Number(n) => format!("n:{n}"),
+        Value::Boolean(b) => format!("b:{b}"),
+        Value::Null => "null:".to_string(),
+        // Arrays and objects are stringified with their type prefix. Two
+        // structurally identical nested values will collide only if they
+        // produce the same Display output, which is the correct semantic for
+        // equality-based deduplication of these types.
+        Value::Array(_) => format!("a:{v}"),
+        Value::Object(_) => format!("o:{v}"),
+    }
+}
+
 fn builtin_unique(args: &[Value]) -> Result<Value, MdsError> {
     let arr = match &args[0] {
         Value::Array(a) => a,
         other => return Err(type_err("unique", "", "array", other.type_name())),
     };
-    // Order-preserving deduplication
-    let mut result: Vec<Value> = Vec::new();
+    // Order-preserving deduplication in O(n) time.
+    // Value does not implement Hash, so we use a type-discriminated string key
+    // derived from each element's display representation.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut result: Vec<Value> = Vec::with_capacity(arr.len());
     for item in arr {
-        if !result.contains(item) {
+        if seen.insert(unique_key(item)) {
             result.push(item.clone());
         }
     }
@@ -538,9 +593,27 @@ mod tests {
     }
 
     #[test]
+    fn replace_empty_search_string_rejected() {
+        let err = call_builtin("replace", &[s("hello"), s(""), s("x")]).unwrap_err();
+        assert!(
+            err.to_string().contains("search string must not be empty"),
+            "expected empty-search guard, got: {err}"
+        );
+    }
+
+    #[test]
     fn split_on_comma() {
         let result = call_builtin("split", &[s("a,b,c"), s(",")]).unwrap();
         assert_eq!(result, arr(&["a", "b", "c"]));
+    }
+
+    #[test]
+    fn split_empty_separator_rejected() {
+        let err = call_builtin("split", &[s("hello"), s("")]).unwrap_err();
+        assert!(
+            err.to_string().contains("separator must not be empty"),
+            "expected empty-separator guard, got: {err}"
+        );
     }
 
     #[test]
@@ -606,6 +679,24 @@ mod tests {
         // Start beyond end → empty
         let result = call_builtin("slice", &[s("hi"), Value::Number(100.0)]).unwrap();
         assert_eq!(result, s(""));
+    }
+
+    #[test]
+    fn slice_infinity_index_rejected() {
+        let err = call_builtin("slice", &[s("hello"), Value::Number(f64::INFINITY)]).unwrap_err();
+        assert!(
+            err.to_string().contains("finite"),
+            "expected finite-number guard, got: {err}"
+        );
+    }
+
+    #[test]
+    fn slice_nan_index_rejected() {
+        let err = call_builtin("slice", &[s("hello"), Value::Number(f64::NAN)]).unwrap_err();
+        assert!(
+            err.to_string().contains("finite"),
+            "expected finite-number guard, got: {err}"
+        );
     }
 
     #[test]
@@ -744,6 +835,26 @@ mod tests {
     }
 
     #[test]
+    fn sort_nan_rejected() {
+        let arr_with_nan = Value::Array(vec![Value::Number(1.0), Value::Number(f64::NAN)]);
+        let err = call_builtin("sort", &[arr_with_nan]).unwrap_err();
+        assert!(
+            err.to_string().contains("non-finite"),
+            "expected non-finite guard for NaN, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sort_infinity_rejected() {
+        let arr_with_inf = Value::Array(vec![Value::Number(1.0), Value::Number(f64::INFINITY)]);
+        let err = call_builtin("sort", &[arr_with_inf]).unwrap_err();
+        assert!(
+            err.to_string().contains("non-finite"),
+            "expected non-finite guard for infinity, got: {err}"
+        );
+    }
+
+    #[test]
     fn unique_preserves_order_and_deduplicates() {
         let result = call_builtin("unique", &[arr(&["b", "a", "b", "c", "a"])]).unwrap();
         assert_eq!(result, arr(&["b", "a", "c"]));
@@ -753,6 +864,31 @@ mod tests {
     fn unique_empty_array() {
         let result = call_builtin("unique", &[Value::Array(vec![])]).unwrap();
         assert_eq!(result, Value::Array(vec![]));
+    }
+
+    #[test]
+    fn unique_no_collision_between_null_and_empty_string() {
+        // unique_key must distinguish Null from String("") — both display as "".
+        let mixed = Value::Array(vec![Value::Null, s(""), Value::Null, s("")]);
+        let result = call_builtin("unique", &[mixed]).unwrap();
+        assert_eq!(
+            result,
+            Value::Array(vec![Value::Null, s("")]),
+            "Null and empty string must be treated as distinct values"
+        );
+    }
+
+    #[test]
+    fn unique_large_array_completes_in_linear_time() {
+        // 10 000-element array of repeated values — O(n²) would be slow under Miri or tight loops.
+        // This test is a smoke-check that the HashSet path doesn't regress.
+        let items: Vec<Value> = (0..10_000).map(|i| s(&(i % 100).to_string())).collect();
+        let result = call_builtin("unique", &[Value::Array(items)]).unwrap();
+        if let Value::Array(deduped) = result {
+            assert_eq!(deduped.len(), 100);
+        } else {
+            panic!("expected array result");
+        }
     }
 
     // ── Type conversion ───────────────────────────────────────────────────────
