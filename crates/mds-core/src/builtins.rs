@@ -16,107 +16,138 @@
 use crate::error::MdsError;
 use crate::value::Value;
 
-/// Metadata about a built-in function.
+/// Metadata and dispatch handler for a built-in function.
+///
+/// Keeping metadata and handler in one struct means the `BUILTINS` registry
+/// is the single source of truth — adding a new built-in requires exactly one
+/// entry here. There is no separate match arm to keep in sync.
 pub(crate) struct BuiltinMeta {
     pub name: &'static str,
     pub min_args: usize,
     pub max_args: usize,
+    pub handler: fn(&[Value]) -> Result<Value, MdsError>,
 }
 
 /// All built-in function definitions.
+///
+/// This is the single source of truth for every built-in: name, arity, and
+/// dispatch handler live in one place. `get_builtin` and `call_builtin` both
+/// read this array, so a new built-in needs exactly one entry here.
+///
+/// Linear scan over 18 elements is intentional — the array is small and
+/// cache-resident. A hash map would add allocation and indirection for no
+/// measurable gain at this cardinality.
 static BUILTINS: &[BuiltinMeta] = &[
     // String operations
     BuiltinMeta {
         name: "upper",
         min_args: 1,
         max_args: 1,
+        handler: builtin_upper,
     },
     BuiltinMeta {
         name: "lower",
         min_args: 1,
         max_args: 1,
+        handler: builtin_lower,
     },
     BuiltinMeta {
         name: "trim",
         min_args: 1,
         max_args: 1,
+        handler: builtin_trim,
     },
     BuiltinMeta {
         name: "replace",
         min_args: 3,
         max_args: 3,
+        handler: builtin_replace,
     },
     BuiltinMeta {
         name: "split",
         min_args: 2,
         max_args: 2,
+        handler: builtin_split,
     },
     BuiltinMeta {
         name: "starts_with",
         min_args: 2,
         max_args: 2,
+        handler: builtin_starts_with,
     },
     BuiltinMeta {
         name: "ends_with",
         min_args: 2,
         max_args: 2,
+        handler: builtin_ends_with,
     },
     BuiltinMeta {
         name: "slice",
         min_args: 2,
         max_args: 3,
+        handler: builtin_slice,
     },
     BuiltinMeta {
         name: "contains",
         min_args: 2,
         max_args: 2,
+        handler: builtin_contains,
     },
     // Array operations
     BuiltinMeta {
         name: "join",
         min_args: 2,
         max_args: 2,
+        handler: builtin_join,
     },
     BuiltinMeta {
         name: "length",
         min_args: 1,
         max_args: 1,
+        handler: builtin_length,
     },
     BuiltinMeta {
         name: "first",
         min_args: 1,
         max_args: 1,
+        handler: builtin_first,
     },
     BuiltinMeta {
         name: "last",
         min_args: 1,
         max_args: 1,
+        handler: builtin_last,
     },
     BuiltinMeta {
         name: "reverse",
         min_args: 1,
         max_args: 1,
+        handler: builtin_reverse,
     },
     BuiltinMeta {
         name: "sort",
         min_args: 1,
         max_args: 1,
+        handler: builtin_sort,
     },
     BuiltinMeta {
         name: "unique",
         min_args: 1,
         max_args: 1,
+        handler: builtin_unique,
     },
     // Type conversion
     BuiltinMeta {
         name: "string",
         min_args: 1,
         max_args: 1,
+        handler: builtin_string,
     },
     BuiltinMeta {
         name: "number",
         min_args: 1,
         max_args: 1,
+        handler: builtin_number,
     },
 ];
 
@@ -129,31 +160,17 @@ pub(crate) fn get_builtin(name: &str) -> Option<&'static BuiltinMeta> {
 
 /// Call a built-in function with the given resolved arguments.
 ///
+/// Dispatches via the `BUILTINS` registry so that metadata and handler are
+/// always in sync. No separate match arm is needed.
+///
 /// # Errors
 ///
 /// Returns `MdsError::BuiltinError` when an argument has the wrong type, and
 /// `MdsError::arity` when the wrong number of arguments is passed.
 pub(crate) fn call_builtin(name: &str, args: &[Value]) -> Result<Value, MdsError> {
-    match name {
-        "upper" => builtin_upper(args),
-        "lower" => builtin_lower(args),
-        "trim" => builtin_trim(args),
-        "replace" => builtin_replace(args),
-        "split" => builtin_split(args),
-        "starts_with" => builtin_starts_with(args),
-        "ends_with" => builtin_ends_with(args),
-        "slice" => builtin_slice(args),
-        "contains" => builtin_contains(args),
-        "join" => builtin_join(args),
-        "length" => builtin_length(args),
-        "first" => builtin_first(args),
-        "last" => builtin_last(args),
-        "reverse" => builtin_reverse(args),
-        "sort" => builtin_sort(args),
-        "unique" => builtin_unique(args),
-        "string" => builtin_string(args),
-        "number" => builtin_number(args),
-        _ => Err(MdsError::undefined_fn(name)),
+    match get_builtin(name) {
+        Some(def) => (def.handler)(args),
+        None => Err(MdsError::undefined_fn(name)),
     }
 }
 
@@ -265,16 +282,23 @@ fn builtin_contains(args: &[Value]) -> Result<Value, MdsError> {
 fn builtin_slice(args: &[Value]) -> Result<Value, MdsError> {
     match &args[0] {
         Value::String(s) => {
-            let start = require_number_index(&args[1], "slice", "second")?;
-            let len = s.len();
-            // Clamp start to bounds, then snap to nearest valid char boundary
-            let start = snap_to_char_boundary(s, start.min(len));
+            // Character-based indexing: indices refer to Unicode scalar values,
+            // not bytes. slice("café", 0, 4) == "café" (4 chars), not "caf".
+            let char_count = s.chars().count();
+            let start_idx = require_number_index(&args[1], "slice", "second")?;
+            let start_idx = start_idx.min(char_count);
             if args.len() == 3 {
-                let end = require_number_index(&args[2], "slice", "third")?;
-                let end = snap_to_char_boundary(s, end.clamp(start, len));
-                Ok(Value::String(s[start..end].to_string()))
+                let end_idx = require_number_index(&args[2], "slice", "third")?;
+                let end_idx = end_idx.clamp(start_idx, char_count);
+                let result: String = s
+                    .chars()
+                    .skip(start_idx)
+                    .take(end_idx - start_idx)
+                    .collect();
+                Ok(Value::String(result))
             } else {
-                Ok(Value::String(s[start..].to_string()))
+                let result: String = s.chars().skip(start_idx).collect();
+                Ok(Value::String(result))
             }
         }
         Value::Array(arr) => {
@@ -324,24 +348,6 @@ fn require_number_index(val: &Value, fn_name: &str, pos: &str) -> Result<usize, 
     }
 }
 
-/// Snap a byte index to the nearest valid UTF-8 char boundary in `s`.
-///
-/// If `idx` is already on a char boundary, returns it unchanged.
-/// Otherwise, walks backward to find the start of the enclosing character.
-/// This prevents panics when byte-based slice indices fall inside multi-byte
-/// UTF-8 sequences (e.g. slicing into the middle of an emoji or accented char).
-fn snap_to_char_boundary(s: &str, idx: usize) -> usize {
-    if s.is_char_boundary(idx) {
-        return idx;
-    }
-    // Walk backward at most 3 bytes (max UTF-8 continuation sequence length).
-    let mut i = idx;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
 // ── Array operations ──────────────────────────────────────────────────────────
 
 fn builtin_join(args: &[Value]) -> Result<Value, MdsError> {
@@ -365,7 +371,9 @@ fn builtin_join(args: &[Value]) -> Result<Value, MdsError> {
 
 fn builtin_length(args: &[Value]) -> Result<Value, MdsError> {
     match &args[0] {
-        Value::String(s) => Ok(Value::Number(s.len() as f64)),
+        // Character count, not byte count — consistent with user expectations
+        // for non-ASCII strings (e.g. length("café") == 4, not 5).
+        Value::String(s) => Ok(Value::Number(s.chars().count() as f64)),
         Value::Array(a) => Ok(Value::Number(a.len() as f64)),
         other => Err(type_err("length", "", "string or array", other.type_name())),
     }
@@ -402,6 +410,24 @@ fn builtin_reverse(args: &[Value]) -> Result<Value, MdsError> {
     }
 }
 
+/// Verify that every element of `arr` satisfies the predicate, returning an
+/// error if any does not. Used by `builtin_sort` to check homogeneity before
+/// cloning so that a type error on a large array pays no allocation cost.
+fn require_homogeneous<F>(arr: &[Value], predicate: F, expected_type: &str) -> Result<(), MdsError>
+where
+    F: Fn(&Value) -> Result<(), MdsError>,
+{
+    for item in arr {
+        predicate(item).map_err(|_| {
+            MdsError::builtin_error(format!(
+                "sort() requires a homogeneous array; found {} mixed with {expected_type}",
+                item.type_name()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 fn builtin_sort(args: &[Value]) -> Result<Value, MdsError> {
     let arr = match &args[0] {
         Value::Array(a) => a,
@@ -411,25 +437,31 @@ fn builtin_sort(args: &[Value]) -> Result<Value, MdsError> {
         return Ok(Value::Array(vec![]));
     }
 
-    // Determine element type from first element, then verify homogeneity and sort.
-    let mut sorted = arr.clone();
-    match &sorted[0] {
+    // Validate homogeneity BEFORE cloning so a type error on a large array
+    // pays no allocation cost.
+    match &arr[0] {
         Value::String(_) => {
-            for item in &sorted {
-                if !matches!(item, Value::String(_)) {
-                    return Err(MdsError::builtin_error(format!(
-                        "sort() requires a homogeneous array; found {} mixed with string",
-                        item.type_name()
-                    )));
-                }
-            }
+            require_homogeneous(
+                arr,
+                |v| {
+                    if matches!(v, Value::String(_)) {
+                        Ok(())
+                    } else {
+                        Err(MdsError::builtin_error(String::new()))
+                    }
+                },
+                "string",
+            )?;
+            let mut sorted = arr.to_vec();
             sorted.sort_by(|a, b| match (a, b) {
                 (Value::String(a), Value::String(b)) => a.cmp(b),
                 _ => unreachable!(),
             });
+            Ok(Value::Array(sorted))
         }
         Value::Number(_) => {
-            for item in &sorted {
+            // Check homogeneity and finiteness together before cloning.
+            for item in arr {
                 match item {
                     Value::Number(n) if !n.is_finite() => {
                         return Err(MdsError::builtin_error(format!(
@@ -445,19 +477,18 @@ fn builtin_sort(args: &[Value]) -> Result<Value, MdsError> {
                     }
                 }
             }
+            let mut sorted = arr.to_vec();
             sorted.sort_by(|a, b| match (a, b) {
                 (Value::Number(a), Value::Number(b)) => a.total_cmp(b),
                 _ => unreachable!(),
             });
+            Ok(Value::Array(sorted))
         }
-        other => {
-            return Err(MdsError::builtin_error(format!(
-                "sort() requires an array of strings or numbers, got array of {}",
-                other.type_name()
-            )));
-        }
+        other => Err(MdsError::builtin_error(format!(
+            "sort() requires an array of strings or numbers, got array of {}",
+            other.type_name()
+        ))),
     }
-    Ok(Value::Array(sorted))
 }
 
 /// Produce a type-discriminated key for use in `builtin_unique`'s seen-set.
@@ -700,30 +731,31 @@ mod tests {
     }
 
     #[test]
-    fn slice_string_multibyte_snaps_to_char_boundary() {
-        // "café" is 5 bytes: c(1) a(1) f(1) é(2 bytes: 0xC3 0xA9).
-        // Slicing at byte 4 falls inside the 2-byte 'é'. snap_to_char_boundary
-        // must round down to byte 3 (start of 'é' is actually byte 3 in "café").
-        // This must NOT panic.
-        let cafe = s("café");
+    fn slice_string_char_based_indexing() {
+        // Character-based indexing: slice("café", 0, 4) returns all 4 chars.
+        // "café" is 5 bytes but 4 Unicode scalar values.
         let result = call_builtin(
             "slice",
-            &[cafe.clone(), Value::Number(0.0), Value::Number(4.0)],
+            &[s("café"), Value::Number(0.0), Value::Number(4.0)],
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            s("café"),
+            "slice should use char indices, not bytes"
         );
-        assert!(result.is_ok(), "slice into multibyte char must not panic");
-        // Byte 4 snaps to byte 3 (start of 'é' = bytes 3..5), so we get "caf".
-        assert_eq!(result.unwrap(), s("caf"));
     }
 
     #[test]
-    fn slice_string_emoji_does_not_panic() {
-        // "a😀b" — 😀 is 4 bytes (U+1F600). Slicing mid-emoji must not panic.
-        let emoji_str = s("a😀b");
+    fn slice_string_emoji_char_indexing() {
+        // "a😀b" has 3 chars: a(0), 😀(1), b(2).
+        // slice("a😀b", 1, 2) should return the emoji character.
         let result = call_builtin(
             "slice",
-            &[emoji_str, Value::Number(2.0), Value::Number(4.0)],
-        );
-        assert!(result.is_ok(), "slice mid-emoji must not panic");
+            &[s("a😀b"), Value::Number(1.0), Value::Number(2.0)],
+        )
+        .unwrap();
+        assert_eq!(result, s("😀"), "slice should address emoji as single char");
     }
 
     #[test]
@@ -759,6 +791,26 @@ mod tests {
     fn length_string() {
         let result = call_builtin("length", &[s("hello")]).unwrap();
         assert_eq!(result, Value::Number(5.0));
+    }
+
+    #[test]
+    fn length_string_multibyte_chars() {
+        // "café" is 5 bytes but 4 Unicode scalar values.
+        // length() must return 4 (character count), not 5 (byte count).
+        let result = call_builtin("length", &[s("café")]).unwrap();
+        assert_eq!(
+            result,
+            Value::Number(4.0),
+            "length('café') should be 4 chars"
+        );
+
+        // Emoji: "a😀b" is 6 bytes but 3 chars.
+        let result = call_builtin("length", &[s("a😀b")]).unwrap();
+        assert_eq!(
+            result,
+            Value::Number(3.0),
+            "length('a😀b') should be 3 chars"
+        );
     }
 
     #[test]
@@ -945,33 +997,6 @@ mod tests {
     fn number_idempotent() {
         let result = call_builtin("number", &[Value::Number(3.5)]).unwrap();
         assert_eq!(result, Value::Number(3.5));
-    }
-
-    // ── snap_to_char_boundary ──────────────────────────────────────────────
-
-    #[test]
-    fn snap_to_char_boundary_on_boundary() {
-        assert_eq!(snap_to_char_boundary("hello", 0), 0);
-        assert_eq!(snap_to_char_boundary("hello", 3), 3);
-        assert_eq!(snap_to_char_boundary("hello", 5), 5);
-    }
-
-    #[test]
-    fn snap_to_char_boundary_mid_multibyte() {
-        // "café" = c(1) a(1) f(1) é(2 bytes at index 3..5)
-        // Index 4 is inside 'é' → should snap to 3
-        assert_eq!(snap_to_char_boundary("café", 4), 3);
-    }
-
-    #[test]
-    fn snap_to_char_boundary_emoji() {
-        // "a😀b" = a(1) 😀(4 bytes at index 1..5) b(1 byte at index 5)
-        // Indices 2, 3, 4 are inside 😀 → should snap to 1
-        assert_eq!(snap_to_char_boundary("a😀b", 2), 1);
-        assert_eq!(snap_to_char_boundary("a😀b", 3), 1);
-        assert_eq!(snap_to_char_boundary("a😀b", 4), 1);
-        // Index 5 is on boundary (start of 'b')
-        assert_eq!(snap_to_char_boundary("a😀b", 5), 5);
     }
 
     // ── get_builtin lookup ────────────────────────────────────────────────────

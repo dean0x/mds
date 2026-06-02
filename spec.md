@@ -255,9 +255,9 @@ MDS provides 18 built-in functions that can be called without `@define`:
 | `starts_with(s, prefix)` | 2 | Returns true/false |
 | `ends_with(s, suffix)` | 2 | Returns true/false |
 | `contains(s_or_arr, needle)` | 2 | Works on string and array |
-| `slice(s_or_arr, start[, end])` | 2–3 | Extract substring or sub-array; clamps to bounds |
+| `slice(s_or_arr, start[, end])` | 2–3 | Extract substring (char indices) or sub-array; clamps to bounds |
 | `join(arr, sep)` | 2 | Join array of strings |
-| `length(s_or_arr)` | 1 | String byte length or array count |
+| `length(s_or_arr)` | 1 | String character count or array element count |
 | `first(arr)` | 1 | First element or null for empty |
 | `last(arr)` | 1 | Last element or null for empty |
 | `reverse(s_or_arr)` | 1 | Reverse string or array |
