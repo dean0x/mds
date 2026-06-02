@@ -13,6 +13,8 @@
 //!
 //! **Conversion:** `string`, `number`
 
+use std::collections::HashSet;
+
 use crate::error::MdsError;
 use crate::value::Value;
 
@@ -190,10 +192,7 @@ fn type_err(fn_name: &str, arg_pos: &str, expected: &str, got: &str) -> MdsError
 
 /// Require `args[0]` to be a string, returning `MdsError::BuiltinError` otherwise.
 fn require_string<'a>(args: &'a [Value], fn_name: &str) -> Result<&'a str, MdsError> {
-    match &args[0] {
-        Value::String(s) => Ok(s.as_str()),
-        other => Err(type_err(fn_name, "", "string", other.type_name())),
-    }
+    require_string_at(args, 0, fn_name, "")
 }
 
 /// Require the argument at `idx` to be a string.
@@ -410,24 +409,6 @@ fn builtin_reverse(args: &[Value]) -> Result<Value, MdsError> {
     }
 }
 
-/// Verify that every element of `arr` satisfies the predicate, returning an
-/// error if any does not. Used by `builtin_sort` to check homogeneity before
-/// cloning so that a type error on a large array pays no allocation cost.
-fn require_homogeneous<F>(arr: &[Value], predicate: F, expected_type: &str) -> Result<(), MdsError>
-where
-    F: Fn(&Value) -> Result<(), MdsError>,
-{
-    for item in arr {
-        predicate(item).map_err(|_| {
-            MdsError::builtin_error(format!(
-                "sort() requires a homogeneous array; found {} mixed with {expected_type}",
-                item.type_name()
-            ))
-        })?;
-    }
-    Ok(())
-}
-
 fn builtin_sort(args: &[Value]) -> Result<Value, MdsError> {
     let arr = match &args[0] {
         Value::Array(a) => a,
@@ -441,17 +422,14 @@ fn builtin_sort(args: &[Value]) -> Result<Value, MdsError> {
     // pays no allocation cost.
     match &arr[0] {
         Value::String(_) => {
-            require_homogeneous(
-                arr,
-                |v| {
-                    if matches!(v, Value::String(_)) {
-                        Ok(())
-                    } else {
-                        Err(MdsError::builtin_error(String::new()))
-                    }
-                },
-                "string",
-            )?;
+            for item in arr {
+                if !matches!(item, Value::String(_)) {
+                    return Err(MdsError::builtin_error(format!(
+                        "sort() requires a homogeneous array; found {} mixed with string",
+                        item.type_name()
+                    )));
+                }
+            }
             let mut sorted = arr.to_vec();
             sorted.sort_by(|a, b| match (a, b) {
                 (Value::String(a), Value::String(b)) => a.cmp(b),
@@ -518,7 +496,7 @@ fn builtin_unique(args: &[Value]) -> Result<Value, MdsError> {
     // Order-preserving deduplication in O(n) time.
     // Value does not implement Hash, so we use a type-discriminated string key
     // derived from each element's display representation.
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen: HashSet<String> = HashSet::new();
     let mut result: Vec<Value> = Vec::with_capacity(arr.len());
     for item in arr {
         if seen.insert(unique_key(item)) {
