@@ -334,11 +334,23 @@ fn call_function(
     scope: &mut Scope,
     ctx: &mut EvalContext,
 ) -> Result<Value, MdsError> {
-    let func = scope
-        .get_function(name)
-        .ok_or_else(|| MdsError::undefined_fn(name))?
-        .clone();
-    invoke_function(&func, name, args, scope, ctx).map(Value::String)
+    // User-defined functions take priority (shadowing built-ins).
+    if let Some(func) = scope.get_function(name).cloned() {
+        return invoke_function(&func, name, args, scope, ctx).map(Value::String);
+    }
+    // Fall back to built-ins.
+    if let Some(meta) = crate::builtins::get_builtin(name) {
+        if args.len() < meta.min_args || args.len() > meta.max_args {
+            return Err(MdsError::arity(
+                name,
+                meta.min_args,
+                meta.max_args,
+                args.len(),
+            ));
+        }
+        return crate::builtins::call_builtin(name, args);
+    }
+    Err(MdsError::undefined_fn(name))
 }
 
 fn call_qualified_function(
@@ -950,5 +962,63 @@ mod tests {
     fn evaluate_arity_error_on_too_few_required_args() {
         let result = crate::compile_str("@define greet(name):\n{name}\n@end\n{greet()}\n");
         assert!(result.is_err(), "too few required args should fail");
+    }
+
+    // ── Built-in functions integration ────────────────────────────────────────
+
+    #[test]
+    fn builtin_upper_in_interpolation() {
+        let result = crate::compile_str("---\nword: hello\n---\n{upper(word)}\n").unwrap();
+        assert!(
+            result.contains("HELLO"),
+            "upper() should uppercase, got: {result}"
+        );
+    }
+
+    #[test]
+    fn builtin_lower_in_interpolation() {
+        let result = crate::compile_str("---\nword: HELLO\n---\n{lower(word)}\n").unwrap();
+        assert!(
+            result.contains("hello"),
+            "lower() should lowercase, got: {result}"
+        );
+    }
+
+    #[test]
+    fn builtin_length_string_in_interpolation() {
+        let result = crate::compile_str("---\nword: hello\n---\n{length(word)}\n").unwrap();
+        assert!(
+            result.contains('5'),
+            "length of 'hello' should be 5, got: {result}"
+        );
+    }
+
+    #[test]
+    fn builtin_shadowed_by_user_function() {
+        // A user-defined function named 'upper' should shadow the built-in.
+        let src = "@define upper(x):\ncustom\n@end\n{upper(\"anything\")}\n";
+        let result = crate::compile_str(src).unwrap();
+        assert_eq!(
+            result.trim(),
+            "custom",
+            "user-defined upper() should shadow built-in"
+        );
+    }
+
+    #[test]
+    fn builtin_compose_join_split() {
+        let result =
+            crate::compile_str("---\ncsv: a,b,c\n---\n{join(split(csv, \",\"), \" | \")}\n")
+                .unwrap();
+        assert!(
+            result.contains("a | b | c"),
+            "join(split()) should work, got: {result}"
+        );
+    }
+
+    #[test]
+    fn builtin_string_with_number_literal_arg() {
+        let result = crate::compile_str("{string(42)}\n").unwrap();
+        assert_eq!(result.trim(), "42");
     }
 }

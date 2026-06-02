@@ -38,6 +38,7 @@
 //! ```
 
 pub(crate) mod ast;
+pub(crate) mod builtins;
 pub(crate) mod error;
 pub(crate) mod evaluator;
 pub(crate) mod fs;

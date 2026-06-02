@@ -168,22 +168,39 @@ fn validate_expr(
                 .map(|_| ())
         }
         Expr::Call { name, args } => {
-            let func = scope
-                .get_function(name)
-                .ok_or_else(|| MdsError::undefined_fn_at(name, file, source, offset, len))?;
-            let required = required_param_count(&func.params);
-            let total = func.params.len();
-            if args.len() < required || args.len() > total {
-                return Err(MdsError::arity_at(
-                    name,
-                    required,
-                    total,
-                    args.len(),
-                    file,
-                    source,
-                    offset,
-                    len,
-                ));
+            if let Some(func) = scope.get_function(name) {
+                let required = required_param_count(&func.params);
+                let total = func.params.len();
+                if args.len() < required || args.len() > total {
+                    return Err(MdsError::arity_at(
+                        name,
+                        required,
+                        total,
+                        args.len(),
+                        file,
+                        source,
+                        offset,
+                        len,
+                    ));
+                }
+            } else if let Some(meta) = crate::builtins::get_builtin(name) {
+                if args.len() < meta.min_args || args.len() > meta.max_args {
+                    return Err(MdsError::arity_at(
+                        name,
+                        meta.min_args,
+                        meta.max_args,
+                        args.len(),
+                        file,
+                        source,
+                        offset,
+                        len,
+                    ));
+                }
+                // Built-in args may be any type — no variable-existence check needed.
+                // However, we still validate any nested calls or variable references within args.
+                return validate_var_args(args, scope, file, source, offset, 0);
+            } else {
+                return Err(MdsError::undefined_fn_at(name, file, source, offset, len));
             }
             validate_var_args(args, scope, file, source, offset, 0)
         }
@@ -255,18 +272,38 @@ fn validate_var_args(
                 name,
                 args: inner_args,
             } => {
-                // Validate the nested call as if it were a top-level Expr::Call
-                let func = scope.get_function(name).ok_or_else(|| {
-                    MdsError::undefined_fn_at(name, file, source, offset, name.len())
-                })?;
-                let required = required_param_count(&func.params);
-                let total = func.params.len();
-                if inner_args.len() < required || inner_args.len() > total {
-                    return Err(MdsError::arity_at(
+                // Validate the nested call — check user-defined first, then builtins.
+                if let Some(func) = scope.get_function(name) {
+                    let required = required_param_count(&func.params);
+                    let total = func.params.len();
+                    if inner_args.len() < required || inner_args.len() > total {
+                        return Err(MdsError::arity_at(
+                            name,
+                            required,
+                            total,
+                            inner_args.len(),
+                            file,
+                            source,
+                            offset,
+                            name.len(),
+                        ));
+                    }
+                } else if let Some(meta) = crate::builtins::get_builtin(name) {
+                    if inner_args.len() < meta.min_args || inner_args.len() > meta.max_args {
+                        return Err(MdsError::arity_at(
+                            name,
+                            meta.min_args,
+                            meta.max_args,
+                            inner_args.len(),
+                            file,
+                            source,
+                            offset,
+                            name.len(),
+                        ));
+                    }
+                } else {
+                    return Err(MdsError::undefined_fn_at(
                         name,
-                        required,
-                        total,
-                        inner_args.len(),
                         file,
                         source,
                         offset,

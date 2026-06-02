@@ -362,7 +362,6 @@ impl MdsError {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn builtin_error(msg: impl Into<String>) -> Self {
         MdsError::BuiltinError {
             message: msg.into(),
