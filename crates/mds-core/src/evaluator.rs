@@ -255,6 +255,25 @@ pub(crate) fn required_param_count(params: &[Param]) -> usize {
     params.iter().filter(|p| p.default.is_none()).count()
 }
 
+/// Restore the closure captures recorded at function-definition time into the
+/// current scope frame.
+///
+/// Namespaces, sibling functions, and variables captured from the definition
+/// site are written into `scope` before parameter binding so that params shadow
+/// captured vars correctly (params take precedence over closure variables).
+fn restore_captured_scope(func: &FunctionDef, scope: &mut Scope) {
+    for (alias, ns) in &func.captured.namespaces {
+        scope.set_namespace(alias, ns.clone());
+    }
+    // captured.functions are owned FunctionDef (not Arc) — wrap in Arc for scope insertion.
+    for (name, f) in &func.captured.functions {
+        scope.set_function(name, Arc::new(f.clone()));
+    }
+    for (name, val) in &func.captured.vars {
+        scope.set_var(name, val.clone());
+    }
+}
+
 fn invoke_function(
     func: &FunctionDef,
     call_key: &str,
@@ -279,18 +298,7 @@ fn invoke_function(
     // Restore captured lexical scope from definition site so the function body
     // can resolve alias imports, sibling functions, and frontmatter variables
     // from its defining module.
-    for (alias, ns) in &func.captured.namespaces {
-        scope.set_namespace(alias, ns.clone());
-    }
-    // captured.functions are owned FunctionDef (not Arc) — wrap in Arc for scope insertion.
-    for (name, f) in &func.captured.functions {
-        scope.set_function(name, Arc::new(f.clone()));
-    }
-    // Captured vars are restored before param binding so that params shadow
-    // captured vars correctly (params take precedence over closure variables).
-    for (name, val) in &func.captured.vars {
-        scope.set_var(name, val.clone());
-    }
+    restore_captured_scope(func, scope);
     // Bind params index-by-index; fill missing optional params with their defaults.
     for (i, param) in func.params.iter().enumerate() {
         let value = if i < args.len() {

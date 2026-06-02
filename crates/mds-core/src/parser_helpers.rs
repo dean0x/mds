@@ -758,6 +758,18 @@ pub(super) fn parse_args_inner(args_str: &str, depth: usize) -> Result<Vec<Arg>,
     Ok(args)
 }
 
+/// Return `true` if `s` looks like a numeric literal (integer or float,
+/// optionally negative).
+///
+/// Used by [`parse_single_arg_inner`] to distinguish numeric arguments from
+/// dot-paths and identifiers before attempting `s.parse::<f64>()`.
+fn looks_like_number(s: &str) -> bool {
+    s.chars().next().is_some_and(|c| {
+        c.is_ascii_digit()
+            || (c == '-' && s.len() > 1 && s[1..].starts_with(|d: char| d.is_ascii_digit()))
+    })
+}
+
 /// Parse a single argument string into an [`Arg`] node.
 ///
 /// Test-only convenience wrapper around [`parse_single_arg_inner`] that starts
@@ -802,10 +814,7 @@ pub(super) fn parse_single_arg_inner(s: &str, depth: usize) -> Result<Arg, MdsEr
         Ok(Arg::BooleanLiteral(false))
     } else if s == "null" {
         Ok(Arg::NullLiteral)
-    } else if s.chars().next().is_some_and(|c| {
-        c.is_ascii_digit()
-            || (c == '-' && s.len() > 1 && s[1..].starts_with(|d: char| d.is_ascii_digit()))
-    }) {
+    } else if looks_like_number(s) {
         // Numeric literal: integer or float, including negative.
         // Checked before member access so `3.14` is parsed as a number, not a dot-path.
         match s.parse::<f64>() {
