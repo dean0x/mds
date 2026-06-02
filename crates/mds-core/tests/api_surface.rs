@@ -56,8 +56,14 @@ fn mds_error_variants_exist() {
     };
     let _ = MdsError::ArityMismatch {
         name: "f".to_string(),
-        expected: 1,
+        expected_min: 1,
+        expected_max: 1,
         got: 2,
+        span: None,
+        src: None,
+    };
+    let _ = MdsError::BuiltinError {
+        message: "type error".to_string(),
         span: None,
         src: None,
     };
@@ -131,7 +137,8 @@ fn mds_error_variants_exist() {
         | MdsError::YamlError { .. }
         | MdsError::JsonError { .. }
         | MdsError::Recursion { .. }
-        | MdsError::ExportError { .. } => {}
+        | MdsError::ExportError { .. }
+        | MdsError::BuiltinError { .. } => {}
         _ => {}
     }
 }

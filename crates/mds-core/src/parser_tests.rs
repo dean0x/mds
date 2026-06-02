@@ -668,3 +668,397 @@ fn parse_elseif_branch_limit_rejected() {
         "error must mention branch limit, got: {err}"
     );
 }
+
+// ── Arg literal parsing ───────────────────────────────────────────────────
+
+#[test]
+fn parse_arg_boolean_true() {
+    let arg = parse_single_arg("true").unwrap();
+    assert!(matches!(arg, Arg::BooleanLiteral(true)));
+}
+
+#[test]
+fn parse_arg_boolean_false() {
+    let arg = parse_single_arg("false").unwrap();
+    assert!(matches!(arg, Arg::BooleanLiteral(false)));
+}
+
+#[test]
+fn parse_arg_null() {
+    let arg = parse_single_arg("null").unwrap();
+    assert!(matches!(arg, Arg::NullLiteral));
+}
+
+#[test]
+fn parse_arg_integer() {
+    let arg = parse_single_arg("42").unwrap();
+    assert!(matches!(arg, Arg::NumberLiteral(n) if n == 42.0));
+}
+
+#[test]
+fn parse_arg_float() {
+    let arg = parse_single_arg("1.5").unwrap();
+    match arg {
+        Arg::NumberLiteral(n) => assert!((n - 1.5).abs() < 1e-9),
+        other => panic!("expected NumberLiteral, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_arg_negative_integer() {
+    let arg = parse_single_arg("-5").unwrap();
+    assert!(matches!(arg, Arg::NumberLiteral(n) if n == -5.0));
+}
+
+#[test]
+fn parse_arg_negative_float() {
+    let arg = parse_single_arg("-1.5").unwrap();
+    match arg {
+        Arg::NumberLiteral(n) => assert!((n - (-1.5)).abs() < 1e-9),
+        other => panic!("expected NumberLiteral, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_arg_identifier_not_confused_with_number() {
+    let arg = parse_single_arg("myVar").unwrap();
+    assert!(matches!(arg, Arg::Var(_)));
+}
+
+// ── Default parameter parsing ─────────────────────────────────────────────
+
+#[test]
+fn parse_define_required_params() {
+    let src = "@define greet(name):\nHello {name}!\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert_eq!(def.params.len(), 1);
+        assert_eq!(def.params[0].name, "name");
+        assert!(def.params[0].default.is_none());
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+#[test]
+fn parse_define_default_string() {
+    let src = "@define greet(name = \"World\"):\nHello {name}!\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert_eq!(def.params.len(), 1);
+        assert_eq!(def.params[0].name, "name");
+        assert!(matches!(
+            &def.params[0].default,
+            Some(crate::ast::CondValue::String(s)) if s == "World"
+        ));
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+#[test]
+fn parse_define_default_number() {
+    let src = "@define repeat(n = 3):\n{n}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert_eq!(def.params.len(), 1);
+        assert!(
+            matches!(&def.params[0].default, Some(crate::ast::CondValue::Number(n)) if *n == 3.0)
+        );
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+#[test]
+fn parse_define_default_negative_number() {
+    let src = "@define offset(n = -1):\n{n}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert!(
+            matches!(&def.params[0].default, Some(crate::ast::CondValue::Number(n)) if *n == -1.0)
+        );
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+#[test]
+fn parse_define_default_bool() {
+    let src = "@define toggle(flag = true):\n{flag}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert!(matches!(
+            &def.params[0].default,
+            Some(crate::ast::CondValue::Boolean(true))
+        ));
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+#[test]
+fn parse_define_default_null() {
+    let src = "@define maybe(x = null):\n{x}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert!(matches!(
+            &def.params[0].default,
+            Some(crate::ast::CondValue::Null)
+        ));
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+#[test]
+fn parse_define_default_string_with_comma() {
+    let src = "@define greet(sep = \"a, b\"):\n{sep}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert!(matches!(
+            &def.params[0].default,
+            Some(crate::ast::CondValue::String(s)) if s == "a, b"
+        ));
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+#[test]
+fn parse_define_required_after_optional_rejected() {
+    let src = "@define bad(a = \"x\", b):\n{a}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let result = parse_with_ctx(&tokens, "", "");
+    assert!(
+        result.is_err(),
+        "required param after optional must be rejected"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("required") || err.contains("optional") || err.contains("cannot follow"),
+        "error should mention ordering constraint, got: {err}"
+    );
+}
+
+#[test]
+fn parse_define_duplicate_param_rejected() {
+    let src = "@define bad(a, a):\n{a}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let result = parse_with_ctx(&tokens, "", "");
+    assert!(result.is_err(), "duplicate param name must be rejected");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("duplicate"),
+        "error should mention duplicate, got: {err}"
+    );
+}
+
+#[test]
+fn parse_define_mixed_required_and_optional() {
+    let src = "@define greet(name, greeting = \"Hello\"):\n{greeting} {name}!\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert_eq!(def.params.len(), 2);
+        assert!(
+            def.params[0].default.is_none(),
+            "first param should be required"
+        );
+        assert!(
+            def.params[1].default.is_some(),
+            "second param should have default"
+        );
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+// ── Logical operators ─────────────────────────────────────────────────────────
+
+#[test]
+fn parse_condition_and_two_vars() {
+    let cond = parse_condition("a && b").unwrap();
+    assert!(matches!(cond, crate::ast::Condition::And(_)));
+    if let crate::ast::Condition::And(ops) = cond {
+        assert_eq!(ops.len(), 2);
+    }
+}
+
+#[test]
+fn parse_condition_or_two_vars() {
+    let cond = parse_condition("a || b").unwrap();
+    assert!(matches!(cond, crate::ast::Condition::Or(_)));
+    if let crate::ast::Condition::Or(ops) = cond {
+        assert_eq!(ops.len(), 2);
+    }
+}
+
+#[test]
+fn parse_condition_and_with_equality() {
+    let cond = parse_condition("role == \"admin\" && active").unwrap();
+    assert!(matches!(cond, crate::ast::Condition::And(_)));
+    if let crate::ast::Condition::And(ops) = cond {
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(ops[0], crate::ast::Condition::Eq(..)));
+        assert!(matches!(ops[1], crate::ast::Condition::Truthy(..)));
+    }
+}
+
+#[test]
+fn parse_condition_and_with_negation() {
+    let cond = parse_condition("a && !b").unwrap();
+    assert!(matches!(cond, crate::ast::Condition::And(_)));
+    if let crate::ast::Condition::And(ops) = cond {
+        assert!(matches!(ops[1], crate::ast::Condition::Not(..)));
+    }
+}
+
+#[test]
+fn parse_condition_and_has_higher_precedence_than_or() {
+    // `a && b || c` → Or([And([a, b]), c])
+    let cond = parse_condition("a && b || c").unwrap();
+    assert!(matches!(cond, crate::ast::Condition::Or(_)));
+    if let crate::ast::Condition::Or(ops) = cond {
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(ops[0], crate::ast::Condition::And(_)));
+        assert!(matches!(ops[1], crate::ast::Condition::Truthy(..)));
+    }
+}
+
+#[test]
+fn parse_condition_string_with_operator_inside_quotes() {
+    // The `||` inside the string should NOT be treated as a logical operator
+    let cond = parse_condition("msg == \"a || b\"").unwrap();
+    assert!(
+        matches!(cond, crate::ast::Condition::Eq(..)),
+        "operator inside string should not split condition"
+    );
+}
+
+#[test]
+fn parse_condition_complex_three_or() {
+    let cond = parse_condition("a || b || c").unwrap();
+    assert!(matches!(cond, crate::ast::Condition::Or(_)));
+    if let crate::ast::Condition::Or(ops) = cond {
+        assert_eq!(ops.len(), 3);
+    }
+}
+
+#[test]
+fn parse_condition_empty_operand_rejected() {
+    let result = parse_condition("a && ");
+    assert!(result.is_err(), "empty operand after && should fail");
+}
+
+#[test]
+fn parse_condition_empty_or_operand_rejected() {
+    let result = parse_condition("|| b");
+    assert!(result.is_err(), "empty operand before || should fail");
+}
+
+#[test]
+fn parse_condition_max_operands_exceeded_rejected() {
+    // MAX_LOGICAL_OPERANDS is 16; 17 operands in a || chain should be rejected.
+    let parts: Vec<String> = (0..17).map(|i| format!("v{i}")).collect();
+    let src_condition = parts.join(" || ");
+    let result = parse_condition(&src_condition);
+    assert!(
+        result.is_err(),
+        "more than MAX_LOGICAL_OPERANDS operands must be rejected"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("operand") || err.contains("maximum"),
+        "error should mention operand limit, got: {err}"
+    );
+}
+
+// ── Logical operator integration tests ───────────────────────────────────────
+
+#[test]
+fn evaluate_and_condition_both_true() {
+    let result =
+        crate::compile_str("---\na: true\nb: true\n---\n@if a && b:\nyes\n@end\n").unwrap();
+    assert!(
+        result.contains("yes"),
+        "and with both true should render body, got: {result}"
+    );
+}
+
+#[test]
+fn evaluate_and_condition_one_false() {
+    let result =
+        crate::compile_str("---\na: true\nb: false\n---\n@if a && b:\nyes\n@else:\nno\n@end\n")
+            .unwrap();
+    assert!(
+        result.contains("no"),
+        "and with one false should take else, got: {result}"
+    );
+}
+
+#[test]
+fn evaluate_or_condition_one_true() {
+    let result =
+        crate::compile_str("---\na: false\nb: true\n---\n@if a || b:\nyes\n@else:\nno\n@end\n")
+            .unwrap();
+    assert!(
+        result.contains("yes"),
+        "or with one true should render body, got: {result}"
+    );
+}
+
+#[test]
+fn evaluate_or_condition_both_false() {
+    let result =
+        crate::compile_str("---\na: false\nb: false\n---\n@if a || b:\nyes\n@else:\nno\n@end\n")
+            .unwrap();
+    assert!(
+        result.contains("no"),
+        "or with both false should take else, got: {result}"
+    );
+}
+
+#[test]
+fn evaluate_elseif_with_logical_and_operator() {
+    // parse_condition is shared between @if and @elseif; verify logical operators
+    // work correctly in @elseif branches (b && c evaluates to BC when a=false, b=true, c=true).
+    let src =
+        "---\na: false\nb: true\nc: true\n---\n@if a:\nA\n@elseif b && c:\nBC\n@else:\nNO\n@end\n";
+    let result = crate::compile_str(src).unwrap();
+    assert!(
+        result.contains("BC"),
+        "@elseif with && should render branch when both operands are true, got: {result}"
+    );
+    assert!(
+        !result.contains("A"),
+        "@if branch should not render when a is false, got: {result}"
+    );
+    assert!(
+        !result.contains("NO"),
+        "@else branch should not render when @elseif matches, got: {result}"
+    );
+}
+
+#[test]
+fn evaluate_elseif_with_logical_or_operator() {
+    // Verify @elseif with || takes the branch when at least one operand is true.
+    let src =
+        "---\na: false\nb: false\nc: true\n---\n@if a:\nA\n@elseif b || c:\nBC\n@else:\nNO\n@end\n";
+    let result = crate::compile_str(src).unwrap();
+    assert!(
+        result.contains("BC"),
+        "@elseif with || should render branch when one operand is true, got: {result}"
+    );
+    assert!(
+        !result.contains("NO"),
+        "@else branch should not render when @elseif matches, got: {result}"
+    );
+}

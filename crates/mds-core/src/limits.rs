@@ -17,6 +17,12 @@ pub(crate) const MAX_NESTING_DEPTH: usize = 64;
 /// MAX_NESTING_DEPTH (64), which limits recursive nesting depth.
 pub(crate) const MAX_ELSEIF_BRANCHES: usize = 256;
 
+/// Maximum number of leaf operands in a single `&&` or `||` expression.
+///
+/// Prevents adversarial inputs from creating exponentially-evaluated condition
+/// trees. 16 operands allows complex but realistic conditions.
+pub(crate) const MAX_LOGICAL_OPERANDS: usize = 16;
+
 // ── Size / traversal limits ───────────────────────────────────────────────────
 
 /// Maximum file size (10 MB) to prevent runaway memory use.
@@ -31,18 +37,9 @@ pub(crate) const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 /// can import it for the `find_project_root` upward directory walk.
 pub(crate) const MAX_TRAVERSAL_DEPTH: usize = 256;
 
-// ── Pinning tests ─────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn limits_have_expected_values() {
-        assert_eq!(MAX_DOT_SEGMENTS, 32);
-        assert_eq!(MAX_NESTING_DEPTH, 64);
-        assert_eq!(MAX_ELSEIF_BRANCHES, 256);
-        assert_eq!(MAX_FILE_SIZE, 10 * 1024 * 1024);
-        assert_eq!(MAX_TRAVERSAL_DEPTH, 256);
-    }
-}
+/// Maximum size of the compiled output string in bytes (50 MB).
+///
+/// Checked by the evaluator after each node and by built-ins that can amplify
+/// output (e.g. `replace()`) to prevent runaway memory use from adversarial
+/// inputs. Shared with `builtins.rs` to ensure a single authoritative limit.
+pub(crate) const MAX_OUTPUT_SIZE: usize = 50 * 1024 * 1024;

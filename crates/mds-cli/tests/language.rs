@@ -1090,3 +1090,268 @@ fn elseif_short_circuit_only_matched_branch_evaluates() {
         "subsequent branches must be skipped"
     );
 }
+
+// ── Built-in function tests ───────────────────────────────────────────────
+
+#[test]
+fn builtin_upper_golden_path() {
+    // mds build code path: {upper(word)} produces uppercase output
+    let source = "---\nword: hello\n---\n{upper(word)}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("HELLO"),
+        "upper() should uppercase the string, got: {result}"
+    );
+}
+
+#[test]
+fn builtin_lower_golden_path() {
+    let source = "---\nword: WORLD\n---\n{lower(word)}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("world"),
+        "lower() should lowercase the string, got: {result}"
+    );
+}
+
+#[test]
+fn builtin_trim_golden_path() {
+    // Use compile_str_with to avoid frontmatter passthrough containing the raw value
+    let source = "@define show(w):\n{trim(w)}\n@end\n{show(\"  hi  \")}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("hi"),
+        "trim() should strip whitespace, got: {result}"
+    );
+    assert!(
+        !result.contains("  hi  "),
+        "trim() should remove surrounding spaces, got: {result}"
+    );
+}
+
+#[test]
+fn builtin_length_string_golden_path() {
+    let source = "---\nword: hello\n---\n{length(word)}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains('5'),
+        "length() of 'hello' should be 5, got: {result}"
+    );
+}
+
+#[test]
+fn builtin_join_split_golden_path() {
+    // Compose split + join: split("a,b,c", ",") then join with " | "
+    let source = "---\ncsv: a,b,c\n---\n{join(split(csv, \",\"), \" | \")}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("a | b | c"),
+        "join(split()) should produce 'a | b | c', got: {result}"
+    );
+}
+
+#[test]
+fn builtin_arity_mismatch_error_via_check() {
+    // mds check code path: calling upper() with zero args must fail with arity error
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bad_arity.mds");
+    std::fs::write(&path, "{upper()}\n").unwrap();
+    let result = mds::check(&path, None);
+    assert!(
+        result.is_err(),
+        "arity mismatch on built-in should fail at check time"
+    );
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("upper") || err.contains("arity") || err.contains("argument"),
+        "error should mention the function name or arity, got: {err}"
+    );
+}
+
+#[test]
+fn builtin_too_many_args_error_via_check() {
+    // mds check code path: calling trim() with two args must fail with arity error
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bad_arity2.mds");
+    std::fs::write(&path, "---\na: hello\nb: world\n---\n{trim(a, b)}\n").unwrap();
+    let result = mds::check(&path, None);
+    assert!(
+        result.is_err(),
+        "too many args on built-in trim() should fail at check time"
+    );
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("trim") || err.contains("arity") || err.contains("argument"),
+        "error should mention the function name or arity, got: {err}"
+    );
+}
+
+// ── Default argument tests ────────────────────────────────────────────────
+
+#[test]
+fn default_arg_string_used_when_omitted() {
+    // mds build code path: calling greet() without arg uses string default "World"
+    let source = "@define greet(name = \"World\"):\nHello {name}!\n@end\n{greet()}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("Hello World!"),
+        "omitted arg should use string default, got: {result}"
+    );
+}
+
+#[test]
+fn default_arg_overridden_when_provided() {
+    let source = "@define greet(name = \"World\"):\nHello {name}!\n@end\n{greet(\"Alice\")}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("Hello Alice!"),
+        "provided arg should override default, got: {result}"
+    );
+}
+
+#[test]
+fn default_arg_number_used_when_omitted() {
+    let source = "@define show(x = 42):\nvalue={x}\n@end\n{show()}\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("value=42"),
+        "omitted arg should use numeric default, got: {result}"
+    );
+}
+
+#[test]
+fn default_arg_check_valid_call() {
+    // mds check code path: calls with and without optional arg must both pass check
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("default_ok.mds");
+    std::fs::write(
+        &path,
+        "@define greet(name = \"World\"):\nHello {name}!\n@end\n{greet()}\n{greet(\"Alice\")}\n",
+    )
+    .unwrap();
+    let result = mds::check(&path, None);
+    assert!(
+        result.is_ok(),
+        "valid calls with and without optional arg should pass check, got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn default_arg_arity_error_too_many_args_via_check() {
+    // mds check code path: passing more args than the function accepts must fail
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("too_many.mds");
+    std::fs::write(
+        &path,
+        "@define greet(name = \"World\"):\nHello {name}!\n@end\n{greet(\"Alice\", \"extra\")}\n",
+    )
+    .unwrap();
+    let result = mds::check(&path, None);
+    assert!(
+        result.is_err(),
+        "too many args for a function with one optional param should fail"
+    );
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("greet") || err.contains("arity") || err.contains("argument"),
+        "error should mention the function name or arity, got: {err}"
+    );
+}
+
+// ── Logical operator tests (&&, ||) ──────────────────────────────────────
+
+#[test]
+fn logical_and_both_true_enters_body() {
+    // @if a && b: — both truthy → enters then body
+    let source = "---\na: true\nb: true\n---\n@if a && b:\nboth_true\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("both_true"),
+        "@if a && b: with both true must enter then body, got: {result}"
+    );
+}
+
+#[test]
+fn logical_and_first_false_skips_body() {
+    // @if a && b: — a falsy → skips body (short-circuit)
+    let source = "---\na: false\nb: true\n---\n@if a && b:\nshould_not_appear\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        !result.contains("should_not_appear"),
+        "@if a && b: with a=false must skip body, got: {result}"
+    );
+}
+
+#[test]
+fn logical_and_second_false_skips_body() {
+    // @if a && b: — b falsy → skips body
+    let source = "---\na: true\nb: false\n---\n@if a && b:\nshould_not_appear\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        !result.contains("should_not_appear"),
+        "@if a && b: with b=false must skip body, got: {result}"
+    );
+}
+
+#[test]
+fn logical_or_first_true_enters_body() {
+    // @if a || b: — a truthy → enters body
+    let source = "---\na: true\nb: false\n---\n@if a || b:\nor_body\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("or_body"),
+        "@if a || b: with a=true must enter body, got: {result}"
+    );
+}
+
+#[test]
+fn logical_or_second_true_enters_body() {
+    // @if a || b: — a falsy, b truthy → enters body
+    let source = "---\na: false\nb: true\n---\n@if a || b:\nor_body\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("or_body"),
+        "@if a || b: with b=true must enter body, got: {result}"
+    );
+}
+
+#[test]
+fn logical_or_both_false_skips_body() {
+    // @if a || b: — both falsy → skips body, enters else
+    let source =
+        "---\na: false\nb: false\n---\n@if a || b:\nshould_not_appear\n@else:\nor_else\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        !result.contains("should_not_appear"),
+        "@if a || b: with both false must skip then body, got: {result}"
+    );
+    assert!(
+        result.contains("or_else"),
+        "@if a || b: with both false must enter else body, got: {result}"
+    );
+}
+
+#[test]
+fn logical_and_or_precedence() {
+    // @if a && b || c: — AND binds tighter than OR → (a && b) || c
+    // a=false, b=true, c=true → (false && true) || true → true
+    let source = "---\na: false\nb: true\nc: true\n---\n@if a && b || c:\nprecedence_ok\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("precedence_ok"),
+        "&& should bind tighter than ||, got: {result}"
+    );
+}
+
+#[test]
+fn logical_operator_with_equality() {
+    // @if role == "admin" || role == "mod": — compound with equality conditions
+    let source = "---\nrole: mod\n---\n@if role == \"admin\" || role == \"mod\":\nprivileged\n@else:\nregular\n@end\n";
+    let result = mds::compile_str(source).unwrap();
+    assert!(
+        result.contains("privileged"),
+        "|| combining equality conditions must work, got: {result}"
+    );
+    assert!(!result.contains("regular"), "else must not appear");
+}

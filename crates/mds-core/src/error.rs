@@ -54,6 +54,23 @@ fn compute_line_column(source: &str, offset: usize) -> Option<(usize, usize)> {
     Some((line, col))
 }
 
+/// Format an arity range for display in error messages.
+///
+/// - `min == max == 1` → "expected 1 argument"
+/// - `min == max` → "expected N arguments"
+/// - `min != max` → "expected M-N arguments"
+fn format_arity(min: usize, max: usize) -> String {
+    if min == max {
+        if min == 1 {
+            "expected 1 argument".to_string()
+        } else {
+            format!("expected {min} arguments")
+        }
+    } else {
+        format!("expected {min}-{max} arguments")
+    }
+}
+
 /// Build the `(span, src)` pair shared by all `_at` constructors.
 fn at(
     file: &str,
@@ -108,13 +125,24 @@ pub enum MdsError {
         src: Option<Arc<miette::NamedSource<String>>>,
     },
 
-    #[error("arity mismatch for '{name}': expected {expected} {}, got {got}", if *expected == 1 { "argument" } else { "arguments" })]
+    #[error("arity mismatch for '{name}': {}, got {got}", format_arity(*expected_min, *expected_max))]
     #[diagnostic(code(mds::arity))]
     ArityMismatch {
         name: String,
-        expected: usize,
+        expected_min: usize,
+        expected_max: usize,
         got: usize,
         #[label("wrong number of arguments")]
+        span: Option<SourceSpan>,
+        #[source_code]
+        src: Option<Arc<miette::NamedSource<String>>>,
+    },
+
+    #[error("{message}")]
+    #[diagnostic(code(mds::builtin))]
+    BuiltinError {
+        message: String,
+        #[label("built-in function error")]
         span: Option<SourceSpan>,
         #[source_code]
         src: Option<Arc<miette::NamedSource<String>>>,
@@ -296,19 +324,27 @@ impl MdsError {
         }
     }
 
-    pub(crate) fn arity(name: impl Into<String>, expected: usize, got: usize) -> Self {
+    pub(crate) fn arity(
+        name: impl Into<String>,
+        expected_min: usize,
+        expected_max: usize,
+        got: usize,
+    ) -> Self {
         MdsError::ArityMismatch {
             name: name.into(),
-            expected,
+            expected_min,
+            expected_max,
             got,
             span: None,
             src: None,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn arity_at(
         name: impl Into<String>,
-        expected: usize,
+        expected_min: usize,
+        expected_max: usize,
         got: usize,
         file: &str,
         source: &str,
@@ -318,8 +354,33 @@ impl MdsError {
         let (span, src) = at(file, source, offset, len);
         MdsError::ArityMismatch {
             name: name.into(),
-            expected,
+            expected_min,
+            expected_max,
             got,
+            span,
+            src,
+        }
+    }
+
+    pub(crate) fn builtin_error(msg: impl Into<String>) -> Self {
+        MdsError::BuiltinError {
+            message: msg.into(),
+            span: None,
+            src: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn builtin_error_at(
+        msg: impl Into<String>,
+        file: &str,
+        source: &str,
+        offset: usize,
+        len: usize,
+    ) -> Self {
+        let (span, src) = at(file, source, offset, len);
+        MdsError::BuiltinError {
+            message: msg.into(),
             span,
             src,
         }
@@ -545,7 +606,8 @@ impl MdsError {
             | MdsError::ImportError { span, src, .. }
             | MdsError::NameCollision { span, src, .. }
             | MdsError::Recursion { span, src, .. }
-            | MdsError::ExportError { span, src, .. } => {
+            | MdsError::ExportError { span, src, .. }
+            | MdsError::BuiltinError { span, src, .. } => {
                 span.as_ref().map(|ss| {
                     let offset = ss.offset();
                     let length = ss.len();

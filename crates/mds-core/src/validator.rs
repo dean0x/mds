@@ -1,4 +1,4 @@
-use crate::ast::{Arg, Condition, Expr, Node};
+use crate::ast::{required_param_count, Arg, Condition, Expr, ForBlock, IfBlock, Node};
 use crate::error::MdsError;
 use crate::scope::Scope;
 use crate::value::Value;
@@ -25,87 +25,15 @@ fn validate_node(node: &Node, scope: &mut Scope, file: &str, source: &str) -> Re
         Node::Interpolation(interp) => {
             validate_expr(&interp.expr, scope, file, source, interp.offset, interp.len)
         }
-        Node::If(block) => {
-            // Validate that the root variable of each condition is defined in scope.
-            validate_condition(&block.condition, scope, file, source, block.offset)?;
-            // INVARIANT: @if does not push a scope frame. then_body and else_body are
-            // validated against the same &mut Scope. This is safe because no directive
-            // that modifies scope (e.g. @define, @for) is valid at block level inside
-            // an @if — those are caught by the parser. If future directives that inject
-            // scope bindings are added at this level, each branch must get its own
-            // push()/pop() frame to prevent bindings from leaking across branches.
-            validate(&block.then_body, scope, file, source)?;
-            // Validate all @elseif branches
-            for (elseif_cond, elseif_body) in &block.elseif_branches {
-                validate_condition(elseif_cond, scope, file, source, block.offset)?;
-                validate(elseif_body, scope, file, source)?;
-            }
-            if let Some(else_body) = &block.else_body {
-                validate(else_body, scope, file, source)?;
-            }
-            Ok(())
-        }
-        Node::For(block) => {
-            // Parser invariant: iterable is always non-empty. Use .first() with an error return
-            // rather than a debug_assert!+index so this holds in release builds too.
-            let root = block.iterable.first().ok_or_else(|| {
-                MdsError::syntax("internal error: @for block has empty iterable path")
-            })?;
-            let iterable_val = scope.get_var(root).ok_or_else(|| {
-                MdsError::undefined_var_at(root, file, source, block.offset, root.len())
-            })?;
-            // Only perform static type checks when:
-            // 1. No key_var (single-var iteration should be an array)
-            // 2. The iterable is a simple identifier (no dot path — can't statically resolve type)
-            //
-            // ACCEPTED LIMITATION: when the iterable is a dot-path (block.iterable.len() > 1,
-            // e.g. `@for item in data.list:`), we skip the static array-type check here because
-            // `data.list` is a field on a runtime Value::Object whose type cannot be determined
-            // statically from the scope's root variable. Any type mismatch (e.g., `data.list`
-            // resolves to a non-array) surfaces as a MdsError::TypeError at evaluation time via
-            // `resolve_dot_path`, with less precise span information than a validator diagnostic.
-            // Resolving object fields statically would require a full type-system pass that is
-            // out of scope for v0.1.
-            if block.key_var.is_none()
-                && block.iterable.len() == 1
-                && !matches!(iterable_val, Value::Array(_))
-            {
-                if matches!(iterable_val, Value::Object(_)) {
-                    return Err(MdsError::syntax_at(
-                        format!(
-                            "cannot iterate over object '{root}' with a single variable — \
-                             use @for key, value in {root}: to iterate over an object's entries"
-                        ),
-                        file,
-                        source,
-                        block.offset,
-                        root.len(),
-                    ));
-                }
-                return Err(MdsError::type_error_at(
-                    iterable_val.type_name(),
-                    file,
-                    source,
-                    block.offset,
-                    root.len(),
-                ));
-            }
-            scope.push();
-            if let Some(ref key_var) = block.key_var {
-                scope.set_var(key_var, Value::Null);
-            }
-            scope.set_var(&block.var, Value::Null);
-            let result = validate(&block.body, scope, file, source);
-            let _ = scope.pop(); // Cannot fail — we just pushed
-            result
-        }
+        Node::If(block) => validate_if_node(block, scope, file, source),
+        Node::For(block) => validate_for_node(block, scope, file, source),
         Node::Define(def) => {
             scope.push();
             for param in &def.params {
                 // Use an empty array as the placeholder for each parameter so
                 // that `@for item in param:` inside the body passes the type
                 // check. The actual type is enforced at call time by the evaluator.
-                scope.set_var(param, Value::Array(vec![]));
+                scope.set_var(&param.name, Value::Array(vec![]));
             }
             let result = validate(&def.body, scope, file, source);
             let _ = scope.pop(); // Cannot fail — we just pushed
@@ -124,7 +52,104 @@ fn validate_node(node: &Node, scope: &mut Scope, file: &str, source: &str) -> Re
     }
 }
 
-/// Validate that the root variable of a condition path is defined in scope.
+/// Validate an `@if` block: conditions and all branch bodies.
+///
+/// INVARIANT: @if does not push a scope frame. then_body and else_body are
+/// validated against the same &mut Scope. This is safe because no directive
+/// that modifies scope (e.g. @define, @for) is valid at block level inside
+/// an @if — those are caught by the parser. If future directives that inject
+/// scope bindings are added at this level, each branch must get its own
+/// push()/pop() frame to prevent bindings from leaking across branches.
+fn validate_if_node(
+    block: &IfBlock,
+    scope: &mut Scope,
+    file: &str,
+    source: &str,
+) -> Result<(), MdsError> {
+    // Validate that the root variable of each condition is defined in scope.
+    validate_condition(&block.condition, scope, file, source, block.offset)?;
+    validate(&block.then_body, scope, file, source)?;
+    // Validate all @elseif branches
+    for (elseif_cond, elseif_body) in &block.elseif_branches {
+        validate_condition(elseif_cond, scope, file, source, block.offset)?;
+        validate(elseif_body, scope, file, source)?;
+    }
+    if let Some(else_body) = &block.else_body {
+        validate(else_body, scope, file, source)?;
+    }
+    Ok(())
+}
+
+/// Validate a `@for` block: iterable type check and body with loop variables in scope.
+///
+/// Static type checks are restricted to simple identifiers (no dot-path iterables)
+/// because dot-path field types cannot be resolved without a full type-system pass.
+/// Any type mismatch on dot-path iterables surfaces at evaluation time.
+fn validate_for_node(
+    block: &ForBlock,
+    scope: &mut Scope,
+    file: &str,
+    source: &str,
+) -> Result<(), MdsError> {
+    // Parser invariant: iterable is always non-empty. Use .first() with an error return
+    // rather than a debug_assert!+index so this holds in release builds too.
+    let root = block
+        .iterable
+        .first()
+        .ok_or_else(|| MdsError::syntax("internal error: @for block has empty iterable path"))?;
+    let iterable_val = scope
+        .get_var(root)
+        .ok_or_else(|| MdsError::undefined_var_at(root, file, source, block.offset, root.len()))?;
+    // Only perform static type checks when:
+    // 1. No key_var (single-var iteration should be an array)
+    // 2. The iterable is a simple identifier (no dot path — can't statically resolve type)
+    //
+    // ACCEPTED LIMITATION: when the iterable is a dot-path (block.iterable.len() > 1,
+    // e.g. `@for item in data.list:`), we skip the static array-type check here because
+    // `data.list` is a field on a runtime Value::Object whose type cannot be determined
+    // statically from the scope's root variable. Any type mismatch (e.g., `data.list`
+    // resolves to a non-array) surfaces as a MdsError::TypeError at evaluation time via
+    // `resolve_dot_path`, with less precise span information than a validator diagnostic.
+    // Resolving object fields statically would require a full type-system pass that is
+    // out of scope for the current release.
+    if block.key_var.is_none()
+        && block.iterable.len() == 1
+        && !matches!(iterable_val, Value::Array(_))
+    {
+        if matches!(iterable_val, Value::Object(_)) {
+            return Err(MdsError::syntax_at(
+                format!(
+                    "cannot iterate over object '{root}' with a single variable — \
+                     use @for key, value in {root}: to iterate over an object's entries"
+                ),
+                file,
+                source,
+                block.offset,
+                root.len(),
+            ));
+        }
+        return Err(MdsError::type_error_at(
+            iterable_val.type_name(),
+            file,
+            source,
+            block.offset,
+            root.len(),
+        ));
+    }
+    scope.push();
+    if let Some(ref key_var) = block.key_var {
+        scope.set_var(key_var, Value::Null);
+    }
+    scope.set_var(&block.var, Value::Null);
+    let result = validate(&block.body, scope, file, source);
+    let _ = scope.pop(); // Cannot fail — we just pushed
+    result
+}
+
+/// Validate that the root variable(s) of a condition are defined in scope.
+///
+/// For compound conditions (`And`/`Or`), recursively validates all operands
+/// (conservative — validates all branches, not just the short-circuit path).
 fn validate_condition(
     condition: &Condition,
     scope: &Scope,
@@ -132,11 +157,68 @@ fn validate_condition(
     source: &str,
     offset: usize,
 ) -> Result<(), MdsError> {
-    let root = condition.root()?;
-    scope
-        .get_var(root)
-        .ok_or_else(|| MdsError::undefined_var_at(root, file, source, offset, root.len()))
-        .map(|_| ())
+    match condition {
+        Condition::And(operands) | Condition::Or(operands) => {
+            for operand in operands {
+                validate_condition(operand, scope, file, source, offset)?;
+            }
+            Ok(())
+        }
+        _ => {
+            let root = condition.root()?;
+            scope
+                .get_var(root)
+                .ok_or_else(|| MdsError::undefined_var_at(root, file, source, offset, root.len()))
+                .map(|_| ())
+        }
+    }
+}
+
+/// Resolve a call by name and validate arity.
+///
+/// Returns `Ok(true)` if the call resolved to a builtin (so the caller can
+/// skip further variable-existence checks on its arguments), `Ok(false)` if
+/// it resolved to a user-defined function, or an error if the function is
+/// unknown or the arity is out of range.
+///
+/// `len` is the span length used for error diagnostics — callers pass the
+/// full call-site span for top-level calls and `name.len()` for nested calls
+/// inside argument lists.
+fn validate_call_arity(
+    name: &str,
+    arg_count: usize,
+    scope: &Scope,
+    file: &str,
+    source: &str,
+    offset: usize,
+    len: usize,
+) -> Result<bool, MdsError> {
+    if let Some(func) = scope.get_function(name) {
+        let required = required_param_count(&func.params);
+        let total = func.params.len();
+        if arg_count < required || arg_count > total {
+            return Err(MdsError::arity_at(
+                name, required, total, arg_count, file, source, offset, len,
+            ));
+        }
+        Ok(false)
+    } else if let Some(meta) = crate::builtins::get_builtin(name) {
+        if arg_count < meta.min_args || arg_count > meta.max_args {
+            return Err(MdsError::arity_at(
+                name,
+                meta.min_args,
+                meta.max_args,
+                arg_count,
+                file,
+                source,
+                offset,
+                len,
+            ));
+        }
+        Ok(true)
+    } else {
+        Err(MdsError::undefined_fn_at(name, file, source, offset, len))
+    }
 }
 
 fn validate_expr(
@@ -163,19 +245,12 @@ fn validate_expr(
                 .map(|_| ())
         }
         Expr::Call { name, args } => {
-            let func = scope
-                .get_function(name)
-                .ok_or_else(|| MdsError::undefined_fn_at(name, file, source, offset, len))?;
-            if args.len() != func.params.len() {
-                return Err(MdsError::arity_at(
-                    name,
-                    func.params.len(),
-                    args.len(),
-                    file,
-                    source,
-                    offset,
-                    len,
-                ));
+            let is_builtin =
+                validate_call_arity(name, args.len(), scope, file, source, offset, len)?;
+            if is_builtin {
+                // Built-in args may be any type — no variable-existence check needed.
+                // However, we still validate any nested calls or variable references within args.
+                return validate_var_args(args, scope, file, source, offset, 0);
             }
             validate_var_args(args, scope, file, source, offset, 0)
         }
@@ -192,10 +267,13 @@ fn validate_expr(
                 .functions
                 .get(name)
                 .ok_or_else(|| MdsError::undefined_fn_at(&qualified, file, source, offset, len))?;
-            if args.len() != func.params.len() {
+            let required = required_param_count(&func.params);
+            let total = func.params.len();
+            if args.len() < required || args.len() > total {
                 return Err(MdsError::arity_at(
                     &qualified,
-                    func.params.len(),
+                    required,
+                    total,
                     args.len(),
                     file,
                     source,
@@ -224,7 +302,10 @@ fn validate_var_args(
     }
     for arg in args {
         match arg {
-            Arg::StringLiteral(_) => {}
+            Arg::StringLiteral(_)
+            | Arg::NumberLiteral(_)
+            | Arg::BooleanLiteral(_)
+            | Arg::NullLiteral => {}
             Arg::Var(var_name) => {
                 scope.get_var(var_name).ok_or_else(|| {
                     MdsError::undefined_var_at(var_name, file, source, offset, var_name.len())
@@ -241,21 +322,17 @@ fn validate_var_args(
                 name,
                 args: inner_args,
             } => {
-                // Validate the nested call as if it were a top-level Expr::Call
-                let func = scope.get_function(name).ok_or_else(|| {
-                    MdsError::undefined_fn_at(name, file, source, offset, name.len())
-                })?;
-                if inner_args.len() != func.params.len() {
-                    return Err(MdsError::arity_at(
-                        name,
-                        func.params.len(),
-                        inner_args.len(),
-                        file,
-                        source,
-                        offset,
-                        name.len(),
-                    ));
-                }
+                // Validate the nested call — check user-defined first, then builtins.
+                // Nested calls use name.len() as the span (no full call-site span available).
+                validate_call_arity(
+                    name,
+                    inner_args.len(),
+                    scope,
+                    file,
+                    source,
+                    offset,
+                    name.len(),
+                )?;
                 validate_var_args(inner_args, scope, file, source, offset, depth + 1)?;
             }
         }
@@ -267,6 +344,92 @@ fn validate_var_args(
 mod tests {
     use super::*;
 
+    // ── Built-in arity checking ───────────────────────────────────────────────
+
+    /// Build a top-level `{call(...)}` interpolation node for testing.
+    fn call_node(name: &str, args: Vec<crate::ast::Arg>) -> Node {
+        Node::Interpolation(crate::ast::Interpolation {
+            expr: crate::ast::Expr::Call {
+                name: name.to_string(),
+                args,
+            },
+            offset: 0,
+            len: name.len(),
+        })
+    }
+
+    #[test]
+    fn builtin_upper_zero_args_fails_arity_check() {
+        // {upper()} — upper requires exactly 1 arg; 0 args must fail.
+        let node = call_node("upper", vec![]);
+        let mut scope = Scope::new();
+        let result = validate(&[node], &mut scope, "test.mds", "");
+        assert!(
+            result.is_err(),
+            "upper() with 0 args must fail arity check, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_upper_two_args_fails_arity_check() {
+        // {upper(x, y)} — upper requires exactly 1 arg; 2 args must fail.
+        // String literal args avoid triggering the undefined-variable check first.
+        let args = vec![
+            crate::ast::Arg::StringLiteral("hello".to_string()),
+            crate::ast::Arg::StringLiteral("world".to_string()),
+        ];
+        let node = call_node("upper", args);
+        let mut scope = Scope::new();
+        let result = validate(&[node], &mut scope, "test.mds", "");
+        assert!(
+            result.is_err(),
+            "upper() with 2 args must fail arity check, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_upper_one_literal_arg_passes_arity_check() {
+        // {upper("hello")} — upper requires exactly 1 arg; 1 literal arg must pass.
+        let args = vec![crate::ast::Arg::StringLiteral("hello".to_string())];
+        let node = call_node("upper", args);
+        let mut scope = Scope::new();
+        let result = validate(&[node], &mut scope, "test.mds", "");
+        assert!(
+            result.is_ok(),
+            "upper() with 1 literal arg must pass arity check: {result:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_replace_two_args_fails_arity_check() {
+        // {replace(s, old)} — replace requires exactly 3 args; 2 must fail.
+        let args = vec![
+            crate::ast::Arg::StringLiteral("hello".to_string()),
+            crate::ast::Arg::StringLiteral("h".to_string()),
+        ];
+        let node = call_node("replace", args);
+        let mut scope = Scope::new();
+        let result = validate(&[node], &mut scope, "test.mds", "");
+        assert!(
+            result.is_err(),
+            "replace() with 2 args must fail arity check, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn undefined_function_fails_with_error() {
+        // {notabuiltin()} — completely unknown function must fail.
+        let node = call_node("notabuiltin", vec![]);
+        let mut scope = Scope::new();
+        let result = validate(&[node], &mut scope, "test.mds", "");
+        assert!(
+            result.is_err(),
+            "unknown function must fail validation, got: {result:?}"
+        );
+    }
+
+    // ── Existing tests ────────────────────────────────────────────────────────
+
     #[test]
     fn define_body_with_undefined_var_fails_at_validate_time() {
         // @define greet(name): {undefined_var} @end — body references undefined var
@@ -277,7 +440,7 @@ mod tests {
         })];
         let define = Node::Define(crate::ast::DefineBlock {
             name: "greet".to_string(),
-            params: vec!["name".to_string()],
+            params: vec![crate::ast::Param::required("name")],
             body,
             offset: 0,
         });
@@ -299,7 +462,7 @@ mod tests {
         })];
         let define = Node::Define(crate::ast::DefineBlock {
             name: "greet".to_string(),
-            params: vec!["name".to_string()],
+            params: vec![crate::ast::Param::required("name")],
             body,
             offset: 0,
         });

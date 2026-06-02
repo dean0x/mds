@@ -9,8 +9,6 @@
 //!   validation, and related utilities).
 //! - **`parser_tests.rs`** — integration and unit tests for both modules.
 
-use std::collections::HashSet;
-
 use crate::ast::{
     Condition, DefineBlock, ForBlock, Frontmatter, IfBlock, IncludeDirective, Module, Node,
     TextNode,
@@ -395,26 +393,7 @@ impl Parser<'_> {
         }
 
         let params_str = &rest[paren_start + 1..paren_end];
-        let params: Vec<String> = params_str
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .collect();
-
-        let mut seen = HashSet::new();
-        for param in &params {
-            if !is_valid_identifier(param) {
-                return Err(MdsError::syntax(format!(
-                    "invalid parameter name: '{param}'"
-                )));
-            }
-            if !seen.insert(param.as_str()) {
-                return Err(MdsError::syntax(format!(
-                    "duplicate parameter name '{param}' in @define {name}"
-                )));
-            }
-        }
+        let params = parse_define_params(params_str, &name)?;
 
         let body = self.parse_body(&["@end"], &[])?;
 

@@ -51,28 +51,44 @@ pub enum Condition {
     Eq(Vec<String>, CondValue),
     /// `@if role != "admin":` — strict inequality
     NotEq(Vec<String>, CondValue),
+    /// `@if a && b && c:` — all operands must be truthy (short-circuits on first false)
+    And(Vec<Condition>),
+    /// `@if a || b || c:` — any operand must be truthy (short-circuits on first true)
+    Or(Vec<Condition>),
 }
 
 impl Condition {
-    /// Extract the dot-path from any condition variant.
+    /// Extract the dot-path from a leaf condition variant, or return an empty slice for
+    /// compound conditions (`And`/`Or`).
+    ///
+    /// Callers that need to handle compound conditions must match on the variant directly.
     pub fn path(&self) -> &[String] {
         match self {
             Condition::Truthy(p)
             | Condition::Not(p)
             | Condition::Eq(p, _)
             | Condition::NotEq(p, _) => p,
+            Condition::And(_) | Condition::Or(_) => &[],
         }
     }
 
-    /// Return the root (first) segment of the condition path, or an error if the path is empty.
+    /// Return the root (first) segment of the condition path, or an error.
     ///
-    /// An empty path is an internal invariant violation — the parser always produces a
-    /// non-empty path for a valid `@if` condition.
+    /// For leaf conditions: errors if the path is empty (internal invariant violation).
+    /// For compound conditions (`And`/`Or`): always returns an error — callers must
+    /// recurse into operands directly.
     #[must_use = "errors should be handled"]
     pub fn root(&self) -> Result<&str, crate::error::MdsError> {
-        self.path().first().map(String::as_str).ok_or_else(|| {
-            crate::error::MdsError::syntax("internal error: @if block has empty condition path")
-        })
+        match self {
+            Condition::And(_) | Condition::Or(_) => Err(crate::error::MdsError::syntax(
+                "internal error: root() called on compound And/Or condition — recurse operands instead",
+            )),
+            _ => self.path().first().map(String::as_str).ok_or_else(|| {
+                crate::error::MdsError::syntax(
+                    "internal error: @if block has empty condition path",
+                )
+            }),
+        }
     }
 }
 
@@ -139,6 +155,12 @@ pub enum Expr {
 #[derive(Debug, Clone)]
 pub enum Arg {
     StringLiteral(String),
+    /// A numeric literal argument: `func(42)` or `func(-3.14)`
+    NumberLiteral(f64),
+    /// A boolean literal argument: `func(true)` or `func(false)`
+    BooleanLiteral(bool),
+    /// A null literal argument: `func(null)`
+    NullLiteral,
     Var(String),
     /// Nested function call: `{outer(inner("arg"))}`
     Call {
@@ -174,10 +196,44 @@ pub struct ForBlock {
     pub offset: usize,
 }
 
+/// A parameter in a `@define` function definition.
+///
+/// Parameters may have an optional default value. Parameters without defaults
+/// must appear before any parameter with a default.
+#[derive(Debug, Clone)]
+pub struct Param {
+    /// The parameter name (a valid identifier).
+    pub name: String,
+    /// Optional default value, parsed as a `CondValue` at definition time.
+    pub default: Option<CondValue>,
+}
+
+impl Param {
+    /// Convenience constructor for a required parameter with no default value.
+    pub fn required(name: impl Into<String>) -> Self {
+        Param {
+            name: name.into(),
+            default: None,
+        }
+    }
+}
+
+/// Count the number of required (no-default) parameters in a param list.
+///
+/// A parameter is required when its `default` field is `None`. Optional parameters
+/// (those with `Some(CondValue)`) may be omitted at call sites and receive their
+/// default value at runtime via `condvalue_to_value`.
+///
+/// Defined here alongside `Param` because it is purely a property of the AST
+/// type — both the validator and evaluator import it from this module.
+pub(crate) fn required_param_count(params: &[Param]) -> usize {
+    params.iter().filter(|p| p.default.is_none()).count()
+}
+
 #[derive(Debug, Clone)]
 pub struct DefineBlock {
     pub name: String,
-    pub params: Vec<String>,
+    pub params: Vec<Param>,
     pub body: Vec<Node>,
     pub offset: usize,
 }

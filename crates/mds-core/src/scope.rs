@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::ast::DefineBlock;
+use crate::ast::{DefineBlock, Param};
 use crate::value::Value;
 
 /// Closure captures bundled at function definition time.
@@ -22,7 +22,7 @@ pub struct CapturedScope {
 /// A function definition stored in scope.
 #[derive(Debug, Clone)]
 pub struct FunctionDef {
-    pub params: Vec<String>,
+    pub params: Vec<Param>,
     pub body: Vec<crate::ast::Node>,
     /// Lexical closure captures populated by the resolver at definition time.
     pub captured: CapturedScope,
@@ -201,7 +201,7 @@ mod tests {
         scope.set_function(
             "greet",
             Arc::new(FunctionDef {
-                params: vec!["name".into()],
+                params: vec![crate::ast::Param::required("name")],
                 body: vec![],
                 captured: CapturedScope::default(),
             }),

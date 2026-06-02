@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::ast::{Arg, CondValue, Condition, Expr, ForBlock, IfBlock, IncludeDirective, Node};
+use crate::ast::{
+    required_param_count, Arg, CondValue, Condition, Expr, ForBlock, IfBlock, IncludeDirective,
+    Node,
+};
 use crate::error::MdsError;
-use crate::limits::{MAX_DOT_SEGMENTS, MAX_ELSEIF_BRANCHES};
+use crate::limits::{MAX_DOT_SEGMENTS, MAX_ELSEIF_BRANCHES, MAX_OUTPUT_SIZE};
 use crate::scope::{FunctionDef, Scope};
 use crate::value::Value;
 
@@ -16,9 +19,6 @@ const MAX_LOOP_ITERATIONS: usize = 100_000;
 /// Maximum total iterations across all loops in a single compilation.
 /// This prevents nested loops from multiplying iterations into the billions.
 const MAX_TOTAL_ITERATIONS: usize = 1_000_000;
-
-/// Maximum size of the output string in bytes (50 MB).
-const MAX_OUTPUT_SIZE: usize = 50 * 1024 * 1024;
 
 /// Maximum number of accumulated warnings before further warnings are silently dropped.
 const MAX_WARNINGS: usize = 1_000;
@@ -158,7 +158,7 @@ fn evaluate_expr(
         }
         Expr::Call { name, args } => {
             let resolved_args = resolve_args(args, scope, ctx, 0)?;
-            call_function(name, &resolved_args, scope, ctx)
+            Ok(call_function(name, &resolved_args, scope, ctx)?.to_string())
         }
         Expr::QualifiedCall {
             namespace,
@@ -166,7 +166,7 @@ fn evaluate_expr(
             args,
         } => {
             let resolved_args = resolve_args(args, scope, ctx, 0)?;
-            call_qualified_function(namespace, name, &resolved_args, scope, ctx)
+            Ok(call_qualified_function(namespace, name, &resolved_args, scope, ctx)?.to_string())
         }
         Expr::MemberAccess { object, fields } => {
             // Give a targeted error when the name refers to an imported namespace rather
@@ -203,6 +203,9 @@ fn resolve_args(
     args.iter()
         .map(|arg| match arg {
             Arg::StringLiteral(s) => Ok(Value::String(s.clone())),
+            Arg::NumberLiteral(n) => Ok(Value::Number(*n)),
+            Arg::BooleanLiteral(b) => Ok(Value::Boolean(*b)),
+            Arg::NullLiteral => Ok(Value::Null),
             Arg::Var(name) => scope
                 .get_var(name)
                 .cloned()
@@ -212,8 +215,7 @@ fn resolve_args(
                 args: inner_args,
             } => {
                 let resolved = resolve_args(inner_args, scope, ctx, depth + 1)?;
-                let result = call_function(name, &resolved, scope, ctx)?;
-                Ok(Value::String(result))
+                call_function(name, &resolved, scope, ctx)
             }
             Arg::MemberAccess { object, fields } => resolve_dot_path(object, fields, scope),
         })
@@ -236,6 +238,35 @@ fn prefer_first_error<T>(
     }
 }
 
+/// Convert a `CondValue` (compile-time literal) to a runtime `Value`.
+pub(crate) fn condvalue_to_value(cv: &CondValue) -> Value {
+    match cv {
+        CondValue::String(s) => Value::String(s.clone()),
+        CondValue::Number(n) => Value::Number(*n),
+        CondValue::Boolean(b) => Value::Boolean(*b),
+        CondValue::Null => Value::Null,
+    }
+}
+
+/// Restore the closure captures recorded at function-definition time into the
+/// current scope frame.
+///
+/// Namespaces, sibling functions, and variables captured from the definition
+/// site are written into `scope` before parameter binding so that params shadow
+/// captured vars correctly (params take precedence over closure variables).
+fn restore_captured_scope(func: &FunctionDef, scope: &mut Scope) {
+    for (alias, ns) in &func.captured.namespaces {
+        scope.set_namespace(alias, ns.clone());
+    }
+    // captured.functions are owned FunctionDef (not Arc) — wrap in Arc for scope insertion.
+    for (name, f) in &func.captured.functions {
+        scope.set_function(name, Arc::new(f.clone()));
+    }
+    for (name, val) in &func.captured.vars {
+        scope.set_var(name, val.clone());
+    }
+}
+
 fn invoke_function(
     func: &FunctionDef,
     call_key: &str,
@@ -251,27 +282,32 @@ fn invoke_function(
             "{call_key} (call depth exceeds {MAX_CALL_DEPTH})"
         )));
     }
-    if args.len() != func.params.len() {
-        return Err(MdsError::arity(call_key, func.params.len(), args.len()));
+    let required = required_param_count(&func.params);
+    let total = func.params.len();
+    if args.len() < required || args.len() > total {
+        return Err(MdsError::arity(call_key, required, total, args.len()));
     }
     scope.push();
     // Restore captured lexical scope from definition site so the function body
     // can resolve alias imports, sibling functions, and frontmatter variables
     // from its defining module.
-    for (alias, ns) in &func.captured.namespaces {
-        scope.set_namespace(alias, ns.clone());
-    }
-    // captured.functions are owned FunctionDef (not Arc) — wrap in Arc for scope insertion.
-    for (name, f) in &func.captured.functions {
-        scope.set_function(name, Arc::new(f.clone()));
-    }
-    // Captured vars are restored before param binding so that params shadow
-    // captured vars correctly (params take precedence over closure variables).
-    for (name, val) in &func.captured.vars {
-        scope.set_var(name, val.clone());
-    }
-    for (param, value) in func.params.iter().zip(args.iter()) {
-        scope.set_var(param, value.clone());
+    restore_captured_scope(func, scope);
+    // Bind params index-by-index; fill missing optional params with their defaults.
+    for (i, param) in func.params.iter().enumerate() {
+        let value = if i < args.len() {
+            args[i].clone()
+        } else {
+            // Required params were already checked above; this arm only fires for
+            // optional params not supplied by the caller.
+            let default = param.default.as_ref().ok_or_else(|| {
+                MdsError::syntax(format!(
+                    "internal error: non-optional param '{}' missing but arity check passed",
+                    param.name
+                ))
+            })?;
+            condvalue_to_value(default)
+        };
+        scope.set_var(&param.name, value);
     }
     ctx.call_stack.push(call_key.to_string());
     let result = evaluate_nodes(&func.body, scope, ctx);
@@ -299,12 +335,30 @@ fn call_function(
     args: &[Value],
     scope: &mut Scope,
     ctx: &mut EvalContext,
-) -> Result<String, MdsError> {
-    let func = scope
-        .get_function(name)
-        .ok_or_else(|| MdsError::undefined_fn(name))?
-        .clone();
-    invoke_function(&func, name, args, scope, ctx)
+) -> Result<Value, MdsError> {
+    // User-defined functions take priority (shadowing built-ins).
+    if let Some(func) = scope.get_function(name).cloned() {
+        return invoke_function(&func, name, args, scope, ctx).map(Value::String);
+    }
+    // Fall back to built-ins.
+    if let Some(meta) = crate::builtins::get_builtin(name) {
+        // Defense-in-depth arity check: the validator enforces this at compile
+        // time, but we guard here too so the evaluator is safe when called
+        // without prior validation (e.g. in unit tests or future API consumers).
+        if args.len() < meta.min_args || args.len() > meta.max_args {
+            return Err(MdsError::arity(
+                name,
+                meta.min_args,
+                meta.max_args,
+                args.len(),
+            ));
+        }
+        // Call the handler directly using the meta reference we already hold,
+        // avoiding a second linear scan through BUILTINS that call_builtin
+        // would perform internally.
+        return (meta.handler)(args);
+    }
+    Err(MdsError::undefined_fn(name))
 }
 
 fn call_qualified_function(
@@ -313,7 +367,7 @@ fn call_qualified_function(
     args: &[Value],
     scope: &mut Scope,
     ctx: &mut EvalContext,
-) -> Result<String, MdsError> {
+) -> Result<Value, MdsError> {
     let qualified_name = format!("{namespace}.{name}");
 
     let ns = scope
@@ -326,7 +380,7 @@ fn call_qualified_function(
         .ok_or_else(|| MdsError::undefined_fn(&qualified_name))?
         .clone();
 
-    invoke_function(&func, &qualified_name, args, scope, ctx)
+    invoke_function(&func, &qualified_name, args, scope, ctx).map(Value::String)
 }
 
 /// Compare a runtime `Value` against a literal `CondValue` using strict equality.
@@ -362,6 +416,42 @@ fn evaluate_condition(condition: &Condition, scope: &Scope) -> Result<bool, MdsE
             &resolve_condition_value(condition, scope)?,
             expected,
         )),
+        // Short-circuit And: return false on first false operand.
+        // Parser invariant: And operands are always leaf conditions (parse_and_level calls
+        // parse_simple_condition for each part). The total operand count is bounded at
+        // parse time by MAX_LOGICAL_OPERANDS (limits.rs), preventing adversarial trees.
+        // The debug_assert below is a dev-only canary (elided in release builds): it fires
+        // in tests if a future grammar change introduces And-in-And nesting without updating
+        // this evaluator, surfacing the breakage before it reaches production.
+        Condition::And(operands) => {
+            for operand in operands {
+                debug_assert!(
+                    !matches!(operand, Condition::And(_) | Condition::Or(_)),
+                    "And operand should be a leaf condition, not And/Or"
+                );
+                if !evaluate_condition(operand, scope)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        // Short-circuit Or: return true on first true operand.
+        // Parser invariant: Or operands are always And-level results (And or leaf), never Or.
+        // The total operand count is bounded at parse time by MAX_LOGICAL_OPERANDS (limits.rs).
+        // The debug_assert is a dev-only canary that fires in tests if a future grammar
+        // change introduces Or-in-Or nesting without updating this evaluator.
+        Condition::Or(operands) => {
+            for operand in operands {
+                debug_assert!(
+                    !matches!(operand, Condition::Or(_)),
+                    "Or operand should not be Or (parser flattens same-level operators)"
+                );
+                if evaluate_condition(operand, scope)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
     }
 }
 
@@ -559,7 +649,7 @@ fn evaluate_include(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Condition, DefineBlock, Interpolation, TextNode};
+    use crate::ast::{Condition, DefineBlock, Interpolation, Param, TextNode};
     use std::sync::Arc;
 
     fn text(s: &str) -> Node {
@@ -684,7 +774,7 @@ mod tests {
         // Simulate that here by pre-registering the function in scope.
         let define = DefineBlock {
             name: "greet".to_string(),
-            params: vec!["name".to_string()],
+            params: vec![Param::required("name")],
             body: vec![
                 text("Hello "),
                 Node::Interpolation(Interpolation {
@@ -873,5 +963,155 @@ mod tests {
             err.contains("output") || err.contains("maximum size") || err.contains("50"),
             "error should mention output size limit, got: {err}"
         );
+    }
+
+    // ── Default parameter filling ─────────────────────────────────────────────
+
+    #[test]
+    fn evaluate_default_param_used_when_not_provided() {
+        let result = crate::compile_str(
+            "@define greet(name = \"World\"):\nHello {name}!\n@end\n{greet()}\n",
+        )
+        .unwrap();
+        assert_eq!(result, "Hello World!\n");
+    }
+
+    #[test]
+    fn evaluate_default_param_overridden_when_provided() {
+        let result = crate::compile_str(
+            "@define greet(name = \"World\"):\nHello {name}!\n@end\n{greet(\"Alice\")}\n",
+        )
+        .unwrap();
+        assert_eq!(result, "Hello Alice!\n");
+    }
+
+    #[test]
+    fn evaluate_all_defaults_provided() {
+        let result =
+            crate::compile_str("@define add(a = 1, b = 2):\n{a} {b}\n@end\n{add(10, 20)}\n")
+                .unwrap();
+        assert_eq!(result, "10 20\n");
+    }
+
+    #[test]
+    fn evaluate_mixed_required_and_default() {
+        let result = crate::compile_str(
+            "@define greet(name, greeting = \"Hello\"):\n{greeting} {name}!\n@end\n{greet(\"Bob\")}\n",
+        )
+        .unwrap();
+        assert_eq!(result, "Hello Bob!\n");
+    }
+
+    #[test]
+    fn evaluate_default_param_number() {
+        // condvalue_to_value: CondValue::Number → Value::Number
+        let result = crate::compile_str("@define show(x = 42):\n{x}\n@end\n{show()}\n").unwrap();
+        assert!(
+            result.contains("42"),
+            "Number default should produce its numeric value, got: {result}"
+        );
+    }
+
+    #[test]
+    fn evaluate_default_param_boolean_true() {
+        // condvalue_to_value: CondValue::Boolean(true) → Value::Boolean(true)
+        let result = crate::compile_str(
+            "@define show(flag = true):\n@if flag:\nyes\n@else:\nno\n@end\n@end\n{show()}\n",
+        )
+        .unwrap();
+        assert!(
+            result.contains("yes"),
+            "Boolean true default should be truthy, got: {result}"
+        );
+    }
+
+    #[test]
+    fn evaluate_default_param_boolean_false() {
+        // condvalue_to_value: CondValue::Boolean(false) → Value::Boolean(false)
+        let result = crate::compile_str(
+            "@define show(flag = false):\n@if flag:\nyes\n@else:\nno\n@end\n@end\n{show()}\n",
+        )
+        .unwrap();
+        assert!(
+            result.contains("no"),
+            "Boolean false default should be falsy, got: {result}"
+        );
+    }
+
+    #[test]
+    fn evaluate_default_param_null() {
+        // condvalue_to_value: CondValue::Null → Value::Null (falsy)
+        let result = crate::compile_str(
+            "@define show(x = null):\n@if x:\nset\n@else:\nnull_branch\n@end\n@end\n{show()}\n",
+        )
+        .unwrap();
+        assert!(
+            result.contains("null_branch"),
+            "Null default should be falsy, got: {result}"
+        );
+    }
+
+    #[test]
+    fn evaluate_arity_error_on_too_few_required_args() {
+        let result = crate::compile_str("@define greet(name):\n{name}\n@end\n{greet()}\n");
+        assert!(result.is_err(), "too few required args should fail");
+    }
+
+    // ── Built-in functions integration ────────────────────────────────────────
+
+    #[test]
+    fn builtin_upper_in_interpolation() {
+        let result = crate::compile_str("---\nword: hello\n---\n{upper(word)}\n").unwrap();
+        assert!(
+            result.contains("HELLO"),
+            "upper() should uppercase, got: {result}"
+        );
+    }
+
+    #[test]
+    fn builtin_lower_in_interpolation() {
+        let result = crate::compile_str("---\nword: HELLO\n---\n{lower(word)}\n").unwrap();
+        assert!(
+            result.contains("hello"),
+            "lower() should lowercase, got: {result}"
+        );
+    }
+
+    #[test]
+    fn builtin_length_string_in_interpolation() {
+        let result = crate::compile_str("---\nword: hello\n---\n{length(word)}\n").unwrap();
+        assert!(
+            result.contains('5'),
+            "length of 'hello' should be 5, got: {result}"
+        );
+    }
+
+    #[test]
+    fn builtin_shadowed_by_user_function() {
+        // A user-defined function named 'upper' should shadow the built-in.
+        let src = "@define upper(x):\ncustom\n@end\n{upper(\"anything\")}\n";
+        let result = crate::compile_str(src).unwrap();
+        assert_eq!(
+            result.trim(),
+            "custom",
+            "user-defined upper() should shadow built-in"
+        );
+    }
+
+    #[test]
+    fn builtin_compose_join_split() {
+        let result =
+            crate::compile_str("---\ncsv: a,b,c\n---\n{join(split(csv, \",\"), \" | \")}\n")
+                .unwrap();
+        assert!(
+            result.contains("a | b | c"),
+            "join(split()) should work, got: {result}"
+        );
+    }
+
+    #[test]
+    fn builtin_string_with_number_literal_arg() {
+        let result = crate::compile_str("{string(42)}\n").unwrap();
+        assert_eq!(result.trim(), "42");
     }
 }

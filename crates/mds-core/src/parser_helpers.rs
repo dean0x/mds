@@ -13,11 +13,13 @@
 //!   `unescape_string`, `is_valid_identifier`, `is_directive_token`,
 //!   `strip_leading_newline`, `strip_trailing_newline`
 
+use std::collections::HashSet;
+
 use crate::ast::{
-    Arg, CondValue, Condition, ExportDirective, Expr, ImportDirective, Interpolation, Node,
+    Arg, CondValue, Condition, ExportDirective, Expr, ImportDirective, Interpolation, Node, Param,
 };
 use crate::error::MdsError;
-use crate::limits::{MAX_DOT_SEGMENTS, MAX_NESTING_DEPTH};
+use crate::limits::{MAX_DOT_SEGMENTS, MAX_LOGICAL_OPERANDS, MAX_NESTING_DEPTH};
 
 /// Parse a dot-separated path string (e.g. `"config.debug"`) into a `Vec<String>`.
 ///
@@ -192,13 +194,138 @@ pub(super) fn parse_negation_condition(rest: &str) -> Result<Condition, MdsError
     Ok(Condition::Not(path))
 }
 
+/// Split a string on a 2-character operator (`&&` or `||`) that appears outside
+/// of quoted strings.
+///
+/// Returns a `Vec<&str>` of the parts (not trimmed). Returns a single-element
+/// vec containing the original string if the operator is not found.
+///
+/// # Byte-level scan safety
+///
+/// `&&` and `||` are both ASCII (single-byte), so byte-level scanning is sound
+/// for the same reason as `find_unquoted_operator`.
+fn split_on_unquoted_op<'a>(s: &'a str, op: &str) -> Vec<&'a str> {
+    debug_assert_eq!(op.len(), 2, "op must be a 2-byte ASCII operator");
+    let op_bytes = op.as_bytes();
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut parts: Vec<&'a str> = Vec::new();
+    let mut in_string = false;
+    let mut string_char = b'"';
+    let mut segment_start = 0;
+    let mut i = 0;
+
+    while i < len {
+        let ch = bytes[i];
+        if in_string {
+            if ch == b'\\' && i + 1 < len {
+                i += 2;
+                continue;
+            }
+            if ch == string_char {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == b'"' || ch == b'\'' {
+            in_string = true;
+            string_char = ch;
+            i += 1;
+            continue;
+        }
+        // Check for the operator at position i
+        if i + 1 < len && bytes[i] == op_bytes[0] && bytes[i + 1] == op_bytes[1] {
+            parts.push(&s[segment_start..i]);
+            segment_start = i + 2;
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    parts.push(&s[segment_start..]);
+    parts
+}
+
+/// Count the total number of leaf operands in a condition tree.
+/// Used to enforce MAX_LOGICAL_OPERANDS.
+fn count_leaf_operands(condition: &Condition) -> usize {
+    match condition {
+        Condition::And(ops) | Condition::Or(ops) => ops.iter().map(count_leaf_operands).sum(),
+        _ => 1,
+    }
+}
+
+/// Parse an `@if` condition at the "and-level" — a chain of `&&` separated simple conditions.
+fn parse_and_level(s: &str) -> Result<Condition, MdsError> {
+    let parts = split_on_unquoted_op(s, "&&");
+    if parts.len() == 1 {
+        return parse_simple_condition(parts[0].trim());
+    }
+    let mut operands: Vec<Condition> = Vec::new();
+    for part in &parts {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            return Err(MdsError::syntax("empty operand in '&&' expression"));
+        }
+        operands.push(parse_simple_condition(trimmed)?);
+    }
+    Ok(Condition::And(operands))
+}
+
 /// Parse an `@if` or `@elseif` condition string into a `Condition`.
 ///
 /// Accepted forms:
 /// - `var` / `config.debug` → `Condition::Truthy`
 /// - `!var` / `!config.debug` → `Condition::Not`
 /// - `var == "value"` / `var != 42` → `Condition::Eq` / `Condition::NotEq`
+/// - `a && b` → `Condition::And([a, b])`
+/// - `a || b` → `Condition::Or([a, b])`
+/// - `a && b || c` → `Condition::Or([And([a, b]), c])` (`||` binds less tightly)
 pub(super) fn parse_condition(s: &str) -> Result<Condition, MdsError> {
+    let s = s.trim();
+
+    // Split on `||` first (lower precedence)
+    let or_parts = split_on_unquoted_op(s, "||");
+    if or_parts.len() > 1 {
+        let mut operands: Vec<Condition> = Vec::new();
+        for part in &or_parts {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                return Err(MdsError::syntax("empty operand in '||' expression"));
+            }
+            operands.push(parse_and_level(trimmed)?);
+        }
+        let cond = Condition::Or(operands);
+        let leaf_count = count_leaf_operands(&cond);
+        if leaf_count > MAX_LOGICAL_OPERANDS {
+            return Err(MdsError::syntax(format!(
+                "logical expression has {leaf_count} operands, exceeding maximum of {MAX_LOGICAL_OPERANDS}"
+            )));
+        }
+        return Ok(cond);
+    }
+
+    // No `||` — check for `&&`
+    let cond = parse_and_level(s)?;
+    if let Condition::And(_) = &cond {
+        let leaf_count = count_leaf_operands(&cond);
+        if leaf_count > MAX_LOGICAL_OPERANDS {
+            return Err(MdsError::syntax(format!(
+                "logical expression has {leaf_count} operands, exceeding maximum of {MAX_LOGICAL_OPERANDS}"
+            )));
+        }
+    }
+    Ok(cond)
+}
+
+/// Parse a single (non-compound) `@if` or `@elseif` condition.
+///
+/// Accepted forms:
+/// - `var` / `config.debug` → `Condition::Truthy`
+/// - `!var` / `!config.debug` → `Condition::Not`
+/// - `var == "value"` / `var != 42` → `Condition::Eq` / `Condition::NotEq`
+fn parse_simple_condition(s: &str) -> Result<Condition, MdsError> {
     let s = s.trim();
 
     // Negation prefix
@@ -631,6 +758,18 @@ pub(super) fn parse_args_inner(args_str: &str, depth: usize) -> Result<Vec<Arg>,
     Ok(args)
 }
 
+/// Return `true` if `s` looks like a numeric literal (integer or float,
+/// optionally negative).
+///
+/// Used by [`parse_single_arg_inner`] to distinguish numeric arguments from
+/// dot-paths and identifiers before attempting `s.parse::<f64>()`.
+fn looks_like_number(s: &str) -> bool {
+    s.chars().next().is_some_and(|c| {
+        c.is_ascii_digit()
+            || (c == '-' && s.len() > 1 && s[1..].starts_with(|d: char| d.is_ascii_digit()))
+    })
+}
+
 /// Parse a single argument string into an [`Arg`] node.
 ///
 /// Test-only convenience wrapper around [`parse_single_arg_inner`] that starts
@@ -669,6 +808,22 @@ pub(super) fn parse_single_arg_inner(s: &str, depth: usize) -> Result<Arg, MdsEr
             name,
             args: nested_args,
         })
+    } else if s == "true" {
+        Ok(Arg::BooleanLiteral(true))
+    } else if s == "false" {
+        Ok(Arg::BooleanLiteral(false))
+    } else if s == "null" {
+        Ok(Arg::NullLiteral)
+    } else if looks_like_number(s) {
+        // Numeric literal: integer or float, including negative.
+        // Checked before member access so `3.14` is parsed as a number, not a dot-path.
+        match s.parse::<f64>() {
+            Ok(n) if n.is_finite() => Ok(Arg::NumberLiteral(n)),
+            Ok(_) => Err(MdsError::syntax(format!(
+                "NaN and infinity are not valid argument values: '{s}'"
+            ))),
+            Err(_) => Err(MdsError::syntax(format!("invalid numeric argument: '{s}'"))),
+        }
     } else if s.contains('.') && !s.contains('(') {
         // Object member access as argument: config.name or a.b.c
         let parts: Vec<&str> = s.split('.').collect();
@@ -687,6 +842,163 @@ pub(super) fn parse_single_arg_inner(s: &str, depth: usize) -> Result<Arg, MdsEr
             "invalid function argument: '{s}'"
         )))
     }
+}
+
+/// Split a string on commas that are not inside quoted strings.
+///
+/// Used to split function parameter lists while respecting quoted default values.
+/// Returns a `Vec<String>` of raw tokens (trimmed).
+fn split_on_unquoted_commas(s: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+    let mut string_char = '"';
+    let mut escaped = false;
+
+    for ch in s.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if in_string {
+            match ch {
+                '\\' => {
+                    escaped = true;
+                    current.push(ch);
+                }
+                c if c == string_char => {
+                    current.push(ch);
+                    in_string = false;
+                }
+                _ => current.push(ch),
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => {
+                in_string = true;
+                string_char = ch;
+                current.push(ch);
+            }
+            ',' => {
+                tokens.push(current.trim().to_string());
+                current = String::new();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        tokens.push(trimmed);
+    }
+    tokens
+}
+
+/// Find the first `=` that is not inside a quoted string and not part of `==`.
+///
+/// Returns the byte index of the `=`, or `None` if not found.
+fn find_unquoted_equals(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut string_char = b'"';
+
+    while i < len {
+        let ch = bytes[i];
+        if in_string {
+            if ch == b'\\' && i + 1 < len {
+                i += 2;
+                continue;
+            }
+            if ch == string_char {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == b'"' || ch == b'\'' {
+            in_string = true;
+            string_char = ch;
+            i += 1;
+            continue;
+        }
+        // Single `=` not followed by `=`
+        if ch == b'=' && (i + 1 >= len || bytes[i + 1] != b'=') {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Parse a `@define` parameter list string into a `Vec<Param>`.
+///
+/// Supports:
+/// - `name` — required parameter
+/// - `name = value` — parameter with default value (any `CondValue` literal)
+///
+/// Enforces:
+/// - Required parameters must come before optional (defaulted) parameters
+/// - No duplicate parameter names
+pub(super) fn parse_define_params(params_str: &str, fn_name: &str) -> Result<Vec<Param>, MdsError> {
+    let raw_tokens = split_on_unquoted_commas(params_str);
+    let mut params: Vec<Param> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen_default = false;
+
+    for token in &raw_tokens {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+
+        let param = if let Some(eq_pos) = find_unquoted_equals(token) {
+            let lhs = token[..eq_pos].trim();
+            let rhs = token[eq_pos + 1..].trim();
+
+            if !is_valid_identifier(lhs) {
+                return Err(MdsError::syntax(format!("invalid parameter name: '{lhs}'")));
+            }
+            let default_val = parse_cond_value(rhs).map_err(|_| {
+                MdsError::syntax(format!(
+                    "invalid default value for parameter '{lhs}': '{rhs}' — must be a string, number, boolean, or null"
+                ))
+            })?;
+            seen_default = true;
+            Param {
+                name: lhs.to_string(),
+                default: Some(default_val),
+            }
+        } else {
+            // Required parameter
+            if !is_valid_identifier(token) {
+                return Err(MdsError::syntax(format!(
+                    "invalid parameter name: '{token}'"
+                )));
+            }
+            if seen_default {
+                return Err(MdsError::syntax(format!(
+                    "required parameter '{token}' cannot follow an optional parameter in @define {fn_name}"
+                )));
+            }
+            Param {
+                name: token.to_string(),
+                default: None,
+            }
+        };
+
+        if !seen.insert(param.name.clone()) {
+            return Err(MdsError::syntax(format!(
+                "duplicate parameter name '{}' in @define {fn_name}",
+                param.name
+            )));
+        }
+        params.push(param);
+    }
+
+    Ok(params)
 }
 
 /// Single-pass unescape for string literals.
