@@ -14,7 +14,7 @@
 //!   `strip_leading_newline`, `strip_trailing_newline`
 
 use crate::ast::{
-    Arg, CondValue, Condition, ExportDirective, Expr, ImportDirective, Interpolation, Node,
+    Arg, CondValue, Condition, ExportDirective, Expr, ImportDirective, Interpolation, Node, Param,
 };
 use crate::error::MdsError;
 use crate::limits::{MAX_DOT_SEGMENTS, MAX_NESTING_DEPTH};
@@ -706,6 +706,170 @@ pub(super) fn parse_single_arg_inner(s: &str, depth: usize) -> Result<Arg, MdsEr
             "invalid function argument: '{s}'"
         )))
     }
+}
+
+/// Split a string on commas that are not inside quoted strings.
+///
+/// Used to split function parameter lists while respecting quoted default values.
+/// Returns a `Vec<String>` of raw tokens (trimmed).
+fn split_on_unquoted_commas(s: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+    let mut string_char = '"';
+    let mut escaped = false;
+
+    for ch in s.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if in_string {
+            match ch {
+                '\\' => {
+                    escaped = true;
+                    current.push(ch);
+                }
+                c if c == string_char => {
+                    current.push(ch);
+                    in_string = false;
+                }
+                _ => current.push(ch),
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => {
+                in_string = true;
+                string_char = ch;
+                current.push(ch);
+            }
+            ',' => {
+                tokens.push(current.trim().to_string());
+                current = String::new();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        tokens.push(trimmed);
+    }
+    tokens
+}
+
+/// Find the first `=` that is not inside a quoted string and not part of `==`.
+///
+/// Returns the byte index of the `=`, or `None` if not found.
+fn find_unquoted_equals(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut string_char = b'"';
+
+    while i < len {
+        let ch = bytes[i];
+        if in_string {
+            if ch == b'\\' && i + 1 < len {
+                i += 2;
+                continue;
+            }
+            if ch == string_char {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == b'"' || ch == b'\'' {
+            in_string = true;
+            string_char = ch;
+            i += 1;
+            continue;
+        }
+        // Single `=` not followed by `=`
+        if ch == b'=' && (i + 1 >= len || bytes[i + 1] != b'=') {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Parse a `@define` parameter list string into a `Vec<Param>`.
+///
+/// Supports:
+/// - `name` — required parameter
+/// - `name = value` — parameter with default value (any `CondValue` literal)
+///
+/// Enforces:
+/// - Required parameters must come before optional (defaulted) parameters
+/// - No duplicate parameter names
+pub(super) fn parse_define_params(
+    params_str: &str,
+    fn_name: &str,
+) -> Result<Vec<Param>, crate::error::MdsError> {
+    use std::collections::HashSet;
+
+    let raw_tokens = split_on_unquoted_commas(params_str);
+    let mut params: Vec<Param> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen_default = false;
+
+    for token in &raw_tokens {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+
+        let param = if let Some(eq_pos) = find_unquoted_equals(token) {
+            let lhs = token[..eq_pos].trim();
+            let rhs = token[eq_pos + 1..].trim();
+
+            if !is_valid_identifier(lhs) {
+                return Err(crate::error::MdsError::syntax(format!(
+                    "invalid parameter name: '{lhs}'"
+                )));
+            }
+            let default_val = parse_cond_value(rhs).map_err(|_| {
+                crate::error::MdsError::syntax(format!(
+                    "invalid default value for parameter '{lhs}': '{rhs}' — must be a string, number, boolean, or null"
+                ))
+            })?;
+            seen_default = true;
+            Param {
+                name: lhs.to_string(),
+                default: Some(default_val),
+            }
+        } else {
+            // Required parameter
+            if !is_valid_identifier(token) {
+                return Err(crate::error::MdsError::syntax(format!(
+                    "invalid parameter name: '{token}'"
+                )));
+            }
+            if seen_default {
+                return Err(crate::error::MdsError::syntax(format!(
+                    "required parameter '{token}' cannot follow an optional parameter in @define {fn_name}"
+                )));
+            }
+            Param {
+                name: token.to_string(),
+                default: None,
+            }
+        };
+
+        if !seen.insert(param.name.clone()) {
+            return Err(crate::error::MdsError::syntax(format!(
+                "duplicate parameter name '{}' in @define {fn_name}",
+                param.name
+            )));
+        }
+        params.push(param);
+    }
+
+    Ok(params)
 }
 
 /// Single-pass unescape for string literals.

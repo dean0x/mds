@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::ast::{Arg, CondValue, Condition, Expr, ForBlock, IfBlock, IncludeDirective, Node};
+use crate::ast::{
+    Arg, CondValue, Condition, Expr, ForBlock, IfBlock, IncludeDirective, Node, Param,
+};
 use crate::error::MdsError;
 use crate::limits::{MAX_DOT_SEGMENTS, MAX_ELSEIF_BRANCHES};
 use crate::scope::{FunctionDef, Scope};
@@ -238,6 +240,21 @@ fn prefer_first_error<T>(
     }
 }
 
+/// Convert a `CondValue` (compile-time literal) to a runtime `Value`.
+pub(crate) fn condvalue_to_value(cv: &CondValue) -> Value {
+    match cv {
+        CondValue::String(s) => Value::String(s.clone()),
+        CondValue::Number(n) => Value::Number(*n),
+        CondValue::Boolean(b) => Value::Boolean(*b),
+        CondValue::Null => Value::Null,
+    }
+}
+
+/// Count required (no-default) parameters in a param list.
+fn required_param_count(params: &[Param]) -> usize {
+    params.iter().filter(|p| p.default.is_none()).count()
+}
+
 fn invoke_function(
     func: &FunctionDef,
     call_key: &str,
@@ -253,13 +270,10 @@ fn invoke_function(
             "{call_key} (call depth exceeds {MAX_CALL_DEPTH})"
         )));
     }
-    if args.len() != func.params.len() {
-        return Err(MdsError::arity(
-            call_key,
-            func.params.len(),
-            func.params.len(),
-            args.len(),
-        ));
+    let required = required_param_count(&func.params);
+    let total = func.params.len();
+    if args.len() < required || args.len() > total {
+        return Err(MdsError::arity(call_key, required, total, args.len()));
     }
     scope.push();
     // Restore captured lexical scope from definition site so the function body
@@ -277,8 +291,21 @@ fn invoke_function(
     for (name, val) in &func.captured.vars {
         scope.set_var(name, val.clone());
     }
-    for (param, value) in func.params.iter().zip(args.iter()) {
-        scope.set_var(param, value.clone());
+    // Bind params index-by-index; fill missing optional params with their defaults.
+    for (i, param) in func.params.iter().enumerate() {
+        let value = if i < args.len() {
+            args[i].clone()
+        } else {
+            // Required params were already checked above; this arm only fires for
+            // optional params not supplied by the caller.
+            condvalue_to_value(
+                param
+                    .default
+                    .as_ref()
+                    .expect("BUG: non-optional param missing but arity check passed"),
+            )
+        };
+        scope.set_var(&param.name, value);
     }
     ctx.call_stack.push(call_key.to_string());
     let result = evaluate_nodes(&func.body, scope, ctx);
@@ -691,7 +718,7 @@ mod tests {
         // Simulate that here by pre-registering the function in scope.
         let define = DefineBlock {
             name: "greet".to_string(),
-            params: vec!["name".to_string()],
+            params: vec![crate::ast::Param::required("name")],
             body: vec![
                 text("Hello "),
                 Node::Interpolation(Interpolation {
@@ -880,5 +907,48 @@ mod tests {
             err.contains("output") || err.contains("maximum size") || err.contains("50"),
             "error should mention output size limit, got: {err}"
         );
+    }
+
+    // ── Default parameter filling ─────────────────────────────────────────────
+
+    #[test]
+    fn evaluate_default_param_used_when_not_provided() {
+        let result = crate::compile_str(
+            "@define greet(name = \"World\"):\nHello {name}!\n@end\n{greet()}\n",
+        )
+        .unwrap();
+        assert_eq!(result, "Hello World!\n");
+    }
+
+    #[test]
+    fn evaluate_default_param_overridden_when_provided() {
+        let result = crate::compile_str(
+            "@define greet(name = \"World\"):\nHello {name}!\n@end\n{greet(\"Alice\")}\n",
+        )
+        .unwrap();
+        assert_eq!(result, "Hello Alice!\n");
+    }
+
+    #[test]
+    fn evaluate_all_defaults_provided() {
+        let result =
+            crate::compile_str("@define add(a = 1, b = 2):\n{a} {b}\n@end\n{add(10, 20)}\n")
+                .unwrap();
+        assert_eq!(result, "10 20\n");
+    }
+
+    #[test]
+    fn evaluate_mixed_required_and_default() {
+        let result = crate::compile_str(
+            "@define greet(name, greeting = \"Hello\"):\n{greeting} {name}!\n@end\n{greet(\"Bob\")}\n",
+        )
+        .unwrap();
+        assert_eq!(result, "Hello Bob!\n");
+    }
+
+    #[test]
+    fn evaluate_arity_error_on_too_few_required_args() {
+        let result = crate::compile_str("@define greet(name):\n{name}\n@end\n{greet()}\n");
+        assert!(result.is_err(), "too few required args should fail");
     }
 }

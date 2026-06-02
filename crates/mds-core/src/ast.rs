@@ -180,10 +180,32 @@ pub struct ForBlock {
     pub offset: usize,
 }
 
+/// A parameter in a `@define` function definition.
+///
+/// Parameters may have an optional default value. Parameters without defaults
+/// must appear before any parameter with a default.
+#[derive(Debug, Clone)]
+pub struct Param {
+    /// The parameter name (a valid identifier).
+    pub name: String,
+    /// Optional default value, parsed as a `CondValue` at definition time.
+    pub default: Option<CondValue>,
+}
+
+impl Param {
+    /// Convenience constructor for a required parameter with no default value.
+    pub fn required(name: impl Into<String>) -> Self {
+        Param {
+            name: name.into(),
+            default: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DefineBlock {
     pub name: String,
-    pub params: Vec<String>,
+    pub params: Vec<Param>,
     pub body: Vec<Node>,
     pub offset: usize,
 }

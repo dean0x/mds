@@ -1,7 +1,12 @@
-use crate::ast::{Arg, Condition, Expr, Node};
+use crate::ast::{Arg, Condition, Expr, Node, Param};
 use crate::error::MdsError;
 use crate::scope::Scope;
 use crate::value::Value;
+
+/// Count required (no-default) parameters in a param list.
+fn required_param_count(params: &[Param]) -> usize {
+    params.iter().filter(|p| p.default.is_none()).count()
+}
 
 /// Validate semantic correctness of a module AST.
 /// Checks variable references, function arity, and type constraints
@@ -105,7 +110,7 @@ fn validate_node(node: &Node, scope: &mut Scope, file: &str, source: &str) -> Re
                 // Use an empty array as the placeholder for each parameter so
                 // that `@for item in param:` inside the body passes the type
                 // check. The actual type is enforced at call time by the evaluator.
-                scope.set_var(param, Value::Array(vec![]));
+                scope.set_var(&param.name, Value::Array(vec![]));
             }
             let result = validate(&def.body, scope, file, source);
             let _ = scope.pop(); // Cannot fail — we just pushed
@@ -166,11 +171,13 @@ fn validate_expr(
             let func = scope
                 .get_function(name)
                 .ok_or_else(|| MdsError::undefined_fn_at(name, file, source, offset, len))?;
-            if args.len() != func.params.len() {
+            let required = required_param_count(&func.params);
+            let total = func.params.len();
+            if args.len() < required || args.len() > total {
                 return Err(MdsError::arity_at(
                     name,
-                    func.params.len(),
-                    func.params.len(),
+                    required,
+                    total,
                     args.len(),
                     file,
                     source,
@@ -193,11 +200,13 @@ fn validate_expr(
                 .functions
                 .get(name)
                 .ok_or_else(|| MdsError::undefined_fn_at(&qualified, file, source, offset, len))?;
-            if args.len() != func.params.len() {
+            let required = required_param_count(&func.params);
+            let total = func.params.len();
+            if args.len() < required || args.len() > total {
                 return Err(MdsError::arity_at(
                     &qualified,
-                    func.params.len(),
-                    func.params.len(),
+                    required,
+                    total,
                     args.len(),
                     file,
                     source,
@@ -250,11 +259,13 @@ fn validate_var_args(
                 let func = scope.get_function(name).ok_or_else(|| {
                     MdsError::undefined_fn_at(name, file, source, offset, name.len())
                 })?;
-                if inner_args.len() != func.params.len() {
+                let required = required_param_count(&func.params);
+                let total = func.params.len();
+                if inner_args.len() < required || inner_args.len() > total {
                     return Err(MdsError::arity_at(
                         name,
-                        func.params.len(),
-                        func.params.len(),
+                        required,
+                        total,
                         inner_args.len(),
                         file,
                         source,
@@ -283,7 +294,7 @@ mod tests {
         })];
         let define = Node::Define(crate::ast::DefineBlock {
             name: "greet".to_string(),
-            params: vec!["name".to_string()],
+            params: vec![crate::ast::Param::required("name")],
             body,
             offset: 0,
         });
@@ -305,7 +316,7 @@ mod tests {
         })];
         let define = Node::Define(crate::ast::DefineBlock {
             name: "greet".to_string(),
-            params: vec!["name".to_string()],
+            params: vec![crate::ast::Param::required("name")],
             body,
             offset: 0,
         });

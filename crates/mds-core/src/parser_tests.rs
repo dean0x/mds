@@ -756,3 +756,159 @@ fn arity_range_min_max() {
         "should display range '1-3', got: {msg}"
     );
 }
+
+// ── Default parameter parsing ─────────────────────────────────────────────
+
+#[test]
+fn parse_define_required_params() {
+    let src = "@define greet(name):\nHello {name}!\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert_eq!(def.params.len(), 1);
+        assert_eq!(def.params[0].name, "name");
+        assert!(def.params[0].default.is_none());
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+#[test]
+fn parse_define_default_string() {
+    let src = "@define greet(name = \"World\"):\nHello {name}!\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert_eq!(def.params.len(), 1);
+        assert_eq!(def.params[0].name, "name");
+        assert!(matches!(
+            &def.params[0].default,
+            Some(crate::ast::CondValue::String(s)) if s == "World"
+        ));
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+#[test]
+fn parse_define_default_number() {
+    let src = "@define repeat(n = 3):\n{n}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert_eq!(def.params.len(), 1);
+        assert!(
+            matches!(&def.params[0].default, Some(crate::ast::CondValue::Number(n)) if *n == 3.0)
+        );
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+#[test]
+fn parse_define_default_negative_number() {
+    let src = "@define offset(n = -1):\n{n}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert!(
+            matches!(&def.params[0].default, Some(crate::ast::CondValue::Number(n)) if *n == -1.0)
+        );
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+#[test]
+fn parse_define_default_bool() {
+    let src = "@define toggle(flag = true):\n{flag}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert!(matches!(
+            &def.params[0].default,
+            Some(crate::ast::CondValue::Boolean(true))
+        ));
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+#[test]
+fn parse_define_default_null() {
+    let src = "@define maybe(x = null):\n{x}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert!(matches!(
+            &def.params[0].default,
+            Some(crate::ast::CondValue::Null)
+        ));
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+#[test]
+fn parse_define_default_string_with_comma() {
+    let src = "@define greet(sep = \"a, b\"):\n{sep}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert!(matches!(
+            &def.params[0].default,
+            Some(crate::ast::CondValue::String(s)) if s == "a, b"
+        ));
+    } else {
+        panic!("expected Define node");
+    }
+}
+
+#[test]
+fn parse_define_required_after_optional_rejected() {
+    let src = "@define bad(a = \"x\", b):\n{a}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let result = parse_with_ctx(&tokens, "", "");
+    assert!(
+        result.is_err(),
+        "required param after optional must be rejected"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("required") || err.contains("optional") || err.contains("cannot follow"),
+        "error should mention ordering constraint, got: {err}"
+    );
+}
+
+#[test]
+fn parse_define_duplicate_param_rejected() {
+    let src = "@define bad(a, a):\n{a}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let result = parse_with_ctx(&tokens, "", "");
+    assert!(result.is_err(), "duplicate param name must be rejected");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("duplicate"),
+        "error should mention duplicate, got: {err}"
+    );
+}
+
+#[test]
+fn parse_define_mixed_required_and_optional() {
+    let src = "@define greet(name, greeting = \"Hello\"):\n{greeting} {name}!\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let module = parse_with_ctx(&tokens, "", "").unwrap();
+    if let Node::Define(def) = &module.body[0] {
+        assert_eq!(def.params.len(), 2);
+        assert!(
+            def.params[0].default.is_none(),
+            "first param should be required"
+        );
+        assert!(
+            def.params[1].default.is_some(),
+            "second param should have default"
+        );
+    } else {
+        panic!("expected Define node");
+    }
+}
