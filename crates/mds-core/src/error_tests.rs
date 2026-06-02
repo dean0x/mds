@@ -298,7 +298,7 @@ fn builtin_error_display_and_serialize() {
         "builtin error should contain the message, got: {msg}"
     );
     let s = e.serialize();
-    assert_eq!(s.code, "mds::builtin_type_error");
+    assert_eq!(s.code, "mds::builtin");
     assert!(
         s.span.is_none(),
         "builtin error without span should have None span"

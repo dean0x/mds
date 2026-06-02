@@ -301,7 +301,7 @@ MDS supports three import styles:
 
 **Rules:**
 
-- Relative paths only (no bare module names in v0.1)
+- Relative paths only (no bare module names)
 - `as alias` namespaces all exports: access via `{alias.name}`
 - Without alias (merge): exports enter current scope (name collision → compilation error)
 - Selective: only listed names are brought into scope

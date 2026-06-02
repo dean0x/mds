@@ -139,10 +139,10 @@ pub enum MdsError {
     },
 
     #[error("{message}")]
-    #[diagnostic(code(mds::builtin_type_error))]
+    #[diagnostic(code(mds::builtin))]
     BuiltinError {
         message: String,
-        #[label("type mismatch")]
+        #[label("built-in function error")]
         span: Option<SourceSpan>,
         #[source_code]
         src: Option<Arc<miette::NamedSource<String>>>,
