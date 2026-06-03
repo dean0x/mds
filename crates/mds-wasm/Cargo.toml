@@ -35,7 +35,7 @@ mds = { package = "mds-core", path = "../mds-core", version = "0.1.0" }
 wasm-bindgen-test = { workspace = true }
 
 [package.metadata.wasm-pack.profile.release]
-# -Oz: optimize for size. Rust 1.88+ emits post-MVP WASM features (bulk memory,
-# mutable globals, sign extension) that wasm-opt rejects by default.
+# -Oz: optimize for size. Rust 1.88+ emits post-MVP WASM features that wasm-opt
+# rejects by default — each must be explicitly enabled.
 # Requires Binaryen: CI uses phi-ag/setup-binaryen; locally `brew install binaryen`.
-wasm-opt = ["-Oz", "--all-features"]
+wasm-opt = ["-Oz", "--enable-bulk-memory", "--enable-sign-ext", "--enable-nontrapping-float-to-int", "--enable-mutable-globals"]
