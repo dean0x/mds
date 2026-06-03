@@ -134,8 +134,8 @@ The `release.yml` workflow runs, in order:
   `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`,
   `aarch64-unknown-linux-gnu`, `aarch64-unknown-linux-musl`,
   `x86_64-pc-windows-msvc`. Linux musl/arm builds use napi's `--use-napi-cross`.
-- `wasm-opt` is enabled with `-Oz` (`crates/mds-wasm/Cargo.toml`); CI installs
-  Binaryen v129 via `phi-ag/setup-binaryen`. Local WASM builds require Binaryen:
-  `brew install binaryen` (macOS) / `apt install binaryen` (Linux).
+- `wasm-opt = ["-Oz", "--enable-bulk-memory"]` is enabled in `crates/mds-wasm/Cargo.toml`; CI installs
+  Binaryen v129 via `phi-ag/setup-binaryen`. Local builds need Binaryen separately
+  (`brew install binaryen` / `apt install binaryen`).
 - Platform packages are generated **in CI only** — they cannot be validated with a
   local `npm pack`; use the dry-run workflow above instead.
