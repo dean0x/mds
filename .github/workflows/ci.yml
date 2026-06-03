@@ -56,8 +56,6 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - uses: ./.github/actions/setup-wasm
-      - name: Verify wasm-opt
-        run: wasm-opt --version
       - name: Build (nodejs + web targets)
         run: |
           wasm-pack build crates/mds-wasm --target nodejs --out-dir pkg

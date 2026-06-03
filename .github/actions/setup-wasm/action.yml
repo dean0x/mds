@@ -12,3 +12,6 @@ runs:
     - uses: phi-ag/setup-binaryen@f7f99985a69ad20f08b12ad725865b14a7f875a4  # v1.0.8
       with:
         version: 129
+    - name: Verify wasm-opt
+      shell: bash
+      run: wasm-opt --version
