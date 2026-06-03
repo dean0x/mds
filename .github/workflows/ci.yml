@@ -69,7 +69,7 @@ jobs:
           wasm-pack build crates/mds-wasm --target web --out-dir pkg-web
       - name: Test (node)
         run: wasm-pack test --node crates/mds-wasm
-      - name: Test (node, release profile — verifies wasm-opt output)
+      - name: Test (node, release — verifies wasm-opt)
         run: wasm-pack test --node --release crates/mds-wasm
       - name: Report WASM binary sizes
         if: always()
