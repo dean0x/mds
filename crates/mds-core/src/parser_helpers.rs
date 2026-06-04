@@ -202,7 +202,8 @@ pub(super) fn parse_expr_inner(s: &str) -> Result<Expr, MdsError> {
             let args = parse_args(args_str)?;
             return Ok(Expr::Call { name, args });
         } else if let Some(dot_pos) = first_dot {
-            // dot before paren: qualified call
+            // dot before paren: qualified call — or falls through to member-access check below
+            // if there is no '(' after the dot.
             let rest_after_dot = &s[dot_pos + 1..];
             if let Some(paren_in_rest) = rest_after_dot.find('(') {
                 let namespace = s[..dot_pos].trim().to_string();

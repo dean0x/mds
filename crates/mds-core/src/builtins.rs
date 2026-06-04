@@ -265,7 +265,7 @@ fn builtin_split(args: &[Value]) -> Result<Value, MdsError> {
     for piece in s.split(sep) {
         if parts.len() >= MAX_ARRAY_ELEMENTS {
             return Err(MdsError::resource_limit(format!(
-                "split() produced more than {} elements, exceeding maximum",
+                "split() result exceeds maximum of {} elements",
                 MAX_ARRAY_ELEMENTS
             )));
         }

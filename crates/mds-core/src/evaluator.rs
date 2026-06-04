@@ -414,12 +414,10 @@ fn values_equal_runtime(lhs: &Value, rhs: &Value) -> bool {
 ///
 /// `scope` is `&mut` because conditions can now contain arbitrary expressions
 /// (e.g. function calls such as `func(a) == func(b)`), and `evaluate_expr`
-/// requires mutable scope access to invoke built-in functions. This means
-/// conditions are no longer guaranteed to be side-effect-free: a function
-/// call in a condition may mutate scope state (e.g. updating a counter or
-/// cache). Short-circuit evaluation (`&&`, `||`) limits when operands are
-/// evaluated — the right-hand side of `&&` is skipped on a false left-hand
-/// side, and vice-versa for `||`.
+/// requires mutable scope access for function dispatch. Short-circuit
+/// evaluation (`&&`, `||`) limits which operands are evaluated — the
+/// right-hand side of `&&` is skipped on a false left-hand side, and
+/// vice-versa for `||`.
 fn evaluate_condition(
     condition: &Condition,
     scope: &mut Scope,

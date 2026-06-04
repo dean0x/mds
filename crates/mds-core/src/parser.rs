@@ -53,6 +53,18 @@ struct Parser<'a> {
     source: &'a str,
 }
 
+/// Build the appropriate parse error when a directive's trailing `:` is missing.
+///
+/// Produces a targeted "unterminated string literal" message when the input contains
+/// an unclosed quote, or a generic "must end with ':'" message otherwise.
+fn directive_colon_error(directive: &str, rest: &str) -> MdsError {
+    if has_unterminated_string(rest) {
+        MdsError::syntax(format!("unterminated string literal in {directive} condition"))
+    } else {
+        MdsError::syntax(format!("{directive} directive must end with ':'"))
+    }
+}
+
 impl Parser<'_> {
     fn parse_module(&mut self) -> Result<Module, MdsError> {
         let frontmatter = self.parse_frontmatter();
@@ -243,14 +255,8 @@ impl Parser<'_> {
         self.enter_block()?;
 
         let trimmed = rest.trim();
-        let condition_str = strip_trailing_directive_colon(trimmed).ok_or_else(|| {
-            // Give a more targeted error when the issue is an unterminated string literal
-            if has_unterminated_string(trimmed) {
-                MdsError::syntax("unterminated string literal in @if condition")
-            } else {
-                MdsError::syntax("@if directive must end with ':'")
-            }
-        })?;
+        let condition_str = strip_trailing_directive_colon(trimmed)
+            .ok_or_else(|| directive_colon_error("@if", trimmed))?;
 
         let condition = parse_condition(condition_str)?;
 
@@ -309,13 +315,7 @@ impl Parser<'_> {
                 .expect("loop guard guarantees @elseif prefix")
                 .trim();
             let elseif_cond_str = strip_trailing_directive_colon(elseif_rest)
-                .ok_or_else(|| {
-                    if has_unterminated_string(elseif_rest) {
-                        MdsError::syntax("unterminated string literal in @elseif condition")
-                    } else {
-                        MdsError::syntax("@elseif directive must end with ':'")
-                    }
-                })?;
+                .ok_or_else(|| directive_colon_error("@elseif", elseif_rest))?;
 
             let elseif_cond = parse_condition(elseif_cond_str)?;
             let elseif_body = self.parse_body(&["@else:", "@end"], &["@elseif "])?;
