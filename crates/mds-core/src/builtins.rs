@@ -261,7 +261,10 @@ fn builtin_split(args: &[Value]) -> Result<Value, MdsError> {
     // subsequent @for iteration or join() calls. Check incrementally so the
     // limit fires before the full allocation completes (important in WASM where
     // a large input split on a single byte could otherwise peak at ~240 MB).
-    let mut parts: Vec<Value> = Vec::new();
+    // Capacity hint of 64 avoids the first ~6 doubling reallocations for
+    // typical inputs without over-allocating for huge arrays where the limit
+    // guard fires early anyway.
+    let mut parts: Vec<Value> = Vec::with_capacity(64);
     for piece in s.split(sep) {
         if parts.len() >= MAX_ARRAY_ELEMENTS {
             return Err(MdsError::resource_limit(format!(
@@ -382,7 +385,11 @@ fn builtin_join(args: &[Value]) -> Result<Value, MdsError> {
     let sep = require_string_at(args, 1, "join", "second")?;
     // Single-pass fold: validate element types and build output string without
     // an intermediate Vec<String> allocation, halving transient memory use.
-    let mut out = String::new();
+    // Pre-estimate capacity (10 chars/element + separator) capped at the output
+    // limit so we avoid reallocations on typical arrays without over-allocating
+    // for pathological inputs.
+    let estimated = arr.len().saturating_mul(10 + sep.len());
+    let mut out = String::with_capacity(estimated.min(MAX_OUTPUT_SIZE));
     for (i, v) in arr.iter().enumerate() {
         match v {
             Value::String(s) => {
