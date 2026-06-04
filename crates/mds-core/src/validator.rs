@@ -254,9 +254,7 @@ fn validate_condition_expr(
 
 /// Resolve a call by name and validate arity.
 ///
-/// Returns `Ok(true)` if the call resolved to a builtin (so the caller can
-/// skip further variable-existence checks on its arguments), `Ok(false)` if
-/// it resolved to a user-defined function, or an error if the function is
+/// Returns `Ok(())` if the call is valid, or an error if the function is
 /// unknown or the arity is out of range.
 ///
 /// `len` is the span length used for error diagnostics — callers pass the
@@ -270,7 +268,7 @@ fn validate_call_arity(
     source: &str,
     offset: usize,
     len: usize,
-) -> Result<bool, MdsError> {
+) -> Result<(), MdsError> {
     if let Some(func) = scope.get_function(name) {
         let required = required_param_count(&func.params);
         let total = func.params.len();
@@ -279,7 +277,7 @@ fn validate_call_arity(
                 name, required, total, arg_count, file, source, offset, len,
             ));
         }
-        Ok(false)
+        Ok(())
     } else if let Some(meta) = crate::builtins::get_builtin(name) {
         if arg_count < meta.min_args || arg_count > meta.max_args {
             return Err(MdsError::arity_at(
@@ -293,7 +291,7 @@ fn validate_call_arity(
                 len,
             ));
         }
-        Ok(true)
+        Ok(())
     } else {
         Err(MdsError::undefined_fn_at(name, file, source, offset, len))
     }
@@ -323,13 +321,7 @@ fn validate_expr(
                 .map(|_| ())
         }
         Expr::Call { name, args } => {
-            let is_builtin =
-                validate_call_arity(name, args.len(), scope, file, source, offset, len)?;
-            if is_builtin {
-                // Built-in args may be any type — no variable-existence check needed.
-                // However, we still validate any nested calls or variable references within args.
-                return validate_var_args(args, scope, file, source, offset, 0);
-            }
+            validate_call_arity(name, args.len(), scope, file, source, offset, len)?;
             validate_var_args(args, scope, file, source, offset, 0)
         }
         Expr::QualifiedCall {

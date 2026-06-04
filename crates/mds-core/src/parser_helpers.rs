@@ -190,14 +190,11 @@ pub(super) fn parse_expr_inner(s: &str) -> Result<Expr, MdsError> {
                 .ok_or_else(|| MdsError::syntax("unclosed parenthesis in directive expression"))?;
             let args = parse_args(args_str)?;
             return Ok(Expr::Call { name, args });
-        } else {
-            // dot before paren: qualified call or member access
-            let dot_pos = first_dot.unwrap();
+        } else if let Some(dot_pos) = first_dot {
+            // dot before paren: qualified call
             let rest_after_dot = &s[dot_pos + 1..];
-            if rest_after_dot.contains('(') {
-                // Qualified call: ns.func(args)
+            if let Some(paren_in_rest) = rest_after_dot.find('(') {
                 let namespace = s[..dot_pos].trim().to_string();
-                let paren_in_rest = rest_after_dot.find('(').unwrap();
                 let name = rest_after_dot[..paren_in_rest].trim().to_string();
                 if !is_valid_identifier(&namespace) {
                     return Err(MdsError::syntax(format!(

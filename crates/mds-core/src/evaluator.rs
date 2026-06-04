@@ -410,15 +410,6 @@ fn values_equal_runtime(lhs: &Value, rhs: &Value) -> bool {
     }
 }
 
-/// Evaluate a condition expression to a runtime `Value`.
-fn evaluate_condition_value(
-    expr: &Expr,
-    scope: &mut Scope,
-    ctx: &mut EvalContext,
-) -> Result<Value, MdsError> {
-    evaluate_expr(expr, scope, ctx)
-}
-
 /// Evaluate a condition to a boolean, resolving expressions from scope.
 fn evaluate_condition(
     condition: &Condition,
@@ -426,16 +417,16 @@ fn evaluate_condition(
     ctx: &mut EvalContext,
 ) -> Result<bool, MdsError> {
     match condition {
-        Condition::Truthy(expr) => Ok(evaluate_condition_value(expr, scope, ctx)?.is_truthy()),
-        Condition::Not(expr) => Ok(!evaluate_condition_value(expr, scope, ctx)?.is_truthy()),
+        Condition::Truthy(expr) => Ok(evaluate_expr(expr, scope, ctx)?.is_truthy()),
+        Condition::Not(expr) => Ok(!evaluate_expr(expr, scope, ctx)?.is_truthy()),
         Condition::Eq(lhs, rhs) => {
-            let lhs_val = evaluate_condition_value(lhs, scope, ctx)?;
-            let rhs_val = evaluate_condition_value(rhs, scope, ctx)?;
+            let lhs_val = evaluate_expr(lhs, scope, ctx)?;
+            let rhs_val = evaluate_expr(rhs, scope, ctx)?;
             Ok(values_equal_runtime(&lhs_val, &rhs_val))
         }
         Condition::NotEq(lhs, rhs) => {
-            let lhs_val = evaluate_condition_value(lhs, scope, ctx)?;
-            let rhs_val = evaluate_condition_value(rhs, scope, ctx)?;
+            let lhs_val = evaluate_expr(lhs, scope, ctx)?;
+            let rhs_val = evaluate_expr(rhs, scope, ctx)?;
             Ok(!values_equal_runtime(&lhs_val, &rhs_val))
         }
         // Short-circuit And: return false on first false operand.
