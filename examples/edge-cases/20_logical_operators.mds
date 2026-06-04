@@ -1,0 +1,77 @@
+---
+admin: true
+active: true
+guest: false
+blocked: false
+score: 85
+name: "Alice"
+empty: ""
+---
+
+AND both true:
+@if admin && active:
+PASS: admin AND active
+@else:
+FAIL
+@end
+
+AND one false:
+@if admin && guest:
+FAIL
+@else:
+PASS: admin AND guest is false
+@end
+
+OR one true:
+@if guest || active:
+PASS: guest OR active
+@else:
+FAIL
+@end
+
+OR both false:
+@if guest || blocked:
+FAIL
+@else:
+PASS: neither guest nor blocked
+@end
+
+PRECEDENCE (AND binds tighter):
+@if guest && blocked || admin:
+PASS: (false && false) || true = true
+@else:
+FAIL
+@end
+
+@if admin || guest && blocked:
+PASS: true || (false && false) = true
+@else:
+FAIL
+@end
+
+THREE-WAY AND:
+@if admin && active && name:
+PASS: all three truthy
+@else:
+FAIL
+@end
+
+THREE-WAY OR:
+@if guest || blocked || active:
+PASS: at least one truthy
+@else:
+FAIL
+@end
+
+MIXED with falsy:
+@if empty || name:
+PASS: empty is falsy, name is truthy
+@else:
+FAIL
+@end
+
+@if empty && name:
+FAIL
+@else:
+PASS: empty && anything is false
+@end

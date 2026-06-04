@@ -1,0 +1,38 @@
+---
+---
+
+@define greet(name, greeting = "Hello"):
+{greeting}, {name}!
+@end
+
+@define badge(label, color = "blue", size = 3):
+[{color}:{label}:{size}]
+@end
+
+@define status(msg, level = "info", prefix = ">>"):
+{prefix} [{level}] {msg}
+@end
+
+ALL DEFAULTS:
+{greet("Alice")}
+
+OVERRIDE GREETING:
+{greet("Bob", "Hey")}
+
+BADGE DEFAULTS:
+{badge("v0.2.0")}
+
+BADGE PARTIAL OVERRIDE:
+{badge("release", "green")}
+
+BADGE FULL OVERRIDE:
+{badge("critical", "red", 5)}
+
+STATUS DEFAULTS:
+{status("system ready")}
+
+STATUS OVERRIDE LEVEL:
+{status("disk full", "warn")}
+
+STATUS FULL:
+{status("crash", "error", "!!")}

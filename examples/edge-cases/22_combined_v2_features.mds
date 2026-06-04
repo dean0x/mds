@@ -1,0 +1,86 @@
+---
+users:
+  - name: alice
+    role: admin
+    active: true
+  - name: bob
+    role: viewer
+    active: true
+  - name: charlie
+    role: admin
+    active: false
+  - name: diana
+    role: editor
+    active: true
+tags:
+  - rust
+  - typescript
+  - python
+  - rust
+  - go
+---
+
+@define user_badge(user, style = "compact"):
+@if user.active && user.role:
+[{upper(user.role)}] {upper(user.name)} ({style})
+@else:
+(inactive)
+@end
+@end
+
+@define section_header(title, sep = "="):
+{upper(title)}
+@end
+
+@define tag_summary(tags, separator = ", "):
+{join(sort(unique(tags)), separator)}
+@end
+
+{section_header("Active Users")}
+
+@for user in users:
+@if user.active && user.role:
+- {user_badge(user)}
+@end
+@end
+
+{section_header("Admin Panel")}
+
+@for user in users:
+@if user.active || user.role:
+- {upper(user.name)}: {user.role}
+@if user.active:
+  Status: ACTIVE
+@else:
+  Status: INACTIVE
+@end
+@end
+@end
+
+{section_header("Technology Stack")}
+
+Unique sorted tags: {tag_summary(tags)}
+Pipe-separated: {tag_summary(tags, " | ")}
+Tag count: {length(unique(tags))}
+First (sorted): {first(sort(unique(tags)))}
+Last (sorted): {last(sort(unique(tags)))}
+
+All tags reversed: {join(reverse(tags), ", ")}
+Contains rust: {contains(tags, "rust")}
+Contains java: {contains(tags, "java")}
+
+@define greet_user(user, greeting = "Welcome"):
+@if user.active:
+{greeting}, {upper(trim(user.name))}! Role: {upper(user.role)}
+@else:
+Account suspended: {user.name}
+@end
+@end
+
+@for user in users:
+{greet_user(user)}
+@end
+
+Contains rust: {contains(tags, "rust")}
+Starts with g: {starts_with(first(sort(unique(tags))), "g")}
+Tag slice: {join(slice(sort(unique(tags)), 0, 3), ", ")}
