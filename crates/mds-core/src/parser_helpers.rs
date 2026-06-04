@@ -98,9 +98,8 @@ fn has_bare_equals(s: &str) -> bool {
             b'(' => paren_depth += 1,
             b')' => paren_depth = paren_depth.saturating_sub(1),
             b'=' if paren_depth == 0 => {
-                let after_eq = if i + 1 < bytes.len() { bytes[i + 1] } else { 0 };
-                let before_is_bang = i > 0 && bytes[i - 1] == b'!';
-                if after_eq != b'=' && !before_is_bang {
+                let next = if i + 1 < bytes.len() { bytes[i + 1] } else { 0 };
+                if next != b'=' && !(i > 0 && bytes[i - 1] == b'!') {
                     return true;
                 }
             }
@@ -224,61 +223,64 @@ fn parse_call_expr(
 ) -> Option<Result<Expr, MdsError>> {
     if first_dot.is_none_or(|d| first_paren < d) {
         // Simple call: func(args)
-        let name = s[..first_paren].trim().to_string();
-        if !is_valid_identifier(&name) {
-            return Some(Err(MdsError::syntax(format!(
-                "invalid function name in directive expression: '{name}'"
-            ))));
-        }
-        let args_str = match s[first_paren + 1..].trim().strip_suffix(')') {
-            Some(a) => a,
-            None => {
-                return Some(Err(MdsError::syntax(
-                    "unclosed parenthesis in directive expression",
-                )))
-            }
-        };
-        let args = match parse_args(args_str) {
-            Ok(a) => a,
-            Err(e) => return Some(Err(e)),
-        };
-        return Some(Ok(Expr::Call { name, args }));
+        return Some(parse_simple_call_expr(s, first_paren));
     }
 
     // dot before paren: qualified call — or falls through to member-access if no '(' after dot.
     let dot_pos = first_dot?;
     let rest_after_dot = &s[dot_pos + 1..];
     let paren_in_rest = rest_after_dot.find('(')?;
+    Some(parse_qualified_call_expr(
+        s,
+        dot_pos,
+        rest_after_dot,
+        paren_in_rest,
+    ))
+}
 
+fn parse_simple_call_expr(s: &str, paren_pos: usize) -> Result<Expr, MdsError> {
+    let name = s[..paren_pos].trim().to_string();
+    if !is_valid_identifier(&name) {
+        return Err(MdsError::syntax(format!(
+            "invalid function name in directive expression: '{name}'"
+        )));
+    }
+    let args_str = s[paren_pos + 1..]
+        .trim()
+        .strip_suffix(')')
+        .ok_or_else(|| MdsError::syntax("unclosed parenthesis in directive expression"))?;
+    let args = parse_args(args_str)?;
+    Ok(Expr::Call { name, args })
+}
+
+fn parse_qualified_call_expr(
+    s: &str,
+    dot_pos: usize,
+    rest_after_dot: &str,
+    paren_in_rest: usize,
+) -> Result<Expr, MdsError> {
     let namespace = s[..dot_pos].trim().to_string();
     let name = rest_after_dot[..paren_in_rest].trim().to_string();
     if !is_valid_identifier(&namespace) {
-        return Some(Err(MdsError::syntax(format!(
+        return Err(MdsError::syntax(format!(
             "invalid namespace in qualified call: '{namespace}'"
-        ))));
+        )));
     }
     if !is_valid_identifier(&name) {
-        return Some(Err(MdsError::syntax(format!(
+        return Err(MdsError::syntax(format!(
             "invalid function name in qualified call: '{name}'"
-        ))));
+        )));
     }
-    let args_str = match rest_after_dot[paren_in_rest + 1..].trim().strip_suffix(')') {
-        Some(a) => a,
-        None => {
-            return Some(Err(MdsError::syntax(
-                "unclosed parenthesis in qualified call expression",
-            )))
-        }
-    };
-    let args = match parse_args(args_str) {
-        Ok(a) => a,
-        Err(e) => return Some(Err(e)),
-    };
-    Some(Ok(Expr::QualifiedCall {
+    let args_str = rest_after_dot[paren_in_rest + 1..]
+        .trim()
+        .strip_suffix(')')
+        .ok_or_else(|| MdsError::syntax("unclosed parenthesis in qualified call expression"))?;
+    let args = parse_args(args_str)?;
+    Ok(Expr::QualifiedCall {
         namespace,
         name,
         args,
-    }))
+    })
 }
 
 /// Parse an expression for use in directive conditions or iterables.
