@@ -10,7 +10,7 @@
 //! - **`parser_tests.rs`** — integration and unit tests for both modules.
 
 use crate::ast::{
-    Condition, DefineBlock, ForBlock, Frontmatter, IfBlock, IncludeDirective, Module, Node,
+    Condition, DefineBlock, Expr, ForBlock, Frontmatter, IfBlock, IncludeDirective, Module, Node,
     TextNode,
 };
 use crate::error::MdsError;
@@ -340,17 +340,16 @@ impl Parser<'_> {
         // Parse iterable as a full expression (variable, dot-path, function call, etc.)
         let iterable = parse_expr_inner(iterable_str)?;
         // Reject bare literals as iterables: @for x in "str": makes no sense.
-        use crate::ast::Expr as ExprAlias;
-        match &iterable {
-            ExprAlias::StringLiteral(_)
-            | ExprAlias::NumberLiteral(_)
-            | ExprAlias::BooleanLiteral(_)
-            | ExprAlias::NullLiteral => {
-                return Err(MdsError::syntax(format!(
-                    "cannot iterate over a literal value: '{iterable_str}'"
-                )));
-            }
-            _ => {}
+        if matches!(
+            iterable,
+            Expr::StringLiteral(_)
+                | Expr::NumberLiteral(_)
+                | Expr::BooleanLiteral(_)
+                | Expr::NullLiteral
+        ) {
+            return Err(MdsError::syntax(format!(
+                "cannot iterate over a literal value: '{iterable_str}'"
+            )));
         }
 
         let body = self.parse_body(&["@end"], &[])?;
