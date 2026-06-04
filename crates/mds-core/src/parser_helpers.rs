@@ -3,12 +3,15 @@
 //! This module contains the low-level parsing primitives used by the main
 //! [`super::parser`] module. Responsibilities are organised by concern:
 //!
+//! - **Directive string utilities** — `strip_trailing_directive_colon`,
+//!   `has_unterminated_string`
+//! - **Expression parsing** — `parse_expr_inner`
 //! - **Condition parsing** — `parse_condition`, `parse_negation_condition`,
-//!   `find_unquoted_operator`, `parse_cond_value`, `parse_dot_path`
+//!   `find_unquoted_operator`, `parse_cond_value`
 //! - **Directive parsing** — `parse_import_directive`, `parse_export_directive`,
-//!   `parse_for_vars`
+//!   `parse_for_vars`, `parse_define_params`
 //! - **Interpolation parsing** — `parse_interpolation_expr`, `parse_dot_expr`,
-//!   `parse_args`, `parse_args_inner`, `parse_single_arg_inner`
+//!   `parse_args`, `parse_args_inner`, `parse_single_arg`, `parse_single_arg_inner`
 //! - **Utilities** — `parse_quoted_path`, `validate_dot_path_parts`,
 //!   `unescape_string`, `is_valid_identifier`, `is_directive_token`,
 //!   `strip_leading_newline`, `strip_trailing_newline`
@@ -21,27 +24,351 @@ use crate::ast::{
 use crate::error::MdsError;
 use crate::limits::{MAX_DOT_SEGMENTS, MAX_LOGICAL_OPERANDS, MAX_NESTING_DEPTH};
 
-/// Parse a dot-separated path string (e.g. `"config.debug"`) into a `Vec<String>`.
+/// Return `true` if `s` is a complete, properly-terminated quoted string literal.
 ///
-/// Returns an error if any segment is not a valid identifier or if the path
-/// exceeds `MAX_DOT_SEGMENTS`.
-pub(super) fn parse_dot_path(s: &str) -> Result<Vec<String>, MdsError> {
-    let mut out: Vec<String> = Vec::with_capacity(4);
-    for raw in s.split('.') {
-        if out.len() >= MAX_DOT_SEGMENTS {
-            return Err(MdsError::syntax(format!(
-                "@if condition dot path exceeds maximum segment count of {MAX_DOT_SEGMENTS}"
-            )));
-        }
-        let part = raw.trim();
-        if !is_valid_identifier(part) {
-            return Err(MdsError::syntax(format!(
-                "@if condition must be a variable name or dot path, got '{s}'"
-            )));
-        }
-        out.push(part.to_string());
+/// A string is complete when:
+/// 1. It begins and ends with the same quote character (`"` or `'`), and
+/// 2. The final character is **not** preceded by an odd number of backslashes
+///    (i.e., the closing quote is not escaped).
+///
+/// Examples:
+/// - `"hello"` → true
+/// - `"say \"hi\""` → true (inner `\"` is escaped; the outer `"` closes the string)
+/// - `"\""` → false (the only closing candidate is escaped — unterminated)
+/// - `"\\"` → true (double-backslash then unescaped closing quote)
+fn is_complete_string_literal(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let n = bytes.len();
+    if n < 2 {
+        return false;
     }
-    Ok(out)
+    let open = bytes[0];
+    if open != b'"' && open != b'\'' {
+        return false;
+    }
+    if bytes[n - 1] != open {
+        return false;
+    }
+    // Count consecutive backslashes immediately before the closing quote.
+    // An even number means the closing quote is unescaped; an odd number means it is escaped.
+    let mut backslashes: usize = 0;
+    let mut i = n - 2; // byte just before the closing quote
+    loop {
+        if bytes[i] != b'\\' {
+            break;
+        }
+        backslashes += 1;
+        if i == 1 {
+            break; // reached the byte after the opening quote — stop
+        }
+        i -= 1;
+    }
+    backslashes.is_multiple_of(2)
+}
+
+/// Return `true` if `s` contains a bare `=` (not `==` and not `!=`) that appears
+/// outside any quoted string or parenthesised group.
+///
+/// Used by [`parse_simple_condition`] to give a targeted error hint when a user
+/// writes `var = "value"` instead of `var == "value"`.
+fn has_bare_equals(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut in_string = false;
+    let mut string_char = b'"';
+    let mut paren_depth: usize = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if in_string {
+            if ch == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if ch == string_char {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            b'"' | b'\'' => {
+                in_string = true;
+                string_char = ch;
+            }
+            b'(' => paren_depth += 1,
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'=' if paren_depth == 0 => {
+                let next = if i + 1 < bytes.len() { bytes[i + 1] } else { 0 };
+                if next != b'=' && !(i > 0 && bytes[i - 1] == b'!') {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Strip the trailing `:` from a directive condition/iterable string, respecting
+/// quoted strings and parentheses so that colons inside string literals or function
+/// arguments are not mistaken for the directive colon.
+///
+/// Returns `Some(stripped)` when the last unquoted, unparenthesised character
+/// is `:`, or `None` if no such colon exists (indicating a malformed directive).
+pub(super) fn strip_trailing_directive_colon(s: &str) -> Option<&str> {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    if len == 0 {
+        return None;
+    }
+
+    let mut in_string = false;
+    let mut string_char = b'"';
+    let mut paren_depth: usize = 0;
+    // Track the position of the last colon that was outside any quote or parens.
+    let mut last_bare_colon: Option<usize> = None;
+    let mut i = 0;
+
+    while i < len {
+        let ch = bytes[i];
+        if in_string {
+            if ch == b'\\' && i + 1 < len {
+                i += 2;
+                continue;
+            }
+            if ch == string_char {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        // Outside a string
+        match ch {
+            b'"' | b'\'' => {
+                in_string = true;
+                string_char = ch;
+            }
+            b'(' => {
+                paren_depth += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+            }
+            b':' if paren_depth == 0 => {
+                last_bare_colon = Some(i);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // An unclosed parenthesis group means the directive string is structurally
+    // malformed (e.g. `func(a:`). Treat it the same as a missing colon so the
+    // caller reports a parse error rather than silently using a colon that was
+    // inside an argument list.
+    if paren_depth > 0 {
+        return None;
+    }
+
+    last_bare_colon.and_then(|pos| {
+        // Only use the colon if it is at the very end of the (trimmed) string.
+        let after = s[pos + 1..].trim();
+        if after.is_empty() {
+            Some(s[..pos].trim_end())
+        } else {
+            None
+        }
+    })
+}
+
+/// Return `true` if the string contains an unterminated string literal
+/// (a quote that is opened but never closed).
+///
+/// Used to give targeted error messages when a directive appears to be missing
+/// its trailing colon due to an unterminated string literal inside it.
+pub(super) fn has_unterminated_string(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut in_string = false;
+    let mut string_char = b'"';
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if in_string {
+            if ch == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if ch == string_char {
+                in_string = false;
+            }
+        } else if ch == b'"' || ch == b'\'' {
+            in_string = true;
+            string_char = ch;
+        }
+        i += 1;
+    }
+    in_string
+}
+
+/// Parse a function-call or qualified-call expression from `parse_expr_inner`.
+///
+/// Called when a `(` appears before any `.` (simple call) or when a `.` precedes
+/// a `(` (qualified call: `ns.func(args)`). Returns `None` when the input falls
+/// through to the member-access path instead.
+fn parse_call_expr(
+    s: &str,
+    first_dot: Option<usize>,
+    first_paren: usize,
+) -> Option<Result<Expr, MdsError>> {
+    if first_dot.is_none_or(|d| first_paren < d) {
+        // Simple call: func(args)
+        return Some(parse_simple_call_expr(s, first_paren));
+    }
+
+    // dot before paren: qualified call — or falls through to member-access if no '(' after dot.
+    let dot_pos = first_dot?;
+    let rest_after_dot = &s[dot_pos + 1..];
+    let paren_in_rest = rest_after_dot.find('(')?;
+    Some(parse_qualified_call_expr(
+        s,
+        dot_pos,
+        rest_after_dot,
+        paren_in_rest,
+    ))
+}
+
+fn parse_simple_call_expr(s: &str, paren_pos: usize) -> Result<Expr, MdsError> {
+    let name = s[..paren_pos].trim().to_string();
+    if !is_valid_identifier(&name) {
+        return Err(MdsError::syntax(format!(
+            "invalid function name in directive expression: '{name}'"
+        )));
+    }
+    let args_str = s[paren_pos + 1..]
+        .trim()
+        .strip_suffix(')')
+        .ok_or_else(|| MdsError::syntax("unclosed parenthesis in directive expression"))?;
+    let args = parse_args(args_str)?;
+    Ok(Expr::Call { name, args })
+}
+
+fn parse_qualified_call_expr(
+    s: &str,
+    dot_pos: usize,
+    rest_after_dot: &str,
+    paren_in_rest: usize,
+) -> Result<Expr, MdsError> {
+    let namespace = s[..dot_pos].trim().to_string();
+    let name = rest_after_dot[..paren_in_rest].trim().to_string();
+    if !is_valid_identifier(&namespace) {
+        return Err(MdsError::syntax(format!(
+            "invalid namespace in qualified call: '{namespace}'"
+        )));
+    }
+    if !is_valid_identifier(&name) {
+        return Err(MdsError::syntax(format!(
+            "invalid function name in qualified call: '{name}'"
+        )));
+    }
+    let args_str = rest_after_dot[paren_in_rest + 1..]
+        .trim()
+        .strip_suffix(')')
+        .ok_or_else(|| MdsError::syntax("unclosed parenthesis in qualified call expression"))?;
+    let args = parse_args(args_str)?;
+    Ok(Expr::QualifiedCall {
+        namespace,
+        name,
+        args,
+    })
+}
+
+/// Parse an expression for use in directive conditions or iterables.
+///
+/// Accepts the same forms as interpolation expressions plus literal values:
+/// - Quoted strings → `Expr::StringLiteral`
+/// - Numeric literals → `Expr::NumberLiteral`
+/// - Boolean literals → `Expr::BooleanLiteral`
+/// - `null` → `Expr::NullLiteral`
+/// - `identifier` → `Expr::Var`
+/// - `ns.func(args)` → `Expr::QualifiedCall`
+/// - `func(args)` → `Expr::Call`
+/// - `obj.field` → `Expr::MemberAccess`
+pub(super) fn parse_expr_inner(s: &str) -> Result<Expr, MdsError> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(MdsError::syntax("expected an expression"));
+    }
+
+    // Quoted string literal — only accept when the closing quote is not escaped.
+    if is_complete_string_literal(s) {
+        let inner = &s[1..s.len() - 1];
+        return Ok(Expr::StringLiteral(unescape_string(inner)));
+    }
+
+    // Unterminated string
+    if s.starts_with('"') || s.starts_with('\'') {
+        return Err(MdsError::syntax(
+            "unterminated string literal in directive expression",
+        ));
+    }
+
+    // Boolean literals
+    if s == "true" {
+        return Ok(Expr::BooleanLiteral(true));
+    }
+    if s == "false" {
+        return Ok(Expr::BooleanLiteral(false));
+    }
+
+    // Null literal
+    if s == "null" {
+        return Ok(Expr::NullLiteral);
+    }
+
+    // Numeric literal (checked before dot-path so "3.14" is a number, not MemberAccess)
+    if looks_like_number(s) {
+        if let Ok(n) = s.parse::<f64>() {
+            if !n.is_finite() {
+                return Err(MdsError::syntax(
+                    "NaN and infinity are not valid directive expression values",
+                ));
+            }
+            return Ok(Expr::NumberLiteral(n));
+        }
+    }
+
+    // Function call or qualified call: look for '(' before any dot.
+    let first_dot = s.find('.');
+    let first_paren = s.find('(');
+
+    if let Some(paren_pos) = first_paren {
+        if let Some(result) = parse_call_expr(s, first_dot, paren_pos) {
+            return result;
+        }
+    }
+
+    // Member access or simple variable: check for dot
+    if s.contains('.') {
+        let parts: Vec<&str> = s.split('.').collect();
+        validate_dot_path_parts(&parts).map_err(|reason| {
+            MdsError::syntax(format!(
+                "invalid dot-path in directive expression: '{s}' — {reason}"
+            ))
+        })?;
+        let object = parts[0].trim().to_string();
+        let fields: Vec<String> = parts[1..].iter().map(|p| p.trim().to_string()).collect();
+        return Ok(Expr::MemberAccess { object, fields });
+    }
+
+    // Simple identifier
+    if is_valid_identifier(s) {
+        return Ok(Expr::Var(s.to_string()));
+    }
+
+    Err(MdsError::syntax(format!(
+        "invalid expression in directive: '{s}' — expected a variable, function call, or literal"
+    )))
 }
 
 /// Parse a literal value for the RHS of a comparison condition.
@@ -59,10 +386,8 @@ pub(super) fn parse_cond_value(s: &str) -> Result<CondValue, MdsError> {
         ));
     }
 
-    // Quoted string (single or double)
-    if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
-        || (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
-    {
+    // Quoted string (single or double) — only accept when the closing quote is not escaped.
+    if is_complete_string_literal(s) {
         let inner = &s[1..s.len() - 1];
         return Ok(CondValue::String(unescape_string(inner)));
     }
@@ -102,12 +427,13 @@ pub(super) fn parse_cond_value(s: &str) -> Result<CondValue, MdsError> {
     ))
 }
 
-/// Scan `s` for the first unquoted `==` or `!=` operator.
+/// Scan `s` for the first unquoted `==` or `!=` operator that is outside
+/// both string literals and parentheses.
 ///
 /// Tracks whether the scanner is inside a single- or double-quoted string and
-/// only reports an operator position when outside any string literal. This
-/// handles cases like `@if msg == "a == b":` correctly (the `==` inside the
-/// string literal is ignored).
+/// whether it is inside parentheses (to handle function-call arguments like
+/// `contains(s, "==")` correctly). Only reports an operator when outside any
+/// string or paren nesting.
 ///
 /// Returns `Some((byte_index, "=="` or `"!="))` pointing to the start of the
 /// operator, or `None` if no unquoted operator is present.
@@ -115,9 +441,9 @@ pub(super) fn parse_cond_value(s: &str) -> Result<CondValue, MdsError> {
 /// # Byte-level scan safety
 ///
 /// This function receives a `&str`, which Rust guarantees is valid UTF-8.  The
-/// ASCII bytes we search for (`!`, `=`, `"`, `'`, `\`) are all single-byte
-/// characters in the range 0x00–0x7F.  In UTF-8, continuation bytes of
-/// multi-byte sequences always have their high bit set (≥ 0x80), so they can
+/// ASCII bytes we search for (`!`, `=`, `"`, `'`, `\`, `(`, `)`) are all
+/// single-byte characters in the range 0x00–0x7F.  In UTF-8, continuation bytes
+/// of multi-byte sequences always have their high bit set (≥ 0x80), so they can
 /// never be mistaken for any ASCII byte we inspect.  Consequently, scanning
 /// `s.as_bytes()` byte-by-byte and acting only on those ASCII sentinel values
 /// is sound: we never split a multi-byte code-point, and every byte index we
@@ -129,6 +455,7 @@ pub(super) fn find_unquoted_operator(s: &str) -> Option<(usize, &'static str)> {
     let mut i = 0;
     let mut in_string = false;
     let mut string_char = b'"';
+    let mut paren_depth: usize = 0;
 
     while i < len {
         let ch = bytes[i];
@@ -156,14 +483,28 @@ pub(super) fn find_unquoted_operator(s: &str) -> Option<(usize, &'static str)> {
             continue;
         }
 
-        // Check for != (must check before single = check)
-        if ch == b'!' && i + 1 < len && bytes[i + 1] == b'=' {
-            return Some((i, "!="));
+        if ch == b'(' {
+            paren_depth += 1;
+            i += 1;
+            continue;
+        }
+        if ch == b')' {
+            paren_depth = paren_depth.saturating_sub(1);
+            i += 1;
+            continue;
         }
 
-        // Check for == (two consecutive '=', not just one)
-        if ch == b'=' && i + 1 < len && bytes[i + 1] == b'=' {
-            return Some((i, "=="));
+        // Only report operators at paren depth 0
+        if paren_depth == 0 {
+            // Check for != (must check before single = check)
+            if ch == b'!' && i + 1 < len && bytes[i + 1] == b'=' {
+                return Some((i, "!="));
+            }
+
+            // Check for == (two consecutive '=', not just one)
+            if ch == b'=' && i + 1 < len && bytes[i + 1] == b'=' {
+                return Some((i, "=="));
+            }
         }
 
         i += 1;
@@ -175,8 +516,8 @@ pub(super) fn find_unquoted_operator(s: &str) -> Option<(usize, &'static str)> {
 /// Parse the body of a negation condition (everything after the leading `!`).
 ///
 /// Validates that the negation is not doubled (`!!`), not combined with a
-/// comparison operator, and not missing the variable name.  Returns
-/// `Condition::Not(path)` on success.
+/// comparison operator, and not missing the expression.  Returns
+/// `Condition::Not(expr)` on success.
 pub(super) fn parse_negation_condition(rest: &str) -> Result<Condition, MdsError> {
     if rest.starts_with('!') {
         return Err(MdsError::syntax("double negation is not supported"));
@@ -190,12 +531,24 @@ pub(super) fn parse_negation_condition(rest: &str) -> Result<Condition, MdsError
     if rest.is_empty() {
         return Err(MdsError::syntax("expected variable name after '!'"));
     }
-    let path = parse_dot_path(rest)?;
-    Ok(Condition::Not(path))
+    let expr = parse_expr_inner(rest)?;
+    // Reject bare literals in negation position: !true, !"str", !42, !null make no sense.
+    match &expr {
+        Expr::StringLiteral(_)
+        | Expr::NumberLiteral(_)
+        | Expr::BooleanLiteral(_)
+        | Expr::NullLiteral => {
+            return Err(MdsError::syntax(
+                "cannot use a literal value after '!' — use a variable or function call",
+            ));
+        }
+        _ => {}
+    }
+    Ok(Condition::Not(expr))
 }
 
 /// Split a string on a 2-character operator (`&&` or `||`) that appears outside
-/// of quoted strings.
+/// of quoted strings and outside parentheses.
 ///
 /// Returns a `Vec<&str>` of the parts (not trimmed). Returns a single-element
 /// vec containing the original string if the operator is not found.
@@ -212,6 +565,7 @@ fn split_on_unquoted_op<'a>(s: &'a str, op: &str) -> Vec<&'a str> {
     let mut parts: Vec<&'a str> = Vec::new();
     let mut in_string = false;
     let mut string_char = b'"';
+    let mut paren_depth: usize = 0;
     let mut segment_start = 0;
     let mut i = 0;
 
@@ -234,8 +588,19 @@ fn split_on_unquoted_op<'a>(s: &'a str, op: &str) -> Vec<&'a str> {
             i += 1;
             continue;
         }
-        // Check for the operator at position i
-        if i + 1 < len && bytes[i] == op_bytes[0] && bytes[i + 1] == op_bytes[1] {
+        if ch == b'(' {
+            paren_depth += 1;
+            i += 1;
+            continue;
+        }
+        if ch == b')' {
+            paren_depth = paren_depth.saturating_sub(1);
+            i += 1;
+            continue;
+        }
+        // Check for the operator at position i — only outside parens
+        if paren_depth == 0 && i + 1 < len && bytes[i] == op_bytes[0] && bytes[i + 1] == op_bytes[1]
+        {
             parts.push(&s[segment_start..i]);
             segment_start = i + 2;
             i += 2;
@@ -276,9 +641,13 @@ fn parse_and_level(s: &str) -> Result<Condition, MdsError> {
 /// Parse an `@if` or `@elseif` condition string into a `Condition`.
 ///
 /// Accepted forms:
-/// - `var` / `config.debug` → `Condition::Truthy`
-/// - `!var` / `!config.debug` → `Condition::Not`
-/// - `var == "value"` / `var != 42` → `Condition::Eq` / `Condition::NotEq`
+/// - `var` / `config.debug` / `func(args)` / `ns.func(args)` → `Condition::Truthy`
+/// - `!var` / `!func(args)` → `Condition::Not`
+/// - `expr == expr` / `expr != expr` → `Condition::Eq` / `Condition::NotEq`
+///   where each side is any expression accepted by `parse_expr_inner`:
+///   variables, dot-paths, function calls, string/number/boolean/null literals.
+///   Examples: `var == "value"`, `var != 42`, `func(a) == func(b)`,
+///   `env.get("KEY") != null`
 /// - `a && b` → `Condition::And([a, b])`
 /// - `a || b` → `Condition::Or([a, b])`
 /// - `a && b || c` → `Condition::Or([And([a, b]), c])` (`||` binds less tightly)
@@ -322,9 +691,9 @@ pub(super) fn parse_condition(s: &str) -> Result<Condition, MdsError> {
 /// Parse a single (non-compound) `@if` or `@elseif` condition.
 ///
 /// Accepted forms:
-/// - `var` / `config.debug` → `Condition::Truthy`
-/// - `!var` / `!config.debug` → `Condition::Not`
-/// - `var == "value"` / `var != 42` → `Condition::Eq` / `Condition::NotEq`
+/// - `var` / `config.debug` / `func(args)` / `ns.func(args)` → `Condition::Truthy`
+/// - `!var` / `!func(args)` → `Condition::Not`
+/// - `expr == expr` / `expr != expr` → `Condition::Eq` / `Condition::NotEq`
 fn parse_simple_condition(s: &str) -> Result<Condition, MdsError> {
     let s = s.trim();
 
@@ -333,42 +702,53 @@ fn parse_simple_condition(s: &str) -> Result<Condition, MdsError> {
         return parse_negation_condition(rest);
     }
 
-    // Equality/inequality operators
+    // Equality/inequality operators (only outside quotes and parens)
     if let Some((op_pos, op)) = find_unquoted_operator(s) {
         let lhs = s[..op_pos].trim();
         let rhs_start = op_pos + op.len();
         let rhs = s[rhs_start..].trim();
 
+        if lhs.is_empty() {
+            return Err(MdsError::syntax(format!(
+                "expected expression before '{op}'"
+            )));
+        }
         if rhs.is_empty() {
             return Err(MdsError::syntax(format!("expected value after '{op}'")));
         }
 
-        let path = parse_dot_path(lhs)?;
-        let value = parse_cond_value(rhs)?;
+        let lhs_expr = parse_expr_inner(lhs)?;
+        let rhs_expr = parse_expr_inner(rhs)?;
 
         return match op {
-            "==" => Ok(Condition::Eq(path, value)),
-            "!=" => Ok(Condition::NotEq(path, value)),
+            "==" => Ok(Condition::Eq(lhs_expr, rhs_expr)),
+            "!=" => Ok(Condition::NotEq(lhs_expr, rhs_expr)),
             other => Err(MdsError::syntax(format!(
                 "internal error: unrecognised operator '{other}' in @if condition"
             ))),
         };
     }
 
-    // Check for bare `=` (not `==`) — give a targeted hint
-    // We look for `=` that is NOT followed by another `=` and NOT preceded by `!`
-    if let Some(eq_pos) = s.find('=') {
-        let before = &s[..eq_pos];
-        let after = &s[eq_pos + 1..];
-        // Bare `=` (not `==` and not `!=`)
-        if !after.starts_with('=') && !before.ends_with('!') {
-            return Err(MdsError::syntax("use '==' for comparison, not '='"));
-        }
+    // Check for bare `=` (not `==`) — give a targeted hint.
+    if has_bare_equals(s) {
+        return Err(MdsError::syntax("use '==' for comparison, not '='"));
     }
 
-    // Default: truthy check
-    let path = parse_dot_path(s)?;
-    Ok(Condition::Truthy(path))
+    // Default: truthy check — evaluate as expression
+    let expr = parse_expr_inner(s)?;
+    // Reject bare literals in truthy position: @if true: / @if "str": make no sense.
+    match &expr {
+        Expr::StringLiteral(_)
+        | Expr::NumberLiteral(_)
+        | Expr::BooleanLiteral(_)
+        | Expr::NullLiteral => {
+            return Err(MdsError::syntax(
+                "cannot use a literal value in @if condition — use a variable or function call",
+            ));
+        }
+        _ => {}
+    }
+    Ok(Condition::Truthy(expr))
 }
 
 /// Parse an `@import` directive into a Node.
@@ -786,9 +1166,8 @@ pub(super) fn parse_single_arg(s: &str) -> Result<Arg, MdsError> {
 /// for nested calls.
 pub(super) fn parse_single_arg_inner(s: &str, depth: usize) -> Result<Arg, MdsError> {
     let s = s.trim();
-    if s.len() >= 2
-        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
-    {
+    // Only accept as a complete string literal when the closing quote is not escaped.
+    if is_complete_string_literal(s) {
         let inner = &s[1..s.len() - 1];
         let unescaped = unescape_string(inner);
         Ok(Arg::StringLiteral(unescaped))

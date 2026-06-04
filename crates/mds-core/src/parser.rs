@@ -10,12 +10,12 @@
 //! - **`parser_tests.rs`** — integration and unit tests for both modules.
 
 use crate::ast::{
-    Condition, DefineBlock, ForBlock, Frontmatter, IfBlock, IncludeDirective, Module, Node,
+    Condition, DefineBlock, Expr, ForBlock, Frontmatter, IfBlock, IncludeDirective, Module, Node,
     TextNode,
 };
 use crate::error::MdsError;
 use crate::lexer::Token;
-use crate::limits::{MAX_DOT_SEGMENTS, MAX_ELSEIF_BRANCHES, MAX_NESTING_DEPTH};
+use crate::limits::{MAX_ELSEIF_BRANCHES, MAX_NESTING_DEPTH};
 
 #[path = "parser_helpers.rs"]
 mod helpers;
@@ -51,6 +51,20 @@ struct Parser<'a> {
     depth: usize,
     file: &'a str,
     source: &'a str,
+}
+
+/// Build the appropriate parse error when a directive's trailing `:` is missing.
+///
+/// Produces a targeted "unterminated string literal" message when the input contains
+/// an unclosed quote, or a generic "must end with ':'" message otherwise.
+fn directive_colon_error(directive: &str, rest: &str) -> MdsError {
+    if has_unterminated_string(rest) {
+        MdsError::syntax(format!(
+            "unterminated string literal in {directive} condition"
+        ))
+    } else {
+        MdsError::syntax(format!("{directive} directive must end with ':'"))
+    }
 }
 
 impl Parser<'_> {
@@ -242,11 +256,9 @@ impl Parser<'_> {
     fn parse_if_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
         self.enter_block()?;
 
-        let condition_str = rest
-            .trim()
-            .strip_suffix(':')
-            .ok_or_else(|| MdsError::syntax("@if directive must end with ':'"))?
-            .trim();
+        let trimmed = rest.trim();
+        let condition_str = strip_trailing_directive_colon(trimmed)
+            .ok_or_else(|| directive_colon_error("@if", trimmed))?;
 
         let condition = parse_condition(condition_str)?;
 
@@ -299,14 +311,13 @@ impl Parser<'_> {
 
             // Extract condition string: strip "@elseif " prefix and trailing ":".
             // strip_prefix cannot fail here: the while guard already checked starts_with("@elseif ").
-            let elseif_cond_str = elseif_dir
+            let elseif_rest = elseif_dir
                 .trim()
                 .strip_prefix("@elseif ")
                 .expect("loop guard guarantees @elseif prefix")
-                .trim()
-                .strip_suffix(':')
-                .ok_or_else(|| MdsError::syntax("@elseif directive must end with ':'"))?
                 .trim();
+            let elseif_cond_str = strip_trailing_directive_colon(elseif_rest)
+                .ok_or_else(|| directive_colon_error("@elseif", elseif_rest))?;
 
             let elseif_cond = parse_condition(elseif_cond_str)?;
             let elseif_body = self.parse_body(&["@else:", "@end"], &["@elseif "])?;
@@ -319,11 +330,9 @@ impl Parser<'_> {
     fn parse_for_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
         self.enter_block()?;
 
-        let rest = rest.trim();
-        let rest = rest
-            .strip_suffix(':')
-            .ok_or_else(|| MdsError::syntax("@for directive must end with ':'"))?
-            .trim();
+        let trimmed = rest.trim();
+        let rest = strip_trailing_directive_colon(trimmed)
+            .ok_or_else(|| directive_colon_error("@for", trimmed))?;
 
         // Split on " in " to separate variable part from iterable part.
         // Supports both:
@@ -337,22 +346,19 @@ impl Parser<'_> {
 
         let (key_var, var) = parse_for_vars(var_part)?;
 
-        // Parse iterable as dot-separated path
-        let iterable: Vec<String> = iterable_str
-            .split('.')
-            .map(|s| s.trim().to_string())
-            .collect();
-        if iterable.len() > MAX_DOT_SEGMENTS {
+        // Parse iterable as a full expression (variable, dot-path, function call, etc.)
+        let iterable = parse_expr_inner(iterable_str)?;
+        // Reject bare literals as iterables: @for x in "str": makes no sense.
+        if matches!(
+            iterable,
+            Expr::StringLiteral(_)
+                | Expr::NumberLiteral(_)
+                | Expr::BooleanLiteral(_)
+                | Expr::NullLiteral
+        ) {
             return Err(MdsError::syntax(format!(
-                "@for iterable dot path exceeds maximum segment count of {MAX_DOT_SEGMENTS}"
+                "cannot use a literal value as @for iterable: '{iterable_str}' — use a variable or function call"
             )));
-        }
-        for part in &iterable {
-            if !is_valid_identifier(part) {
-                return Err(MdsError::syntax(format!(
-                    "invalid iterable: '{iterable_str}' — must be a variable name or dot path"
-                )));
-            }
         }
 
         let body = self.parse_body(&["@end"], &[])?;
@@ -373,6 +379,11 @@ impl Parser<'_> {
         self.enter_block()?;
 
         let rest = rest.trim();
+        // `strip_suffix(':')` is safe here (unlike @if/@for which use the quote+paren-aware
+        // strip_trailing_directive_colon). @define's grammar enforces `name(params):` — the
+        // entire parameter list is enclosed in parentheses, so any colon inside a default-value
+        // string literal (e.g., `@define foo(sep = ":")`) is contained within the parens and
+        // the final character of the directive is always the unambiguous directive colon.
         let rest = rest
             .strip_suffix(':')
             .ok_or_else(|| MdsError::syntax("@define directive must end with ':'"))?
