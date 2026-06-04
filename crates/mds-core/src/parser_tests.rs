@@ -1687,6 +1687,22 @@ fn parse_elseif_unterminated_string_error() {
     );
 }
 
+// ── @for unterminated string error ───────────────────────────────────────────
+
+#[test]
+fn parse_for_unterminated_string_error() {
+    // @for with unterminated string arg should give targeted error, not generic "must end with ':'"
+    let src = "@for x in split(s, \"alice:\n- {x}\n@end\n";
+    let tokens = tokenize(src, "test.mds").unwrap();
+    let result = parse_with_ctx(&tokens, "", "");
+    assert!(result.is_err(), "unterminated string in @for should error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("unterminated string"),
+        "error should mention unterminated string, got: {err}"
+    );
+}
+
 // ── Security tests ────────────────────────────────────────────────────────────
 
 #[test]
