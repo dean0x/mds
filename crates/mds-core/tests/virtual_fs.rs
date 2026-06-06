@@ -879,6 +879,25 @@ fn fm_import_set_blocked() {
 }
 
 #[test]
+fn fm_import_set_blocked_md_type_mds() {
+    // --set imports=foo on a .md file with `type: mds` must also be rejected.
+    let mut modules = HashMap::new();
+    modules.insert(
+        "main.md".to_string(),
+        "---\ntype: mds\n---\nHello!\n".to_string(),
+    );
+    let mut vars = HashMap::new();
+    vars.insert("imports".to_string(), Value::String("foo".to_string()));
+    let err = mds::compile_virtual(modules, "main.md", Some(vars))
+        .expect_err("--set imports should be rejected for .md with type:mds");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("imports") && msg.contains("reserved"),
+        "expected 'reserved' error, got: {msg}"
+    );
+}
+
+#[test]
 fn fm_import_md_without_type_mds() {
     // A plain .md file (no `type: mds`) treats `imports` as a regular variable.
     // Virtual FS: use a .md file key directly; the file type check requires `type: mds`.

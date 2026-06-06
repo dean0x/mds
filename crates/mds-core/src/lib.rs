@@ -406,7 +406,7 @@ fn strip_reserved_keys(raw: &str) -> Option<String> {
 
         if is_top_level {
             // Reset imports block tracking whenever we see a new top-level key.
-            if line.starts_with("imports:") || line == "imports:" {
+            if line.starts_with("imports:") {
                 in_imports_block = true;
                 // Drop this line (the `imports:` key itself).
                 continue;
@@ -800,16 +800,11 @@ pub fn scan_imports(source: &str) -> Result<Vec<String>, MdsError> {
     let mut paths: IndexSet<String> = IndexSet::new();
 
     // Insert frontmatter import paths FIRST (they resolve before body imports).
+    // Best-effort: ignore parse errors here (parse errors will surface at compile time).
     if let Some(fm) = module.frontmatter.as_ref() {
-        // Best-effort: ignore parse errors here (parse errors will surface at compile time).
         if let Ok(fm_imports) = resolver::parse_frontmatter_imports(&fm.raw) {
             for imp in &fm_imports {
-                let path = match imp {
-                    resolver::FrontmatterImport::Alias { path, .. }
-                    | resolver::FrontmatterImport::Merge { path }
-                    | resolver::FrontmatterImport::Selective { path, .. } => path,
-                };
-                paths.insert(path.clone());
+                paths.insert(imp.path().to_owned());
             }
         }
     }

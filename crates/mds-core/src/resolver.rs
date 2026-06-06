@@ -313,9 +313,7 @@ impl ModuleCache {
             build_scope_from_frontmatter(module.frontmatter.as_ref(), is_md, ctx.runtime_vars)?;
 
         // Resolve frontmatter imports BEFORE body imports (per spec).
-        if !fm_imports.is_empty() {
-            self.resolve_frontmatter_imports(&fm_imports, &mut scope, ctx, warnings)?;
-        }
+        self.resolve_frontmatter_imports(&fm_imports, &mut scope, ctx, warnings)?;
 
         // Walk the AST: collect @define functions (with closure capture), process imports/exports
         let CollectedDefs {
@@ -463,48 +461,29 @@ impl ModuleCache {
         warnings: &mut Vec<String>,
     ) -> Result<(), MdsError> {
         for (i, imp) in imports.iter().enumerate() {
-            let wrap_err = |e: MdsError| {
-                // Attach "(in frontmatter imports[i])" context to error messages
-                // that don't already carry source spans.
-                match e {
-                    MdsError::FileNotFound {
-                        path, span: None, ..
-                    } => MdsError::import_error(format!(
-                        "file not found: \"{path}\" (in frontmatter imports[{i}])"
-                    )),
-                    MdsError::CircularImport {
-                        cycle, span: None, ..
-                    } => MdsError::import_error(format!(
-                        "circular import detected: {cycle} (in frontmatter imports[{i}])"
-                    )),
-                    MdsError::ImportError {
-                        message,
-                        span: None,
-                        ..
-                    } if !message.contains("in frontmatter") => {
-                        MdsError::import_error(format!("{message} (in frontmatter imports[{i}])"))
-                    }
-                    other => other,
-                }
-            };
-
             match imp {
                 FrontmatterImport::Alias { path, alias } => {
                     if scope.get_namespace(alias).is_some() {
-                        return Err(MdsError::name_collision(alias.clone()));
+                        return Err(MdsError::import_error(format!(
+                            "name collision: '{alias}' is already defined \
+                             (in frontmatter imports[{i}])"
+                        )));
                     }
                     let resolved = self
                         .resolve_import_from(ctx.base_key, path, ctx.runtime_vars, warnings)
-                        .map_err(wrap_err)?;
+                        .map_err(|e| attach_frontmatter_index(e, i))?;
                     scope.set_namespace(alias, resolved.to_namespace());
                 }
                 FrontmatterImport::Merge { path } => {
                     let resolved = self
                         .resolve_import_from(ctx.base_key, path, ctx.runtime_vars, warnings)
-                        .map_err(wrap_err)?;
+                        .map_err(|e| attach_frontmatter_index(e, i))?;
                     for (name, func) in resolved.get_all_exports() {
                         if scope.get_function(&name).is_some() {
-                            return Err(MdsError::name_collision(name));
+                            return Err(MdsError::import_error(format!(
+                                "name collision: '{name}' is already defined \
+                                 (in frontmatter imports[{i}])"
+                            )));
                         }
                         scope.set_function(&name, func);
                     }
@@ -515,7 +494,7 @@ impl ModuleCache {
                 FrontmatterImport::Selective { path, names } => {
                     let resolved = self
                         .resolve_import_from(ctx.base_key, path, ctx.runtime_vars, warnings)
-                        .map_err(wrap_err)?;
+                        .map_err(|e| attach_frontmatter_index(e, i))?;
                     let not_exported = |name: &str| {
                         MdsError::import_error(format!(
                             "'{name}' is not exported from '{path}' (in frontmatter imports[{i}])"
@@ -783,26 +762,23 @@ fn build_scope_from_frontmatter(
     let mut scope = Scope::new();
     let mut fm_imports: Vec<FrontmatterImport> = Vec::new();
 
+    // Determine is_mds early so it's available for both frontmatter parsing
+    // AND the runtime_vars guard below. A .mds file is always MDS; a .md file
+    // is MDS only when frontmatter contains `type: mds`.
+    let is_mds = if !is_md {
+        // .mds files are always MDS
+        true
+    } else if let Some(fm) = frontmatter {
+        // .md file — check frontmatter for `type: mds`
+        has_type_mds_frontmatter_raw(&fm.raw)
+    } else {
+        false
+    };
+
     if let Some(fm) = frontmatter {
         // Parse YAML once to avoid double-parsing
         let yaml: serde_yaml_ng::Value =
             serde_yaml_ng::from_str(&fm.raw).map_err(|e| MdsError::yaml_error(e.to_string()))?;
-
-        // Determine is_mds: a .mds file is always MDS; a .md file is MDS only when
-        // frontmatter contains `type: mds`.
-        let is_mds = if is_md {
-            // Check for type: mds in the parsed YAML mapping
-            if let serde_yaml_ng::Value::Mapping(ref map) = yaml {
-                map.get("type").is_some_and(|v| {
-                    matches!(v, serde_yaml_ng::Value::String(s) if s.eq_ignore_ascii_case("mds"))
-                })
-            } else {
-                false
-            }
-        } else {
-            // .mds files are always MDS
-            true
-        };
 
         if let serde_yaml_ng::Value::Mapping(map) = yaml {
             for (key, val) in map {
@@ -832,21 +808,13 @@ fn build_scope_from_frontmatter(
 
     // Apply runtime vars (override frontmatter)
     for (key, value) in runtime_vars {
-        if key == "imports" {
-            // Block --set imports=... for MDS files where imports is reserved.
-            // We check is_mds conservatively: if frontmatter is present and contains
-            // `type: mds` (for .md) or file is .mds (is_md == false), block it.
-            // Since we no longer track is_mds outside the frontmatter block, we use
-            // whether fm_imports was populated or not — but that's not reliable for
-            // files without a frontmatter imports key. Instead, detect via is_md:
-            // for .mds files (is_md==false), always block; for .md files, allow
-            // (they treat imports as a regular var).
-            if !is_md {
-                return Err(MdsError::import_error(
-                    "'imports' is a reserved frontmatter key for .mds files and cannot be set \
-                     via --set",
-                ));
-            }
+        if key == "imports" && is_mds {
+            // MDS files (.mds or .md with type:mds) treat `imports` as a reserved
+            // key; block --set imports=... for them.
+            return Err(MdsError::import_error(
+                "'imports' is a reserved frontmatter key for MDS files and cannot be set \
+                 via --set",
+            ));
         }
         scope.set_var(key, value.clone());
     }
@@ -935,6 +903,19 @@ fn has_type_mds_frontmatter(source: &str) -> bool {
         })
 }
 
+/// Return `true` if raw frontmatter content (without `---` fences) contains `type: mds`.
+///
+/// This is the counterpart of [`has_type_mds_frontmatter`] that works on `fm.raw`
+/// (the already-extracted frontmatter body) rather than the full source.
+fn has_type_mds_frontmatter_raw(raw: &str) -> bool {
+    raw.lines().any(|line| {
+        line.trim().strip_prefix("type:").is_some_and(|v| {
+            let v = v.trim();
+            v == "mds" || v == "\"mds\"" || v == "'mds'"
+        })
+    })
+}
+
 /// Format a cycle chain like "a.mds → b.mds → a.mds" from the resolving set.
 ///
 /// `IndexSet` preserves insertion order, so we can use it as both the set
@@ -984,6 +965,33 @@ fn attach_import_span(
     }
 }
 
+/// Attach "(in frontmatter imports[i])" context to errors that have no source span.
+///
+/// Errors that already carry a span (e.g. cascading errors inside the imported file)
+/// are returned unchanged so they continue to report their own locations.
+fn attach_frontmatter_index(err: MdsError, i: usize) -> MdsError {
+    match err {
+        MdsError::FileNotFound {
+            path, span: None, ..
+        } => MdsError::import_error(format!(
+            "file not found: \"{path}\" (in frontmatter imports[{i}])"
+        )),
+        MdsError::CircularImport {
+            cycle, span: None, ..
+        } => MdsError::import_error(format!(
+            "circular import detected: {cycle} (in frontmatter imports[{i}])"
+        )),
+        MdsError::ImportError {
+            message,
+            span: None,
+            ..
+        } if !message.contains("in frontmatter") => {
+            MdsError::import_error(format!("{message} (in frontmatter imports[{i}])"))
+        }
+        other => other,
+    }
+}
+
 // ── Frontmatter imports ───────────────────────────────────────────────────────
 
 /// A single import declaration from YAML frontmatter.
@@ -997,6 +1005,14 @@ pub(crate) enum FrontmatterImport {
     Alias { path: String, alias: String },
     Merge { path: String },
     Selective { path: String, names: Vec<String> },
+}
+
+impl FrontmatterImport {
+    pub(crate) fn path(&self) -> &str {
+        match self {
+            Self::Alias { path, .. } | Self::Merge { path } | Self::Selective { path, .. } => path,
+        }
+    }
 }
 
 /// Parse the `imports` key from an already-parsed YAML value.
