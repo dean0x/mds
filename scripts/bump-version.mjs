@@ -35,6 +35,27 @@ if (newCargo !== cargo) {
   console.log(`  Cargo.toml → ${version}`);
 }
 
+// --- 1b. Inter-crate dependency versions (path + version deps on mds-core) ---
+const CRATE_CARGO_PATHS = [
+  'crates/mds-cli/Cargo.toml',
+  'crates/mds-napi/Cargo.toml',
+  'crates/mds-wasm/Cargo.toml',
+];
+
+for (const rel of CRATE_CARGO_PATHS) {
+  const abs = join(ROOT, rel);
+  const content = readFileSync(abs, 'utf8');
+  const updated = content.replace(
+    /(package\s*=\s*"mds-core".*?version\s*=\s*")([^"]+)(")/g,
+    `$1${version}$3`,
+  );
+  if (updated !== content) {
+    writeFileSync(abs, updated);
+    changed++;
+    console.log(`  ${rel} → mds-core ${version}`);
+  }
+}
+
 // --- 2. Publishable package.json files --------------------------------------
 const PKG_PATHS = [
   'crates/mds-napi/package.json',
