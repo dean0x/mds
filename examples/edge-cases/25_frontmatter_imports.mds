@@ -1,0 +1,27 @@
+---
+type: mds
+topic: Frontmatter Imports
+imports:
+  - path: ../prompt-library/formatting.mds
+    as: fmt
+  - path: ../prompt-library/guardrails.mds
+    names: [safety_rules, tone_professional]
+  - path: ../prompt-library/personas.mds
+---
+
+# {fmt.bold(topic)}
+
+## Alias import (fmt.bold, fmt.badge)
+
+{fmt.badge("Feature", "Frontmatter Imports")}
+{fmt.badge("Version", "0.2.0")}
+
+## Selective import (safety_rules, tone_professional)
+
+{safety_rules()}
+
+{tone_professional()}
+
+## Merge import (teacher from personas)
+
+{teacher("MDS Templates")}

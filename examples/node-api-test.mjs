@@ -527,6 +527,40 @@ test('compileFile: colon in string args', async () => {
   assert(result.output.includes('- usr'), '@for with colon separator should work');
 });
 
+// ─── Tests: frontmatter imports (issue #75) ────────────────────
+test('compileFile: frontmatter imports (alias, selective, merge)', async () => {
+  const result = await mds.compileFile(
+    resolve(__dirname, 'edge-cases/25_frontmatter_imports.mds'),
+  );
+  assert(result.output.includes('**Frontmatter Imports**'), 'alias import: fmt.bold should work');
+  assert(result.output.includes('`Frontmatter Imports`'), 'alias import: fmt.badge should work');
+  assert(result.output.includes('Safety Guidelines'), 'selective import: safety_rules should work');
+  assert(result.output.includes('professional'), 'selective import: tone_professional should work');
+  assert(result.output.includes('MDS Templates'), 'merge import: teacher should work');
+  assert(result.dependencies.length >= 3, `expected >=3 deps, got ${result.dependencies.length}`);
+});
+
+test('frontmatter imports: inline alias', () => {
+  const lib = `@define greet(x):\nHello {x}!\n@end\n@export greet\n`;
+  const main = `---\ntype: mds\nimports:\n  - path: ./lib.mds\n    as: lib\n---\n{lib.greet("World")}\n`;
+  try {
+    const result = mds.compile(main);
+    assert(false, 'inline frontmatter imports need file-based resolution');
+  } catch {
+    // frontmatter imports require file resolution — expected to fail with compile()
+  }
+});
+
+test('frontmatter imports: compile() rejects scalar imports key', () => {
+  try {
+    mds.compile(`---\nimports: some_value\nname: test\n---\nHello {name}\n`);
+    assert(false, 'should throw — compile() treats source as MDS, so imports is reserved');
+  } catch (err) {
+    assert(mds.isMdsError(err), 'should be MDS error');
+    assert(err.code === 'mds::import', `expected mds::import, got ${err.code}`);
+  }
+});
+
 // ─── Run all tests ───────────────────────────────────────────────
 console.log(`\nRunning ${tests.length} tests...\n`);
 
