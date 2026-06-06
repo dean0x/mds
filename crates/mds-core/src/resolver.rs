@@ -464,10 +464,7 @@ impl ModuleCache {
             match imp {
                 FrontmatterImport::Alias { path, alias } => {
                     if scope.get_namespace(alias).is_some() {
-                        return Err(MdsError::import_error(format!(
-                            "name collision: '{alias}' is already defined \
-                             (in frontmatter imports[{i}])"
-                        )));
+                        return Err(MdsError::name_collision(alias.to_string()));
                     }
                     let resolved = self
                         .resolve_import_from(ctx.base_key, path, ctx.runtime_vars, warnings)
@@ -480,10 +477,7 @@ impl ModuleCache {
                         .map_err(|e| attach_frontmatter_index(e, i))?;
                     for (name, func) in resolved.get_all_exports() {
                         if scope.get_function(&name).is_some() {
-                            return Err(MdsError::import_error(format!(
-                                "name collision: '{name}' is already defined \
-                                 (in frontmatter imports[{i}])"
-                            )));
+                            return Err(MdsError::name_collision(name));
                         }
                         scope.set_function(&name, func);
                     }
@@ -893,12 +887,15 @@ fn has_type_mds_frontmatter(source: &str) -> bool {
         .and_then(|after_fence| after_fence.find("\n---").map(|end| &after_fence[..end]))
         .is_some_and(|fm| {
             fm.lines().any(|line| {
-                line.trim().strip_prefix("type:").is_some_and(|v| {
-                    let v = v.trim();
-                    // Match bare, double-quoted, and single-quoted values,
-                    // mirroring the strip_type_mds helper elsewhere.
-                    v == "mds" || v == "\"mds\"" || v == "'mds'"
-                })
+                // Only match top-level (non-indented) keys, consistent with
+                // strip_reserved_keys which checks !starts_with(char::is_whitespace).
+                !line.starts_with(char::is_whitespace)
+                    && line.strip_prefix("type:").is_some_and(|v| {
+                        let v = v.trim();
+                        // Match bare, double-quoted, and single-quoted values,
+                        // mirroring the strip_type_mds helper elsewhere.
+                        v == "mds" || v == "\"mds\"" || v == "'mds'"
+                    })
             })
         })
 }
@@ -909,10 +906,13 @@ fn has_type_mds_frontmatter(source: &str) -> bool {
 /// (the already-extracted frontmatter body) rather than the full source.
 fn has_type_mds_frontmatter_raw(raw: &str) -> bool {
     raw.lines().any(|line| {
-        line.trim().strip_prefix("type:").is_some_and(|v| {
-            let v = v.trim();
-            v == "mds" || v == "\"mds\"" || v == "'mds'"
-        })
+        // Only match top-level (non-indented) keys, consistent with
+        // strip_reserved_keys which checks !starts_with(char::is_whitespace).
+        !line.starts_with(char::is_whitespace)
+            && line.strip_prefix("type:").is_some_and(|v| {
+                let v = v.trim();
+                v == "mds" || v == "\"mds\"" || v == "'mds'"
+            })
     })
 }
 
@@ -1034,98 +1034,118 @@ pub(crate) fn parse_frontmatter_imports_from_yaml(
         )));
     }
 
-    let mut result = Vec::with_capacity(seq.len());
+    seq.iter()
+        .enumerate()
+        .map(|(index, entry)| parse_single_import_entry(entry, index))
+        .collect()
+}
 
-    for (index, entry) in seq.iter().enumerate() {
-        let err =
-            |msg: &str| MdsError::import_error(format!("imports[{index}]: {msg} (in frontmatter)"));
+/// Parse one entry from the `imports` YAML sequence.
+///
+/// `index` is used solely for error messages.
+fn parse_single_import_entry(
+    entry: &serde_yaml_ng::Value,
+    index: usize,
+) -> Result<FrontmatterImport, MdsError> {
+    let err = |msg: &str| MdsError::import_error(format!("imports[{index}]: {msg} (in frontmatter)"));
 
-        let serde_yaml_ng::Value::Mapping(map) = entry else {
-            return Err(err("each entry must be a mapping"));
+    let serde_yaml_ng::Value::Mapping(map) = entry else {
+        return Err(err("each entry must be a mapping"));
+    };
+
+    // Extract path (required)
+    let path_val = map
+        .get("path")
+        .ok_or_else(|| err("missing required key 'path'"))?;
+    let serde_yaml_ng::Value::String(path) = path_val else {
+        return Err(err("'path' must be a string"));
+    };
+    let path = path.clone();
+
+    // Validate path via the same rules as body @import
+    validate_import_path(&path).map_err(|_| {
+        err(&format!(
+            "invalid path \"{path}\": must start with './' or '../'"
+        ))
+    })?;
+
+    // Extract optional `as` and `names`
+    let as_val = map.get("as");
+    let names_val = map.get("names");
+
+    // Check for unknown keys and reject non-string keys explicitly.
+    for (k, _) in map {
+        let serde_yaml_ng::Value::String(key_str) = k else {
+            return Err(err("keys must be strings"));
         };
-
-        // Extract path (required)
-        let path_val = map
-            .get("path")
-            .ok_or_else(|| err("missing required key 'path'"))?;
-        let serde_yaml_ng::Value::String(path) = path_val else {
-            return Err(err("'path' must be a string"));
-        };
-        let path = path.clone();
-
-        // Validate path via the same rules as body @import
-        validate_import_path(&path).map_err(|_| {
-            err(&format!(
-                "invalid path \"{path}\": must start with './' or '../'"
-            ))
-        })?;
-
-        // Extract optional `as` and `names`
-        let as_val = map.get("as");
-        let names_val = map.get("names");
-
-        // Check for unknown keys
-        for (k, _) in map {
-            let serde_yaml_ng::Value::String(key_str) = k else {
-                continue;
-            };
-            match key_str.as_str() {
-                "path" | "as" | "names" => {}
-                other => {
-                    return Err(err(&format!("unknown key '{other}'")));
-                }
-            }
-        }
-
-        match (as_val, names_val) {
-            (Some(_), Some(_)) => {
-                return Err(err("'as' and 'names' are mutually exclusive"));
-            }
-            (Some(as_v), None) => {
-                let serde_yaml_ng::Value::String(alias) = as_v else {
-                    return Err(err("'as' must be a string"));
-                };
-                if !is_valid_identifier(alias) {
-                    return Err(err(&format!(
-                        "invalid identifier '{alias}' for 'as': must start with a letter or '_' \
-                         and contain only alphanumeric characters or '_'"
-                    )));
-                }
-                result.push(FrontmatterImport::Alias {
-                    path,
-                    alias: alias.clone(),
-                });
-            }
-            (None, Some(names_v)) => {
-                let serde_yaml_ng::Value::Sequence(names_seq) = names_v else {
-                    return Err(err("'names' must be a sequence"));
-                };
-                if names_seq.is_empty() {
-                    return Err(err("names cannot be empty"));
-                }
-                let mut names = Vec::with_capacity(names_seq.len());
-                for name_val in names_seq {
-                    let serde_yaml_ng::Value::String(name) = name_val else {
-                        return Err(err("each name in 'names' must be a string"));
-                    };
-                    // "prompt" is a special export name — allowed without identifier validation
-                    if name != "prompt" && !is_valid_identifier(name) {
-                        return Err(err(&format!(
-                            "invalid identifier '{name}' in 'names': must start with a letter or \
-                             '_' and contain only alphanumeric characters or '_'"
-                        )));
-                    }
-                    names.push(name.clone());
-                }
-                result.push(FrontmatterImport::Selective { path, names });
-            }
-            (None, None) => {
-                result.push(FrontmatterImport::Merge { path });
+        match key_str.as_str() {
+            "path" | "as" | "names" => {}
+            other => {
+                return Err(err(&format!("unknown key '{other}'")));
             }
         }
     }
 
-    Ok(result)
+    match (as_val, names_val) {
+        (Some(_), Some(_)) => Err(err("'as' and 'names' are mutually exclusive")),
+        (Some(as_v), None) => parse_alias_entry(as_v, path, &err),
+        (None, Some(names_v)) => parse_selective_entry(names_v, path, &err),
+        (None, None) => Ok(FrontmatterImport::Merge { path }),
+    }
+}
+
+/// Parse the alias (`as`) form of a frontmatter import entry.
+fn parse_alias_entry(
+    as_v: &serde_yaml_ng::Value,
+    path: String,
+    err: &impl Fn(&str) -> MdsError,
+) -> Result<FrontmatterImport, MdsError> {
+    let serde_yaml_ng::Value::String(alias) = as_v else {
+        return Err(err("'as' must be a string"));
+    };
+    if !is_valid_identifier(alias) {
+        return Err(err(&format!(
+            "invalid identifier '{alias}' for 'as': must start with a letter or '_' \
+             and contain only alphanumeric characters or '_'"
+        )));
+    }
+    Ok(FrontmatterImport::Alias {
+        path,
+        alias: alias.clone(),
+    })
+}
+
+/// Parse the selective (`names`) form of a frontmatter import entry.
+fn parse_selective_entry(
+    names_v: &serde_yaml_ng::Value,
+    path: String,
+    err: &impl Fn(&str) -> MdsError,
+) -> Result<FrontmatterImport, MdsError> {
+    let serde_yaml_ng::Value::Sequence(names_seq) = names_v else {
+        return Err(err("'names' must be a sequence"));
+    };
+    if names_seq.is_empty() {
+        return Err(err("names cannot be empty"));
+    }
+    let mut names = Vec::with_capacity(names_seq.len());
+    let mut seen = HashSet::with_capacity(names_seq.len());
+    for name_val in names_seq {
+        let serde_yaml_ng::Value::String(name) = name_val else {
+            return Err(err("each name in 'names' must be a string"));
+        };
+        // "prompt" is a special export name — allowed without identifier validation
+        if name != "prompt" && !is_valid_identifier(name) {
+            return Err(err(&format!(
+                "invalid identifier '{name}' in 'names': must start with a letter or \
+                 '_' and contain only alphanumeric characters or '_'"
+            )));
+        }
+        if !seen.insert(name.as_str()) {
+            return Err(err(&format!("duplicate name '{name}' in 'names'")));
+        }
+        names.push(name.clone());
+    }
+    Ok(FrontmatterImport::Selective { path, names })
 }
 
 /// Parse frontmatter imports from a raw YAML string.
@@ -1329,6 +1349,69 @@ mod tests {
                 path: "./lib.mds".into(),
                 names: vec!["prompt".into()],
             }]
+        );
+    }
+
+    #[test]
+    fn parse_fm_err_duplicate_names() {
+        // Duplicate names in the selective names list must be rejected.
+        let v = yaml("- path: ./lib.mds\n  names: [greet, greet]\n");
+        let err = parse_frontmatter_imports_from_yaml(&v).expect_err("duplicate names should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate name 'greet'") && msg.contains("in frontmatter"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_fm_err_non_string_key() {
+        // Non-string YAML keys (e.g. integer keys) must be rejected explicitly.
+        // Construct a YAML mapping with an integer key via the serde_yaml_ng API
+        // since inline YAML always coerces to string keys.
+        let mut map = serde_yaml_ng::Mapping::new();
+        map.insert(
+            serde_yaml_ng::Value::String("path".into()),
+            serde_yaml_ng::Value::String("./lib.mds".into()),
+        );
+        map.insert(
+            serde_yaml_ng::Value::Number(42.into()),
+            serde_yaml_ng::Value::String("something".into()),
+        );
+        let seq = serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::Mapping(map)]);
+        let err =
+            parse_frontmatter_imports_from_yaml(&seq).expect_err("non-string key should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("keys must be strings") && msg.contains("in frontmatter"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn has_type_mds_frontmatter_raw_ignores_indented() {
+        // Indented `type: mds` inside a nested YAML object must not be detected
+        // as the file-type marker (only top-level non-indented keys should match).
+        assert!(
+            !has_type_mds_frontmatter_raw("config:\n  type: mds\n  key: val\n"),
+            "indented type:mds should not trigger detection"
+        );
+        assert!(
+            has_type_mds_frontmatter_raw("type: mds\nconfig:\n  type: other\n"),
+            "top-level type:mds should trigger detection"
+        );
+    }
+
+    #[test]
+    fn has_type_mds_frontmatter_ignores_indented() {
+        // Same as above but for the full-source variant.
+        assert!(
+            !has_type_mds_frontmatter("---\nconfig:\n  type: mds\n---\nbody\n"),
+            "indented type:mds should not trigger detection in full-source variant"
+        );
+        assert!(
+            has_type_mds_frontmatter("---\ntype: mds\nconfig:\n  type: other\n---\nbody\n"),
+            "top-level type:mds should trigger detection in full-source variant"
         );
     }
 }
