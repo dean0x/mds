@@ -15,7 +15,7 @@ mds build examples/ai-agent/system-prompt.mds -o -
 | [`api-docs/`](api-docs/) | Generating API documentation from endpoint and response-schema templates |
 | [`blog-generator/`](blog-generator/) | A blog post template driven by frontmatter variables |
 | [`prompt-library/`](prompt-library/) | A reusable prompt library using `@export`/`@import` (personas, formatting, guardrails) |
-| [`edge-cases/`](edge-cases/) | Numbered walkthrough of language features — loops, conditionals, imports, escaping, re-exports, runtime vars |
+| [`edge-cases/`](edge-cases/) | Numbered walkthrough of language features — loops, conditionals, imports, escaping, re-exports, runtime vars, built-in functions, default args, logical operators, expression directives, frontmatter imports |
 | [`stress-test/`](stress-test/) | A large, deeply-composed template tree exercising the resolver and evaluator |
 
 Some examples take runtime variables — pass the accompanying `vars.json`:

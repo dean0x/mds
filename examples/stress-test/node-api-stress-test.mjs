@@ -298,7 +298,18 @@ async function run() {
     assert(!isMdsError(null), 'isMdsError rejects null');
   }
 
-  // ── Group 10: Dependencies tracking ──
+  // ── Group 10: Frontmatter imports ──
+  console.log('\n── Frontmatter imports ──');
+  {
+    const result = await compileFile(r('edge/frontmatter-imports.mds'));
+    assertContains(result.output, '**Frontmatter Imports**', 'fm-imports: alias bold');
+    assertContains(result.output, '`frontmatter-imports`', 'fm-imports: alias badge');
+    assertContains(result.output, 'Safety Guidelines', 'fm-imports: selective safety_rules');
+    assertContains(result.output, 'MDS', 'fm-imports: merge teacher');
+    assert(result.dependencies.length >= 3, `fm-imports has ${result.dependencies.length} deps (expected 3+)`);
+  }
+
+  // ── Group 11: Dependencies tracking ──
   console.log('\n── Dependencies ──');
   {
     const result = await compileFile(r('shared/chain-consumer.mds'));

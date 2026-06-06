@@ -1,0 +1,18 @@
+---
+type: mds
+topic: Frontmatter Imports
+imports:
+  - path: ../lib/formatting.mds
+    as: fmt
+  - path: ../lib/guardrails.mds
+    names: [safety_rules]
+  - path: ../lib/personas.mds
+---
+
+# {fmt.bold(topic)}
+
+{fmt.badge("Feature", "frontmatter-imports")}
+
+{safety_rules()}
+
+{teacher("MDS")}
