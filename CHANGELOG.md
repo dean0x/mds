@@ -7,10 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Language features
+
+- 18 built-in functions: `upper`, `lower`, `trim`, `trim_start`, `trim_end`,
+  `replace`, `split`, `join`, `length`, `contains`, `starts_with`, `ends_with`,
+  `repeat`, `substring`, `reverse`, `default`, `number`, `string`
+- Default function arguments: `@define greet(name, greeting = "Hello"):`
+- Logical operators in conditions: `@if a && b:`, `@if a || b:` with `&&`
+  binding tighter than `||`
+- Expression support in `@for` and `@if` directives — function calls and
+  chained expressions can be used directly in directive arguments
+- Frontmatter imports: declare dependencies in YAML frontmatter alongside
+  variables, replacing or supplementing `@import` directives in the body
+
+### Performance
+
+- Re-enabled `wasm-opt` with `-Oz` optimization (Binaryen v129) for smaller
+  WASM binary output
+
 ### Internal
 
 - Consolidated cross-module resource-limit constants into `crates/mds-core/src/limits.rs`
 - Split `parser.rs` into focused modules: `parser.rs` (core), `parser_helpers.rs` (helpers), and `parser_tests.rs` (tests)
+- Updated all dependencies and CI actions (TypeScript 6, Vite 8, actions v6/v7/v8)
 
 ## [0.1.0] — 2026-05-31
 
