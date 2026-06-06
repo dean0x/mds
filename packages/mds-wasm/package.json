@@ -1,6 +1,6 @@
 {
   "name": "@mdscript/mds-wasm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "WebAssembly build of the MDS (Markdown Script) compiler — used as the portable fallback by @mdscript/mds",
   "license": "MIT",
   "repository": {
@@ -10,7 +10,16 @@
   },
   "homepage": "https://github.com/dean0x/mds#readme",
   "bugs": "https://github.com/dean0x/mds/issues",
-  "keywords": ["markdown", "template", "llm", "prompt", "compiler", "mds", "wasm", "webassembly"],
+  "keywords": [
+    "markdown",
+    "template",
+    "llm",
+    "prompt",
+    "compiler",
+    "mds",
+    "wasm",
+    "webassembly"
+  ],
   "engines": {
     "node": ">=22.0.0"
   },

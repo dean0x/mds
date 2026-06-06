@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-06-06
+
 ### Language features
 
 - 18 built-in functions: `upper`, `lower`, `trim`, `trim_start`, `trim_end`,
@@ -116,5 +118,6 @@ First public release of the MDS (Markdown Script) compiler.
 
 - 590 Rust tests (integration, unit, and doc-tests across the workspace) plus the JavaScript package suites
 
-[Unreleased]: https://github.com/dean0x/mds/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/dean0x/mds/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/dean0x/mds/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dean0x/mds/releases/tag/v0.1.0

@@ -118,3 +118,48 @@ A fix may be incomplete, mis-scoped, or address a symptom rather than the root c
 - **Decision**: one GitHub issue per roadmap item tagged to target milestone, with mini-PRD (motivation + proposed API + design considerations + acceptance criteria)
 - **Consequences**: right-sized artifact — orients future planning sessions without over-specifying
 - **Source**: self-learning:obs_i9j3l7
+
+## ADR-010: Reuse parse_expr_inner across interpolation and directive parsing to avoid grammar duplication
+
+- **Date**: 2026-06-06
+- **Status**: Accepted
+- **Context**: @for and @if only accepted bare variable names while interpolation had full expression support
+- **Decision**: extract parse_expr_inner from parse_interpolation_expr and wire it into directive condition and iterable parsing
+- **Consequences**: single grammar shared between interpolation and directives eliminates semantic gap and keeps the two paths in sync when new expression forms are added
+- **Source**: self-learning:obs_j1k4m8
+
+## ADR-011: Specify explicit wasm-opt feature flags matching LLVM output rather than using -all or --all-features
+
+- **Date**: 2026-06-06
+- **Status**: Accepted
+- **Context**: wasm-opt was disabled because newer LLVM emits instructions that crash wasm-opt without matching feature flags
+- **Decision**: pass explicit feature flags (--enable-bulk-memory, --enable-sign-ext, --enable-nontrapping-float-to-int, --enable-mutable-globals) rather than -all
+- **Consequences**: explicit flags are self-documenting, match actual LLVM output, and are the consensus approach across wasm-pack and cargo-leptos communities
+- **Source**: self-learning:obs_k2l5n9
+
+## ADR-012: Extract repeated CI tool setup into composite action for single-point version management
+
+- **Date**: 2026-06-06
+- **Status**: Accepted
+- **Context**: wasm-pack + Binaryen setup duplicated across multiple CI jobs
+- **Decision**: extract into a composite action at .github/actions/setup-wasm/ with SHA-pinned dependencies and version parameters
+- **Consequences**: single-point version management means updating Binaryen or wasm-pack requires one edit
+- **Source**: self-learning:obs_l3m6o0
+
+## ADR-013: MDS runtime virtual filesystem: Linux fuse3 crate (pure Rust) + macOS FSKit (Swift + C FFI bridge)
+
+- **Date**: 2026-06-06
+- **Status**: Accepted
+- **Context**: designing on-read compilation for .md files containing MDS directives
+- **Decision**: dual-platform virtual filesystem — Linux uses fuse3 crate speaking /dev/fuse directly in pure Rust, macOS uses Apple FSKit with a Swift extension bridging to mds-core via a C FFI crate (mds-cffi)
+- **Consequences**: each platform uses its native mechanism with no third-party kernel extensions
+- **Source**: self-learning:obs_n5o8q2
+
+## ADR-014: Frontmatter imports resolve before body @import directives; namespace collision is a compile error
+
+- **Date**: 2026-06-06
+- **Status**: Accepted
+- **Context**: adding imports key to YAML frontmatter as alternative to body @import directives
+- **Decision**: frontmatter imports processed first, duplicate namespace between frontmatter and body is a hard compile error
+- **Consequences**: first-wins ordering makes dependency resolution deterministic
+- **Source**: self-learning:obs_o6p9r3

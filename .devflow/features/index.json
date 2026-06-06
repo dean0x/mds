@@ -25,7 +25,7 @@
     },
     "mds-compiler": {
       "name": "MDS Compiler",
-      "description": "Use when working on the MDS compilation pipeline, adding directives, modifying scope/variable handling, extending the module system, debugging output rendering, modifying CLI output behavior, or using the virtual filesystem / dependency tracking API. Keywords: lexer, parser, parser_helpers, evaluator, resolver, validator, scope, builtins, built-in functions, default arguments, Param, logical operators, Condition And Or, frontmatter, interpolation, directive, import, export, include, define, for, if, elseif, negation, equality, Condition, CondValue, closure, lexical scope, prompt export, nested function calls, arg parsing, NumberLiteral, BooleanLiteral, NullLiteral, ArityMismatch, BuiltinError, call_function Value, condvalue_to_value, required_param_count, MAX_LOGICAL_OPERANDS, limits.rs, object, map, Value::Object, dot notation, member access, MemberAccess, SerializedError, serialize, error serialization.",
+      "description": "Use when working on the MDS compilation pipeline, adding directives, modifying scope/variable handling, extending the module system, or debugging output rendering. Keywords: lexer, parser, evaluator, resolver, validator, scope, builtins, Condition Expr And Or, Arg, Param, CondValue, default arguments, built-in functions, frontmatter imports, FrontmatterImport, parse_expr_inner, strip_trailing_directive_colon, values_equal_runtime, required_param_count (in ast.rs), condvalue_to_value, MAX_FRONTMATTER_IMPORTS, limits.rs, ArityMismatch, BuiltinError.",
       "directories": [
         "crates/mds-core/src/",
         "crates/mds-cli/src/",
@@ -49,7 +49,7 @@
         "crates/mds-cli/src/main.rs",
         "crates/mds-core/tests/api_surface.rs"
       ],
-      "lastUpdated": "2026-06-02T13:19:11.470Z",
+      "lastUpdated": "2026-06-06T18:56:39.275Z",
       "createdBy": "implement"
     },
     "mds-js": {
