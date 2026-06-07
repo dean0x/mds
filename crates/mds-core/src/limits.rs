@@ -65,3 +65,11 @@ pub(crate) const MAX_FRONTMATTER_IMPORTS: usize = 256;
 /// of messages via `@for` loops or deeply nested conditionals.
 /// 10 000 messages is generous for any real LLM conversation template.
 pub(crate) const MAX_MESSAGE_COUNT: usize = 10_000;
+
+/// Maximum cumulative byte size of all message content produced by `compile_messages`.
+///
+/// Caps the aggregate content across the entire message array at the same ceiling as
+/// a single text-mode output (MAX_OUTPUT_SIZE = 50 MB).  Without this, 10 000 messages
+/// each near the per-message size limit could allocate ~500 GB in a single evaluation.
+/// The incremental check in `collect_single_message` catches runaway growth early.
+pub(crate) const MAX_MESSAGES_TOTAL_SIZE: usize = MAX_OUTPUT_SIZE;

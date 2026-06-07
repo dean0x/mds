@@ -6,7 +6,10 @@ use crate::ast::{
     MessageBlock, Node,
 };
 use crate::error::MdsError;
-use crate::limits::{MAX_DOT_SEGMENTS, MAX_ELSEIF_BRANCHES, MAX_MESSAGE_COUNT, MAX_OUTPUT_SIZE};
+use crate::limits::{
+    MAX_DOT_SEGMENTS, MAX_ELSEIF_BRANCHES, MAX_MESSAGES_TOTAL_SIZE, MAX_MESSAGE_COUNT,
+    MAX_OUTPUT_SIZE,
+};
 use crate::scope::{FunctionDef, Scope};
 use crate::value::Value;
 
@@ -33,6 +36,9 @@ pub(crate) struct EvalContext<'a> {
     call_stack: Vec<String>,
     /// Cumulative loop iterations across all @for loops in one compilation.
     total_iterations: usize,
+    /// Running byte total of all message content pushed in messages mode.
+    /// Checked incrementally so runaway growth is caught before building a giant Vec.
+    total_message_bytes: usize,
     /// Accumulated warnings (e.g. empty @include).
     warnings: &'a mut Vec<String>,
 }
@@ -48,6 +54,7 @@ pub fn evaluate(
     let mut ctx = EvalContext {
         call_stack: Vec::new(),
         total_iterations: 0,
+        total_message_bytes: 0,
         warnings,
     };
     evaluate_nodes(nodes, scope, &mut ctx)
@@ -689,6 +696,7 @@ pub fn evaluate_messages(
     let mut ctx = EvalContext {
         call_stack: Vec::new(),
         total_iterations: 0,
+        total_message_bytes: 0,
         warnings,
     };
     let mut messages = Vec::new();
@@ -787,6 +795,17 @@ fn collect_single_message(
         )));
     }
 
+    // Incremental cumulative-size check (AC-6.3): cap the aggregate content bytes
+    // across all messages at MAX_MESSAGES_TOTAL_SIZE (50 MB) — the same ceiling a
+    // single text-mode output has.  Checked before pushing so a runaway is caught early.
+    ctx.total_message_bytes = ctx.total_message_bytes.saturating_add(content.len());
+    if ctx.total_message_bytes > MAX_MESSAGES_TOTAL_SIZE {
+        return Err(MdsError::resource_limit(format!(
+            "total message content exceeds maximum cumulative size of {} bytes",
+            MAX_MESSAGES_TOTAL_SIZE
+        )));
+    }
+
     out.push(EvalMessage { role, content });
     Ok(())
 }
@@ -819,16 +838,61 @@ fn collect_messages_from_for(
 ) -> Result<(), MdsError> {
     let iterable = evaluate_expr(&block.iterable, scope, ctx)?;
 
-    let array = match iterable {
-        Value::Array(a) => a,
-        Value::String(s) => s.chars().map(|c| Value::String(c.to_string())).collect(),
-        other => {
-            return Err(MdsError::type_error(format!(
-                "@for iterable must be an array or string, but got {}",
-                other.type_name()
+    // Mirror text-mode dispatch exactly (evaluate_for):
+    //   - key_var present → key-value iteration over an Object only
+    //   - key_var absent  → array iteration (Objects rejected with a hint)
+    if let Some(ref key_var) = block.key_var {
+        // Key-value iteration: @for key, value in obj:
+        let map = match iterable {
+            Value::Object(m) => m,
+            _ => {
+                return Err(MdsError::syntax(format!(
+                    "key-value iteration requires an object, but got {}",
+                    iterable.type_name()
+                )));
+            }
+        };
+
+        if map.len() > MAX_LOOP_ITERATIONS {
+            return Err(MdsError::resource_limit(format!(
+                "object has {} entries, exceeding maximum loop iteration limit of {}",
+                map.len(),
+                MAX_LOOP_ITERATIONS
             )));
         }
-    };
+
+        // Sort keys alphabetically for deterministic output (matches text-mode behaviour).
+        let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        for (key, val) in entries {
+            ctx.total_iterations += 1;
+            if ctx.total_iterations > MAX_TOTAL_ITERATIONS {
+                return Err(MdsError::resource_limit(format!(
+                    "total loop iterations exceeded maximum of {} across all loops in this compilation",
+                    MAX_TOTAL_ITERATIONS
+                )));
+            }
+            scope.push();
+            scope.set_var(key_var, Value::String(key));
+            scope.set_var(&block.var, val);
+            let result = collect_messages(&block.body, scope, ctx, out);
+            prefer_first_error(result, scope.pop())?;
+        }
+        return Ok(());
+    }
+
+    // Standard array iteration: @for item in iterable:
+    // Objects are rejected here with a hint to use key-value syntax (matches text-mode).
+    if let Value::Object(_) = &iterable {
+        return Err(MdsError::syntax(
+            "to iterate over an object's entries, use `@for key, value in obj:` syntax",
+        ));
+    }
+
+    let array = iterable
+        .as_array()
+        .ok_or_else(|| MdsError::type_error(iterable.type_name()))?;
 
     if array.len() > MAX_LOOP_ITERATIONS {
         return Err(MdsError::resource_limit(format!(
@@ -838,7 +902,10 @@ fn collect_messages_from_for(
         )));
     }
 
-    for item in array {
+    // Clone items to release the borrow on scope before iterating.
+    let items = array.to_vec();
+
+    for item in items {
         ctx.total_iterations += 1;
         if ctx.total_iterations > MAX_TOTAL_ITERATIONS {
             return Err(MdsError::resource_limit(format!(
