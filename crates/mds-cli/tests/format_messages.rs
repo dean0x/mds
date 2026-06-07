@@ -285,3 +285,46 @@ fn format_messages_from_stdin_produces_valid_json() {
     assert_eq!(arr[0]["role"].as_str().unwrap(), "system");
     assert_eq!(arr[1]["role"].as_str().unwrap(), "user");
 }
+
+// ── I11: oversized file → non-zero exit with clear error message ──────────────
+
+#[test]
+fn format_messages_rejects_oversized_file() {
+    // MAX_FILE_SIZE is 10 MiB. Write a file just over that limit.
+    let dir = tempfile::tempdir().unwrap();
+    let big_file = dir.path().join("big.mds");
+
+    // Write a valid header plus enough padding to exceed 10 MiB.
+    let header = b"@message system:\nYou are helpful.\n@end\n";
+    let padding_size = 10 * 1024 * 1024 + 1 - header.len();
+    let mut contents = header.to_vec();
+    contents.extend(std::iter::repeat_n(b' ', padding_size));
+
+    std::fs::write(&big_file, &contents).unwrap();
+
+    let output = mds_bin()
+        .args([
+            "build",
+            big_file.to_str().unwrap(),
+            "--format",
+            "messages",
+            "-o",
+            "-",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "build --format messages should fail for a file exceeding MAX_FILE_SIZE; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("too large") || stderr.contains("max") || stderr.contains("bytes"),
+        "error should mention file-size limit; got: {stderr}"
+    );
+}

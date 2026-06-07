@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use clap::{Parser, Subcommand};
-use mds::{MdsError, MAX_FILE_SIZE as MAX_STDIN_SIZE, MAX_TRAVERSAL_DEPTH};
+use mds::{MdsError, MAX_FILE_SIZE, MAX_TRAVERSAL_DEPTH};
 use miette::Result;
 use serde::Deserialize;
 
@@ -412,20 +412,54 @@ fn reject_directory_input(input: &Path) -> Result<()> {
 
 /// Read from stdin and return the source string along with the current working directory.
 ///
-/// Reads at most `MAX_STDIN_SIZE + 1` bytes so we can detect over-sized input without
+/// Reads at most `MAX_FILE_SIZE + 1` bytes so we can detect over-sized input without
 /// buffering the entire stream first.
 fn read_stdin() -> Result<(String, PathBuf)> {
     let mut source = String::new();
     std::io::stdin()
-        .take(MAX_STDIN_SIZE + 1)
+        .take(MAX_FILE_SIZE + 1)
         .read_to_string(&mut source)
         .map_err(|e| miette::miette!("cannot read stdin: {e}"))?;
-    if source.len() as u64 > MAX_STDIN_SIZE {
+    if source.len() as u64 > MAX_FILE_SIZE {
         return Err(miette::miette!("stdin input exceeds maximum size of 10 MB"));
     }
     let cwd = std::env::current_dir()
         .map_err(|e| miette::miette!("cannot determine current directory: {e}"))?;
     Ok((source, cwd))
+}
+
+/// Read the source string for messages-mode compilation, handling both stdin and file inputs.
+///
+/// Returns `(source, base_dir)` where:
+/// - `source` is the UTF-8 text of the input
+/// - `base_dir` is the directory used to resolve relative imports (cwd for stdin, parent
+///   dir of the file otherwise)
+///
+/// Enforces `MAX_FILE_SIZE` on file reads so the messages-mode path has the same defense-in-depth
+/// protection as markdown mode (which goes through the resolver, which enforces the limit).
+/// Stdin is already guarded by `read_stdin`.
+///
+/// This helper is used only by the messages-mode arm of `run_build`. Markdown mode delegates
+/// its file reading to the core library (`compile_collecting_warnings`) which uses the same limit.
+fn read_build_input(input: &Path) -> Result<(String, PathBuf)> {
+    if input == Path::new("-") {
+        return read_stdin();
+    }
+    let path_str = input
+        .to_str()
+        .ok_or_else(|| miette::miette!("input path is not valid UTF-8"))?;
+    let bytes = std::fs::read(input).map_err(|e| miette::miette!("cannot read {path_str}: {e}"))?;
+    if bytes.len() as u64 > MAX_FILE_SIZE {
+        return Err(miette::miette!(
+            "file too large ({} bytes, max {} bytes): {path_str}",
+            bytes.len(),
+            MAX_FILE_SIZE
+        ));
+    }
+    let source = String::from_utf8(bytes)
+        .map_err(|e| miette::miette!("invalid UTF-8 in {path_str}: {e}"))?;
+    let base_dir = input.parent().unwrap_or(Path::new(".")).to_path_buf();
+    Ok((source, base_dir))
 }
 
 /// Resolve the input path: use the explicit value, or auto-detect from cwd.
@@ -510,24 +544,10 @@ fn run_build(args: BuildArgs) -> Result<()> {
                 Some("-") | None => None,
                 Some(o) => Some(PathBuf::from(o)),
             };
-            let result = if input == Path::new("-") {
-                let (source, cwd) = read_stdin()?;
-                mds::compile_messages_str_with_deps(&source, Some(&cwd), runtime_vars)
-                    .map_err(miette::Error::from)?
-            } else {
-                // Read the file and compile in messages mode.
-                // compile_messages_str_with_deps handles NativeFs canonicalization internally.
-                let base_dir = input.parent().unwrap_or(Path::new("."));
-                let path_str = input
-                    .to_str()
-                    .ok_or_else(|| miette::miette!("input path is not valid UTF-8"))?;
-                let bytes = std::fs::read(&input)
-                    .map_err(|e| miette::miette!("cannot read {path_str}: {e}"))?;
-                let source = String::from_utf8(bytes)
-                    .map_err(|e| miette::miette!("invalid UTF-8 in {path_str}: {e}"))?;
-                mds::compile_messages_str_with_deps(&source, Some(base_dir), runtime_vars)
-                    .map_err(miette::Error::from)?
-            };
+            let (source, base_dir) = read_build_input(&input)?;
+            let result =
+                mds::compile_messages_str_with_deps(&source, Some(&base_dir), runtime_vars)
+                    .map_err(miette::Error::from)?;
             if !quiet {
                 for w in &result.warnings {
                     eprintln!("{w}");
