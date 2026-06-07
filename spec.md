@@ -436,6 +436,99 @@ You have access to:
 
 ---
 
+### 4.10 Messages (@message)
+
+`@message` blocks structure a template as a sequence of chat messages, enabling output as a JSON array instead of plain text.
+
+```mds
+@message system:
+You are a helpful assistant.
+@end
+
+@message user:
+Hello!
+@end
+```
+
+**Role forms:**
+
+| Form | Meaning |
+|------|---------|
+| `@message system:` | Bare word — the role is the literal string `"system"` |
+| `@message {role}:` | Expression — the role is evaluated at runtime from the variable |
+
+```mds
+---
+role: assistant
+---
+
+@message {role}:
+This role comes from the variable.
+@end
+```
+
+**Output modes:**
+
+| Mode | Invocation | Behaviour |
+|------|------------|-----------|
+| Text (default) | `compile_str` / `mds build` | `@message` body rendered inline; role markers ignored — backward compatible |
+| Messages | `compile_messages` / `mds build --format messages` | JSON array of `{role, content}` objects |
+
+```mds
+# text mode output:
+You are a helpful assistant.
+Hello!
+
+# messages mode output:
+[
+  { "role": "system", "content": "You are a helpful assistant." },
+  { "role": "user",   "content": "Hello!" }
+]
+```
+
+**Rules:**
+
+- Role must be a non-empty string; an empty role is a parse error
+- Bare-word roles are always literal strings — they never look up variables
+- Dynamic roles (`{expr}`) must evaluate to a string at runtime; non-string → type error
+- Outer whitespace of the body is trimmed; inner whitespace is preserved
+- Empty bodies (trims to empty string) are silently skipped
+- Frontmatter is excluded from message content
+- Nested `@message` blocks are a parse error
+- In messages mode, text outside any `@message` block emits a warning and is ignored
+- A template with no `@message` blocks compiled in messages mode is a compile error
+- `@if` and `@for` around `@message` blocks work identically in both modes; the same iterable rules apply (see §4.4)
+
+**Control flow inside @message:**
+
+```mds
+---
+admin: true
+tools: [search, code]
+---
+
+@message system:
+@if admin:
+You have admin privileges.
+@end
+Available tools:
+@for tool in tools:
+- {tool}
+@end
+@end
+```
+
+**Resource limits:**
+
+| Limit | Value |
+|-------|-------|
+| `MAX_MESSAGE_COUNT` | 10,000 messages per compilation |
+| Cumulative content size | 50 MB total across all message bodies |
+
+Exceeding either limit returns a `resource_limit` error rather than allowing runaway memory use.
+
+---
+
 ## 5. Compilation Model
 
 | Phase | Description | Errors |
@@ -739,7 +832,6 @@ A language server (Rust) providing diagnostics, completions, go-to-definition fo
 
 These are intentionally deferred to keep the language simple and the compiler focused:
 
-- Structured JSON output (chat message arrays)
 - TypeScript/JS *language* features (note: runtime bindings for calling the compiler from JS/TS *are* provided via the `@mdscript/mds` npm package; this item refers to in-template scripting, which is out of scope)
 - Unbounded recursion: direct recursion is rejected; indirect chains are capped at depth 128 (see §4.5)
 - Macros, async functions, streaming
@@ -759,7 +851,7 @@ These are intentionally deferred to keep the language simple and the compiler fo
 ```
 file            := frontmatter? (directive | text)*
 frontmatter     := "---\n" yaml_content "---\n"
-directive       := import | export | define | include | if_block | for_block
+directive       := import | export | define | include | if_block | for_block | message_block
 
 import          := alias_import | merge_import | selective_import
 alias_import    := "@import" quoted_path "as" identifier
@@ -784,6 +876,8 @@ cond_value      := quoted_string | number | "true" | "false" | "null"
 number          := "-"? [0-9]+ ("." [0-9]+)?   (* not NaN or Infinity; those are rejected at parse time *)
 for_block       := "@for" loop_vars "in" dot_path ":" body "@end"
 loop_vars       := identifier | identifier "," identifier
+message_block   := "@message" role ":" body "@end"
+role            := identifier | "{" dot_path "}"
 
 text            := (raw_text | interpolation | escaped_brace)*
 interpolation   := "{" (qualified_call | member_access | function_call | identifier) "}"
