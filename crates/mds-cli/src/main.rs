@@ -537,53 +537,72 @@ fn run_build(args: BuildArgs) -> Result<()> {
     reject_directory_input(&input)?;
 
     match format {
-        OutputFormat::Messages => {
-            // Messages mode: compile @message blocks to a JSON array.
-            // Output always goes to stdout (or -o) without the output-dir / config logic.
-            let output_path = match output.as_deref() {
-                Some("-") | None => None,
-                Some(o) => Some(PathBuf::from(o)),
-            };
-            let (source, base_dir) = read_build_input(&input)?;
-            let result =
-                mds::compile_messages_str_with_deps(&source, Some(&base_dir), runtime_vars)
-                    .map_err(miette::Error::from)?;
-            if !quiet {
-                for w in &result.warnings {
-                    eprintln!("{w}");
-                }
-            }
-            let json = serde_json::to_string_pretty(&result.messages)
-                .map_err(|e| miette::miette!("failed to serialize messages to JSON: {e}"))?;
-            let json_with_newline = format!("{json}\n");
-            write_output(output_path, &json_with_newline, quiet)
-        }
-        OutputFormat::Markdown => {
-            // Load project config (mds.json), walking up from the input file.
-            let config = load_config(&input)?;
+        OutputFormat::Messages => run_build_messages(input, output, runtime_vars, quiet),
+        OutputFormat::Markdown => run_build_markdown(input, output, out_dir, runtime_vars, quiet),
+    }
+}
 
-            // Resolve output destination before compiling (config discovery happens once).
-            let output_path =
-                resolve_output_path(&Some(input.clone()), &output, &out_dir, &config)?;
-
-            let (compiled, warnings) = if input == Path::new("-") {
-                let (source, cwd) = read_stdin()?;
-                mds::compile_str_collecting_warnings(&source, Some(&cwd), runtime_vars)
-                    .map_err(miette::Error::from)?
-            } else {
-                mds::compile_collecting_warnings(&input, runtime_vars)
-                    .map_err(miette::Error::from)?
-            };
-
-            if !quiet {
-                for w in &warnings {
-                    eprintln!("{w}");
-                }
-            }
-
-            write_output(output_path, &compiled, quiet)
+/// Compile `@message` blocks to a JSON array and write to stdout or `-o`.
+///
+/// Skips the output-dir / `mds.json` project-config logic — output always goes
+/// to stdout or an explicit `-o` path.
+fn run_build_messages(
+    input: PathBuf,
+    output: Option<String>,
+    runtime_vars: Option<HashMap<String, mds::Value>>,
+    quiet: bool,
+) -> Result<()> {
+    // Messages mode: output always goes to stdout (or -o); no output-dir / config logic.
+    let output_path = match output.as_deref() {
+        Some("-") | None => None,
+        Some(o) => Some(PathBuf::from(o)),
+    };
+    let (source, base_dir) = read_build_input(&input)?;
+    let result = mds::compile_messages_str_with_deps(&source, Some(&base_dir), runtime_vars)
+        .map_err(miette::Error::from)?;
+    if !quiet {
+        for w in &result.warnings {
+            eprintln!("{w}");
         }
     }
+    let json = serde_json::to_string_pretty(&result.messages)
+        .map_err(|e| miette::miette!("failed to serialize messages to JSON: {e}"))?;
+    let json_with_newline = format!("{json}\n");
+    write_output(output_path, &json_with_newline, quiet)
+}
+
+/// Compile a template to Markdown and write to the resolved output destination.
+///
+/// Loads `mds.json` project config for output-dir resolution. Handles stdin
+/// (`-`) and file paths, emitting warnings to stderr unless `quiet` is set.
+fn run_build_markdown(
+    input: PathBuf,
+    output: Option<String>,
+    out_dir: Option<PathBuf>,
+    runtime_vars: Option<HashMap<String, mds::Value>>,
+    quiet: bool,
+) -> Result<()> {
+    // Load project config (mds.json), walking up from the input file.
+    let config = load_config(&input)?;
+
+    // Resolve output destination before compiling (config discovery happens once).
+    let output_path = resolve_output_path(&Some(input.clone()), &output, &out_dir, &config)?;
+
+    let (compiled, warnings) = if input == Path::new("-") {
+        let (source, cwd) = read_stdin()?;
+        mds::compile_str_collecting_warnings(&source, Some(&cwd), runtime_vars)
+            .map_err(miette::Error::from)?
+    } else {
+        mds::compile_collecting_warnings(&input, runtime_vars).map_err(miette::Error::from)?
+    };
+
+    if !quiet {
+        for w in &warnings {
+            eprintln!("{w}");
+        }
+    }
+
+    write_output(output_path, &compiled, quiet)
 }
 
 fn run_check(
