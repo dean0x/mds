@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Library API
 
-- `compile_messages_str`, `compile_messages_str_with`, `compile_messages_str_with_deps`,
+- `compile_messages_str`, `compile_messages_str_with_deps`,
   `compile_messages_virtual`, `compile_messages_virtual_with_deps` (mds-core)
 - `compileMessages` in `@mdscript/mds` (NAPI + WASM backends)
 

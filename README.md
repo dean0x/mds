@@ -154,7 +154,7 @@ live in [`examples/`](examples/).
 
 ## Language Reference
 
-See [spec.md](spec.md) for the full MDS v0.1 language specification.
+See [spec.md](spec.md) for the full MDS v0.2.0 language specification.
 
 ## Contributing
 

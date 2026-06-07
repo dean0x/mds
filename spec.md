@@ -498,6 +498,7 @@ Hello!
 - In messages mode, text outside any `@message` block emits a warning and is ignored
 - A template with no `@message` blocks compiled in messages mode is a compile error
 - `@if` and `@for` around `@message` blocks work identically in both modes; the same iterable rules apply (see §4.4)
+- `@include` is silently ignored in messages mode and emits a warning; included module bodies are not surfaced as messages — compose with `@message` blocks directly
 
 **Control flow inside @message:**
 
@@ -676,7 +677,7 @@ Maximum config file size: 1 MB.
 | `0` | Success |
 | `1` | Template error (syntax, undefined variable, arity mismatch, recursion, etc.) |
 | `2` | I/O or file-system error (file not found, not an MDS file, I/O failure) |
-| `3` | Resource limit exceeded (output too large, too many iterations) |
+| `3` | Resource limit exceeded (output too large, too many iterations, message count exceeds `MAX_MESSAGE_COUNT` (10,000), or cumulative message content exceeds 50 MB) |
 
 ---
 
