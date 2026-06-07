@@ -524,9 +524,10 @@ fn message_count_limit_rejects_runaway_generation() {
 fn message_count_at_limit_is_accepted() {
     // Pin the off-by-one behavior: exactly MAX_MESSAGE_COUNT (10_000) messages
     // must be ACCEPTED.  The guard uses `out.len() >= MAX_MESSAGE_COUNT`
-    // (post-push style), so the 10_000th message must succeed and the 10_001st
-    // must fail.  This test and `message_count_limit_rejects_runaway_generation`
-    // together cover both sides of the boundary.
+    // (pre-push style — checked before pushing the new message), so the 10_000th
+    // message must succeed and the 10_001st must fail.  This test and
+    // `message_count_limit_rejects_runaway_generation` together cover both sides
+    // of the boundary.
     let mut s = String::from("---\nroles:\n");
     for _ in 0..10_000 {
         s.push_str("  - user\n");

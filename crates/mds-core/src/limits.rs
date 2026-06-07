@@ -70,6 +70,8 @@ pub(crate) const MAX_MESSAGE_COUNT: usize = 10_000;
 ///
 /// Caps the aggregate content across the entire message array at the same ceiling as
 /// a single text-mode output (MAX_OUTPUT_SIZE = 50 MB).  Without this, 10 000 messages
-/// each near the per-message size limit could allocate ~500 GB in a single evaluation.
+/// each up to MAX_OUTPUT_SIZE (50 MB) could collectively allocate ~500 GB in a single
+/// evaluation.  Individual message bodies are already bounded by MAX_OUTPUT_SIZE via the
+/// `evaluate_nodes` size check; this limit guards the cumulative total.
 /// The incremental check in `collect_single_message` catches runaway growth early.
 pub(crate) const MAX_MESSAGES_TOTAL_SIZE: usize = MAX_OUTPUT_SIZE;

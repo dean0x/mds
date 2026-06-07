@@ -68,6 +68,15 @@ pub struct Message {
     pub content: String,
 }
 
+impl From<evaluator::EvalMessage> for Message {
+    fn from(m: evaluator::EvalMessage) -> Self {
+        Message {
+            role: m.role,
+            content: m.content,
+        }
+    }
+}
+
 /// The result of compiling an MDS template in messages mode.
 ///
 /// Returned by `compile_messages`, `compile_messages_str`, and variants.
@@ -773,14 +782,11 @@ pub fn compile_messages_str_with_deps(
     let mut cache = ModuleCache::new();
     let mut warnings = vec![];
     let eval_messages = cache.resolve_source_messages(source, &dir, &vars, &mut warnings)?;
+    // resolve_source_messages does not insert the inline source into the module cache,
+    // so cache.dependencies() contains only imported files — no entry-key filtering needed.
+    // (compare: compile_messages_virtual_with_deps explicitly filters the entry key out.)
     let dependencies = cache.dependencies();
-    let messages = eval_messages
-        .into_iter()
-        .map(|m| Message {
-            role: m.role,
-            content: m.content,
-        })
-        .collect();
+    let messages = eval_messages.into_iter().map(Message::from).collect();
     Ok(CompileMessagesOutput {
         messages,
         warnings,
@@ -859,13 +865,7 @@ pub fn compile_messages_virtual_with_deps(
         .into_iter()
         .filter(|k| k != entry)
         .collect();
-    let messages = eval_messages
-        .into_iter()
-        .map(|m| Message {
-            role: m.role,
-            content: m.content,
-        })
-        .collect();
+    let messages = eval_messages.into_iter().map(Message::from).collect();
     Ok(CompileMessagesOutput {
         messages,
         warnings,

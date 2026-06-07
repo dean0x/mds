@@ -66,6 +66,9 @@ struct MessageGuard<'p, 'a>(&'p mut Parser<'a>);
 
 impl Drop for MessageGuard<'_, '_> {
     fn drop(&mut self) {
+        // Invariant: depth was incremented by enter_block() before this guard was created.
+        // A depth of 0 here would mean the decrement underflows — a compiler bug, not user input.
+        debug_assert!(self.0.depth > 0, "MessageGuard::drop: depth underflow");
         self.0.inside_message = false;
         self.0.depth -= 1;
     }

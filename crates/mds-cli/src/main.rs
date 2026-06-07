@@ -537,7 +537,17 @@ fn run_build(args: BuildArgs) -> Result<()> {
     reject_directory_input(&input)?;
 
     match format {
-        OutputFormat::Messages => run_build_messages(input, output, runtime_vars, quiet),
+        OutputFormat::Messages => {
+            // --out-dir is silently dropped in messages mode (output always goes to stdout
+            // or an explicit -o path).  Warn so the user knows their flag had no effect.
+            if out_dir.is_some() && !quiet {
+                eprintln!(
+                    "warning: --out-dir is ignored in --format messages mode; \
+                     use -o <file> to write to a file"
+                );
+            }
+            run_build_messages(input, output, runtime_vars, quiet)
+        }
         OutputFormat::Markdown => run_build_markdown(input, output, out_dir, runtime_vars, quiet),
     }
 }
@@ -565,10 +575,11 @@ fn run_build_messages(
             eprintln!("{w}");
         }
     }
-    let json = serde_json::to_string_pretty(&result.messages)
+    let mut json = serde_json::to_string_pretty(&result.messages)
         .map_err(|e| miette::miette!("failed to serialize messages to JSON: {e}"))?;
-    let json_with_newline = format!("{json}\n");
-    write_output(output_path, &json_with_newline, quiet)
+    // Append the trailing newline in-place to avoid a full copy of the serialized JSON.
+    json.push('\n');
+    write_output(output_path, &json, quiet)
 }
 
 /// Compile a template to Markdown and write to the resolved output destination.

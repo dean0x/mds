@@ -825,6 +825,15 @@ fn collect_messages_from_if(
     if evaluate_condition(&block.condition, scope, ctx)? {
         return collect_messages(&block.then_body, scope, ctx, out);
     }
+    // Parser enforces MAX_ELSEIF_BRANCHES at construction time; assert the invariant
+    // holds so messages-mode correctness cannot silently depend on the parser limit alone.
+    // Mirrors the identical assert in text-mode `evaluate_if`.
+    debug_assert!(
+        block.elseif_branches.len() <= MAX_ELSEIF_BRANCHES,
+        "elseif_branches length {} exceeds MAX_ELSEIF_BRANCHES {}",
+        block.elseif_branches.len(),
+        MAX_ELSEIF_BRANCHES,
+    );
     for (cond, body) in &block.elseif_branches {
         if evaluate_condition(cond, scope, ctx)? {
             return collect_messages(body, scope, ctx, out);
