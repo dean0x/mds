@@ -57,6 +57,20 @@ struct Parser<'a> {
     source: &'a str,
 }
 
+/// RAII guard that restores `inside_message` and decrements `depth` when dropped.
+///
+/// Created immediately after `enter_block()` and `inside_message = true` in
+/// `parse_message_block`. All subsequent error paths — including `?` propagation —
+/// will trigger Drop, so the invariant is structural rather than manually maintained.
+struct MessageGuard<'p, 'a>(&'p mut Parser<'a>);
+
+impl Drop for MessageGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.0.inside_message = false;
+        self.0.depth -= 1;
+    }
+}
+
 /// Build the appropriate parse error when a directive's trailing `:` is missing.
 ///
 /// Produces a targeted "unterminated string literal" message when the input contains
@@ -392,8 +406,8 @@ impl Parser<'_> {
     ///
     /// State invariant: `inside_message` and `depth` are set AFTER role parsing
     /// succeeds, so any `?` on role parsing does not leave them in an inconsistent
-    /// state. After the flags are set, every subsequent `?`-propagated error path
-    /// restores them before returning.
+    /// state. Once the flags are set, a `MessageGuard` Drop implementation ensures
+    /// both are restored on every exit path — including future early-return `?`s.
     fn parse_message_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
         if self.inside_message {
             return Err(MdsError::syntax(
@@ -423,28 +437,18 @@ impl Parser<'_> {
         };
 
         // Role is valid — now commit to the block and set flags.
+        // The guard restores both flags on every exit path (including `?`),
+        // making the invariant structural rather than manually maintained.
         self.enter_block()?;
         self.inside_message = true;
+        let _guard = MessageGuard(self);
 
-        let body_result = self.parse_body(&["@end"], &[]);
-        // Restore flags before propagating any body-parse error so that every
-        // exit path leaves `inside_message = false` and `depth` decremented.
-        let body = match body_result {
-            Ok(b) => b,
-            Err(e) => {
-                self.inside_message = false;
-                self.depth -= 1;
-                return Err(e);
-            }
-        };
+        let body = _guard.0.parse_body(&["@end"], &[])?;
         let body = strip_trailing_newline(strip_leading_newline(body));
 
-        // consume_end advances pos past @end; errors here propagate after cleanup.
-        let end_result = self.consume_end("@message");
-        self.inside_message = false;
-        self.depth -= 1;
-        end_result?;
+        _guard.0.consume_end("@message")?;
 
+        // Guard drops here, restoring inside_message=false and depth-=1.
         Ok(Node::Message(MessageBlock { role, body, offset }))
     }
 
