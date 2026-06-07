@@ -269,24 +269,42 @@ impl ModuleCache {
     ///
     /// Like [`resolve_key`] but runs `evaluate_messages` instead of `evaluate`,
     /// returning structured `EvalMessage` values from `@message` blocks.
+    ///
+    /// Mirrors `resolve_source_messages`: a single `process_module_messages` pass
+    /// over the entry module (no prior text-mode evaluation).  Imported sub-modules
+    /// are resolved through the normal cache (`resolve_by_key`) inside
+    /// `collect_definitions_and_imports`, so they are evaluated only once.
     pub fn resolve_key_messages(
         &mut self,
         key: &str,
         runtime_vars: &HashMap<String, Value>,
         warnings: &mut Vec<String>,
     ) -> Result<Vec<EvalMessage>, MdsError> {
-        // Resolve all imports through the standard path first.
-        self.resolve_by_key(key, runtime_vars, warnings)?;
-        // Re-run the entry module in messages mode. Imports are already cached.
+        // Cycle detection: if this key is already on the resolving stack it forms
+        // a circular import that must be rejected.
+        if self.resolving.contains(key) {
+            let cycle = build_cycle_string(&self.resolving, key);
+            return Err(MdsError::circular_import(cycle));
+        }
+
+        self.check_import_depth()?;
+
         let source = self.fs.read(key)?;
         let is_md = self.fs.is_markdown(key);
+        validate_file_type(key, &source)?;
+
+        self.resolving.insert(key.to_string());
+
         let ctx = ModuleCtx {
             file_str: key,
             source: &source,
             base_key: key,
             runtime_vars,
         };
-        self.process_module_messages(&ctx, is_md, warnings)
+        let result = self.process_module_messages(&ctx, is_md, warnings);
+
+        let popped = self.resolving.pop();
+        Self::check_lifo_pop(result, popped, key)
     }
 
     /// Resolve a module from an in-memory source string in messages mode.

@@ -389,15 +389,20 @@ impl Parser<'_> {
     /// - Brace expression: `@message {role}:` → parsed via `parse_expr_inner`.
     ///
     /// Nested `@message` blocks are rejected (the `inside_message` flag tracks this).
+    ///
+    /// State invariant: `inside_message` and `depth` are set AFTER role parsing
+    /// succeeds, so any `?` on role parsing does not leave them in an inconsistent
+    /// state. After the flags are set, every subsequent `?`-propagated error path
+    /// restores them before returning.
     fn parse_message_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
         if self.inside_message {
             return Err(MdsError::syntax(
                 "@message blocks cannot be nested inside another @message block",
             ));
         }
-        self.enter_block()?;
-        self.inside_message = true;
 
+        // Parse the role expression BEFORE mutating parser state so that a `?`
+        // here leaves `inside_message` and `depth` untouched.
         let trimmed = rest.trim();
         let role_str = strip_trailing_directive_colon(trimmed)
             .ok_or_else(|| directive_colon_error("@message", trimmed))?;
@@ -406,12 +411,10 @@ impl Parser<'_> {
         let role = if role_trimmed.starts_with('{') && role_trimmed.ends_with('}') {
             // Dynamic role expression: @message {role_var}:
             let inner = role_trimmed[1..role_trimmed.len() - 1].trim();
-            parse_expr_inner(inner)?
+            parse_expr_inner(inner)? // safe: state not yet mutated
         } else {
             // Bare-word role: @message system: → literal string "system"
             if role_trimmed.is_empty() {
-                self.inside_message = false;
-                self.depth -= 1;
                 return Err(MdsError::syntax(
                     "@message role must not be empty — use e.g. @message system:",
                 ));
@@ -419,7 +422,21 @@ impl Parser<'_> {
             Expr::StringLiteral(role_trimmed.to_string())
         };
 
-        let body = self.parse_body(&["@end"], &[])?;
+        // Role is valid — now commit to the block and set flags.
+        self.enter_block()?;
+        self.inside_message = true;
+
+        let body_result = self.parse_body(&["@end"], &[]);
+        // Restore flags before propagating any body-parse error so that every
+        // exit path leaves `inside_message = false` and `depth` decremented.
+        let body = match body_result {
+            Ok(b) => b,
+            Err(e) => {
+                self.inside_message = false;
+                self.depth -= 1;
+                return Err(e);
+            }
+        };
         let body = strip_trailing_newline(strip_leading_newline(body));
 
         // consume_end advances pos past @end; errors here propagate after cleanup.

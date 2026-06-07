@@ -743,22 +743,6 @@ pub fn compile_messages_str(source: &str) -> Result<CompileMessagesOutput, MdsEr
     compile_messages_str_with_deps(source, None, None)
 }
 
-/// Compile an MDS source string in messages mode with options.
-///
-/// Like [`compile_messages_str`] but accepts an optional base directory for
-/// resolving `@import` paths and optional runtime variable overrides.
-///
-/// Warnings are returned in [`CompileMessagesOutput::warnings`] and are not
-/// printed to stderr. Use this when you need to control warning presentation.
-#[must_use = "the compiled messages output should be used"]
-pub fn compile_messages_str_with(
-    source: &str,
-    base_dir: Option<&Path>,
-    runtime_vars: Option<HashMap<String, Value>>,
-) -> Result<CompileMessagesOutput, MdsError> {
-    compile_messages_str_with_deps(source, base_dir, runtime_vars)
-}
-
 /// Compile an MDS source string in messages mode, returning structured messages
 /// with full dependency and warning information.
 ///

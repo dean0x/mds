@@ -778,10 +778,16 @@ fn collect_single_message(
             )));
         }
     };
+    // Mirror the parse-time empty-role rejection on the dynamic path: a variable
+    // or expression that evaluates to "" or whitespace-only must also be rejected.
+    if role.trim().is_empty() {
+        return Err(MdsError::type_error(
+            "@message role must evaluate to a non-empty string",
+        ));
+    }
 
-    // Evaluate the body as plain text (node evaluation in text mode).
-    let content = evaluate_nodes(&block.body, scope, ctx)?;
-    let content = content.trim().to_string();
+    // Evaluate the body as plain text and trim surrounding whitespace.
+    let content = evaluate_nodes(&block.body, scope, ctx)?.trim().to_string();
 
     // Skip empty messages.
     if content.is_empty() {
