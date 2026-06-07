@@ -115,7 +115,7 @@ function isModuleNotFound(err: unknown): boolean {
 /**
  * Validate that a dynamically loaded module matches the WasmModule shape.
  *
- * Checks compile, check, and scanImports are all present as functions.
+ * Checks compile, check, compileMessages, and scanImports are all present as functions.
  * Throws a descriptive error naming the first missing member so callers get
  * an actionable message instead of a silent runtime failure later.
  *

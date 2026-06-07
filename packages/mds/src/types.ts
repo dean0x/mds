@@ -14,7 +14,7 @@ export interface CheckResult {
   warnings: string[];
 }
 
-/** A single structured message from a `compile_messages` call. */
+/** A single structured message from a `compileMessages` call. */
 export interface Message {
   /** The role string (e.g. `"system"`, `"user"`, `"assistant"`). */
   role: string;

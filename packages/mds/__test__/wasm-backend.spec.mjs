@@ -324,7 +324,7 @@ describe('wasm backend — browser shape validation', () => {
     );
   });
 
-  test('U-WB21: validateWasmShape throws when compileMessages is missing', () => {
+  test('U-WB22: validateWasmShape throws when compileMessages is missing', () => {
     const mod = { compile: () => {}, check: () => {}, scanImports: () => [] };
     assert.throws(
       () => validateWasmShape(mod),
