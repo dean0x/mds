@@ -1500,3 +1500,206 @@ fn watch_stdout_no_duplicate_write_on_startup() {
          got {occurrence_count} occurrences; stdout was:\n{stdout_str}"
     );
 }
+
+// ── QA regression: dir-mode no spurious startup recompiles ──────────────────
+
+/// QA-R3: Start `mds watch <dir>` with 2 .mds files, NO edits, idle ~1.5s, stop.
+/// Asserts ZERO "Recompiled" lines in stderr (startup "Compiled to" lines are fine).
+///
+/// Before the fix, macOS FSEvents delivers synthetic events for each source file
+/// right after watcher registration. Without the content-dedup map, the loop
+/// recompiles identical content and logs a rebuild for each file (2 with
+/// `--debounce 50`, 4 with `--debounce 0`).  After the fix, the dedup baseline
+/// is populated before any synthetic events are processed, so they are all
+/// recognised as no-ops and suppressed.
+#[test]
+fn watch_dir_mode_no_spurious_startup_recompile() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("a.mds"),
+        "---\nname: A\n---\nFile A: {name}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("b.mds"),
+        "---\nname: B\n---\nFile B: {name}\n",
+    )
+    .unwrap();
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir(&out_dir).unwrap();
+
+    let mut child = ChildGuard(
+        mds_bin()
+            .args([
+                "watch",
+                dir.path().to_str().unwrap(),
+                "--out-dir",
+                out_dir.to_str().unwrap(),
+                "--debounce",
+                "0",
+                // No -q: we NEED to observe stderr messages to catch spurious noise.
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+
+    // Drain stderr on a background thread so the pipe never fills.
+    let stderr_handle = child.0.stderr.take().expect("piped stderr");
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_buf_clone = stderr_buf.clone();
+    let _reader_thread = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut handle = stderr_handle;
+        let mut tmp = [0u8; 512];
+        loop {
+            match handle.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    stderr_buf_clone
+                        .lock()
+                        .unwrap()
+                        .extend_from_slice(&tmp[..n]);
+                }
+            }
+        }
+    });
+
+    // Wait for the initial compile to complete (both files compiled on startup).
+    assert!(
+        wait_for_file_contains(&out_dir.join("a.md"), "File A: A", TIMEOUT),
+        "a.md should be compiled on startup"
+    );
+    assert!(
+        wait_for_file_contains(&out_dir.join("b.md"), "File B: B", TIMEOUT),
+        "b.md should be compiled on startup"
+    );
+
+    // Let the watcher idle for 1.5s — synthetic FSEvents would fire within this window.
+    std::thread::sleep(Duration::from_millis(1500));
+
+    // Stop the child and collect all stderr.
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    std::thread::sleep(Duration::from_millis(50));
+
+    let stderr_bytes = stderr_buf.lock().unwrap().clone();
+    let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+
+    // There must be ZERO "Recompiled" lines — no rebuild without edits.
+    let recompiled_count = stderr_str.matches("Recompiled").count();
+    assert_eq!(
+        recompiled_count, 0,
+        "expected 0 'Recompiled' lines in dir mode with no edits \
+         (spurious startup rebuild from synthetic FSEvents); \
+         got {recompiled_count}; stderr was:\n{stderr_str}"
+    );
+
+    // Startup "Compiled to" lines are expected (one per source file).
+    let compiled_count = stderr_str.matches("Compiled to").count();
+    assert_eq!(
+        compiled_count, 2,
+        "expected exactly 2 'Compiled to' lines on dir-mode startup (one per source file); \
+         got {compiled_count}; stderr was:\n{stderr_str}"
+    );
+}
+
+// ── QA regression: single status line per rebuild ───────────────────────────
+
+/// QA-R4: Start `mds watch <file>` (no -q), make ONE real edit, idle, stop.
+/// Asserts:
+///  - Exactly ONE "Recompiled" line total (the real edit),
+///  - Total "Compiled to" count stays at 1 (the startup compile only —
+///    the loop rebuild must NOT add a second "Compiled to" line).
+///
+/// Before the fix, `write_output` (called inside the loop) always emitted
+/// "Compiled to …" AND the loop also emitted "Recompiled …", giving two
+/// status lines per rebuild.  After the fix the loop sets announce=false so
+/// only "Recompiled …" appears for loop rebuilds.
+#[test]
+fn watch_single_status_line_per_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("status.mds");
+    std::fs::write(&src, "---\nname: v0\n---\nStatus {name}!\n").unwrap();
+    let out = dir.path().join("status.md");
+
+    let mut child = ChildGuard(
+        mds_bin()
+            .args([
+                "watch",
+                src.to_str().unwrap(),
+                "--debounce",
+                "0",
+                // No -q: we need to observe status messages.
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+
+    // Drain stderr on a background thread.
+    let stderr_handle = child.0.stderr.take().expect("piped stderr");
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_buf_clone = stderr_buf.clone();
+    let _reader_thread = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut handle = stderr_handle;
+        let mut tmp = [0u8; 512];
+        loop {
+            match handle.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    stderr_buf_clone
+                        .lock()
+                        .unwrap()
+                        .extend_from_slice(&tmp[..n]);
+                }
+            }
+        }
+    });
+
+    // Wait for the initial compile.
+    assert!(
+        wait_for_file_contains(&out, "Status v0!", TIMEOUT),
+        "initial compile should produce Status v0!"
+    );
+
+    // Make ONE real content-changing edit.
+    std::fs::write(&src, "---\nname: v1\n---\nStatus {name}!\n").unwrap();
+
+    // Wait for the rebuild to appear in the output.
+    assert!(
+        wait_for_file_contains(&out, "Status v1!", TIMEOUT),
+        "after editing, output should contain Status v1!"
+    );
+
+    // Idle a bit to let any trailing events flush.
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Stop the child and collect all stderr.
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    std::thread::sleep(Duration::from_millis(50));
+
+    let stderr_bytes = stderr_buf.lock().unwrap().clone();
+    let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+
+    // Exactly ONE "Recompiled" line (the real edit).
+    let recompiled_count = stderr_str.matches("Recompiled").count();
+    assert_eq!(
+        recompiled_count, 1,
+        "expected exactly 1 'Recompiled' line for one real edit; \
+         got {recompiled_count}; stderr was:\n{stderr_str}"
+    );
+
+    // Total "Compiled to" count must still be 1 (startup only — loop rebuild must
+    // NOT emit a second "Compiled to" line).
+    let compiled_count = stderr_str.matches("Compiled to").count();
+    assert_eq!(
+        compiled_count, 1,
+        "expected exactly 1 'Compiled to' line total (startup only, no extra from loop rebuild); \
+         got {compiled_count}; stderr was:\n{stderr_str}"
+    );
+}

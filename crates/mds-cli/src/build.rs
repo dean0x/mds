@@ -396,12 +396,17 @@ pub(crate) fn read_build_input(input: &Path) -> Result<(String, PathBuf)> {
 ///
 /// When `output_path` is `Some(path)`, creates any missing parent directories,
 /// writes the compiled string, and prints `"Compiled to {path}"` to stderr
-/// unless `quiet` is set.  When `output_path` is `None`, prints the compiled
-/// string to stdout with no trailing newline.
+/// unless `quiet` or `announce` is false.  When `output_path` is `None`,
+/// prints the compiled string to stdout with no trailing newline.
+///
+/// Set `announce = false` in watch-loop rebuilds so only the `"Recompiled …"`
+/// summary line is emitted (not a redundant `"Compiled to …"` line).
+/// Set `announce = true` for the initial/startup compile and for `mds build`.
 pub(crate) fn write_output(
     output_path: Option<PathBuf>,
     compiled: &str,
     quiet: bool,
+    announce: bool,
 ) -> Result<()> {
     match output_path {
         Some(path) => {
@@ -414,7 +419,7 @@ pub(crate) fn write_output(
             }
             std::fs::write(&path, compiled)
                 .map_err(|e| miette::miette!("cannot write {}: {e}", path.display()))?;
-            if !quiet {
+            if !quiet && announce {
                 eprintln!("Compiled to {}", path.display());
             }
         }
@@ -559,7 +564,7 @@ pub(crate) fn compile_and_write(
     quiet: bool,
 ) -> Result<Vec<String>> {
     let out = compile_to_content(input, runtime_vars, format, quiet)?;
-    write_output(output_path, &out.content, quiet)?;
+    write_output(output_path, &out.content, quiet, true)?;
     Ok(out.dependencies)
 }
 
@@ -672,7 +677,7 @@ fn run_build_markdown(
                 eprintln!("{w}");
             }
         }
-        return write_output(output_path, &compiled, quiet);
+        return write_output(output_path, &compiled, quiet, true);
     }
 
     // Load project config (mds.json), walking up from the input file.

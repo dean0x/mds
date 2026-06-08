@@ -553,7 +553,9 @@ fn run_watch_file(
 
                 if content_changed {
                     // Content differs — write the new output.
-                    match write_output(output_path.clone(), &compiled.content, quiet) {
+                    // announce=false: the loop emits its own "Recompiled …" summary line;
+                    // suppress the redundant "Compiled to …" line that write_output would add.
+                    match write_output(output_path.clone(), &compiled.content, quiet, false) {
                         Ok(()) => {
                             let elapsed = t0.elapsed().as_millis();
                             let dep_count = compiled.dependencies.len();
@@ -681,6 +683,38 @@ fn run_watch_dir(
             .map_err(|e| miette::miette!("failed to watch vars directory {}: {e}", vd.display()))?;
     }
 
+    // Content-dedup map keyed by resolved output path.
+    //
+    // After startup compile we record each source file's compiled content so that
+    // the synthetic FSEvents macOS delivers right after watcher registration are
+    // recognised as no-ops and suppressed (same technique as run_watch_file).
+    // Immutable by default — each rebuild returns a new string; we replace the
+    // stored value rather than mutating it.
+    let mut last_written: HashMap<PathBuf, String> = HashMap::new();
+
+    // Build the dedup baseline AFTER the watcher is registered so any OS-queued
+    // synthetic events arrive after the baseline is recorded and are filtered out.
+    {
+        let baseline_vars = build_runtime_vars(vars_path.clone(), static_set_vars.clone())?;
+        for source in &all_files {
+            let out = output_path_for(source, abs_out_dir.as_deref(), &config);
+            match compile_to_content(
+                source,
+                baseline_vars.clone(),
+                &OutputFormat::Markdown,
+                true, /* quiet for baseline */
+            ) {
+                Ok(compiled) => {
+                    last_written.insert(out, compiled.content);
+                }
+                Err(_) => {
+                    // Baseline compile failed (e.g. syntax error at startup).
+                    // Leave this entry absent so the next real rebuild always writes.
+                }
+            }
+        }
+    }
+
     // ── Watch loop ────────────────────────────────────────────────────────────
     while let Ok(first) = rx.recv() {
         // Collect paths from the triggering event.
@@ -751,40 +785,99 @@ fn run_watch_dir(
 
         if vars_changed {
             // Vars file changed: recompile ALL files.
+            // Content-dedup still applies: files whose output is unchanged are suppressed.
             let all = collect_mds_files(&root, MAX_COLLECT_DEPTH);
-            compile_all_dir(&all, abs_out_dir.as_deref(), &config, runtime_vars, quiet);
+            for source in &all {
+                let out = output_path_for(source, abs_out_dir.as_deref(), &config);
+                let t0 = Instant::now();
+                match compile_to_content(
+                    source,
+                    runtime_vars.clone(),
+                    &OutputFormat::Markdown,
+                    quiet,
+                ) {
+                    Ok(compiled) => {
+                        let content_changed = last_written
+                            .get(&out)
+                            .is_none_or(|prev| *prev != compiled.content);
+                        if content_changed {
+                            match write_output(Some(out.clone()), &compiled.content, quiet, false) {
+                                Ok(()) => {
+                                    let elapsed = t0.elapsed().as_millis();
+                                    last_written.insert(out.clone(), compiled.content);
+                                    if !quiet {
+                                        eprintln!(
+                                            "Recompiled {} ({} deps) in {}ms",
+                                            out.display(),
+                                            compiled.dependencies.len(),
+                                            elapsed
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("{e:?}");
+                                }
+                            }
+                        }
+                        // Content unchanged: no write, no summary line.
+                    }
+                    Err(e) => {
+                        eprintln!("{e:?}");
+                    }
+                }
+            }
         } else {
             // Compile / delete individual files.
             for path in mds_changed {
                 if path.exists() {
-                    // File exists: compile it. Reuse vars loaded for this rebuild cycle.
+                    // File exists: compile to content first, then dedup.
                     let out = output_path_for(&path, abs_out_dir.as_deref(), &config);
                     let t0 = Instant::now();
-                    match compile_and_write(
+                    match compile_to_content(
                         &path,
-                        Some(out.clone()),
                         runtime_vars.clone(),
                         &OutputFormat::Markdown,
                         quiet,
                     ) {
-                        Ok(deps) => {
-                            let elapsed = t0.elapsed().as_millis();
-                            if !quiet {
-                                eprintln!(
-                                    "Recompiled {} ({} deps) in {}ms",
-                                    out.display(),
-                                    deps.len(),
-                                    elapsed
-                                );
+                        Ok(compiled) => {
+                            let content_changed = last_written
+                                .get(&out)
+                                .is_none_or(|prev| *prev != compiled.content);
+                            if content_changed {
+                                // announce=false: loop emits its own "Recompiled …" summary line.
+                                match write_output(
+                                    Some(out.clone()),
+                                    &compiled.content,
+                                    quiet,
+                                    false,
+                                ) {
+                                    Ok(()) => {
+                                        let elapsed = t0.elapsed().as_millis();
+                                        last_written.insert(out.clone(), compiled.content);
+                                        if !quiet {
+                                            eprintln!(
+                                                "Recompiled {} ({} deps) in {}ms",
+                                                out.display(),
+                                                compiled.dependencies.len(),
+                                                elapsed
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("{e:?}");
+                                    }
+                                }
                             }
+                            // Content unchanged: no write, no summary line.
                         }
                         Err(e) => {
                             eprintln!("{e:?}");
                         }
                     }
                 } else {
-                    // Source file deleted: remove matching output (conservative — single file only).
+                    // Source file deleted: remove matching output and drop from dedup map.
                     let out = output_path_for(&path, abs_out_dir.as_deref(), &config);
+                    last_written.remove(&out);
                     if out.exists() {
                         match std::fs::remove_file(&out) {
                             Ok(()) => {
