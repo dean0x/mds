@@ -10,8 +10,8 @@
 //! - **`parser_tests.rs`** — integration and unit tests for both modules.
 
 use crate::ast::{
-    Condition, DefineBlock, Expr, ForBlock, Frontmatter, IfBlock, IncludeDirective, Module, Node,
-    TextNode,
+    Condition, DefineBlock, Expr, ForBlock, Frontmatter, IfBlock, IncludeDirective, MessageBlock,
+    Module, Node, TextNode,
 };
 use crate::error::MdsError;
 use crate::lexer::Token;
@@ -39,6 +39,7 @@ pub(crate) fn parse_with_ctx<'src>(
         tokens,
         pos: 0,
         depth: 0,
+        inside_message: false,
         file,
         source,
     };
@@ -49,8 +50,28 @@ struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
     depth: usize,
+    /// True when we are currently inside a `@message` block body.
+    /// Used to detect and reject nested `@message` blocks.
+    inside_message: bool,
     file: &'a str,
     source: &'a str,
+}
+
+/// RAII guard that restores `inside_message` and decrements `depth` when dropped.
+///
+/// Created immediately after `enter_block()` and `inside_message = true` in
+/// `parse_message_block`. All subsequent error paths — including `?` propagation —
+/// will trigger Drop, so the invariant is structural rather than manually maintained.
+struct MessageGuard<'p, 'a>(&'p mut Parser<'a>);
+
+impl Drop for MessageGuard<'_, '_> {
+    fn drop(&mut self) {
+        // Invariant: depth was incremented by enter_block() before this guard was created.
+        // A depth of 0 here would mean the decrement underflows — a compiler bug, not user input.
+        debug_assert!(self.0.depth > 0, "MessageGuard::drop: depth underflow");
+        self.0.inside_message = false;
+        self.0.depth -= 1;
+    }
 }
 
 /// Build the appropriate parse error when a directive's trailing `:` is missing.
@@ -228,6 +249,9 @@ impl Parser<'_> {
             }
             return Ok(Node::Include(IncludeDirective { alias, offset }));
         }
+        if let Some(rest) = trimmed.strip_prefix("@message ") {
+            return self.parse_message_block(rest, offset);
+        }
 
         // Give a targeted hint if the user wrote @else without the required colon
         if trimmed == "@else" {
@@ -249,7 +273,7 @@ impl Parser<'_> {
         }
 
         Err(MdsError::syntax(format!(
-            "unknown directive: {trimmed}. Valid directives: @if, @elseif, @else:, @end, @for, @define, @import, @export, @include"
+            "unknown directive: {trimmed}. Valid directives: @if, @elseif, @else:, @end, @for, @define, @import, @export, @include, @message"
         )))
     }
 
@@ -373,6 +397,62 @@ impl Parser<'_> {
             body,
             offset,
         }))
+    }
+
+    /// Parse a `@message role:` ... `@end` block.
+    ///
+    /// Role parsing distinguishes two forms:
+    /// - Bare word: `@message system:` → `Expr::StringLiteral("system")`.
+    /// - Brace expression: `@message {role}:` → parsed via `parse_expr_inner`.
+    ///
+    /// Nested `@message` blocks are rejected (the `inside_message` flag tracks this).
+    ///
+    /// State invariant: `inside_message` and `depth` are set AFTER role parsing
+    /// succeeds, so any `?` on role parsing does not leave them in an inconsistent
+    /// state. Once the flags are set, a `MessageGuard` Drop implementation ensures
+    /// both are restored on every exit path — including future early-return `?`s.
+    fn parse_message_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
+        if self.inside_message {
+            return Err(MdsError::syntax(
+                "@message blocks cannot be nested inside another @message block",
+            ));
+        }
+
+        // Parse the role expression BEFORE mutating parser state so that a `?`
+        // here leaves `inside_message` and `depth` untouched.
+        let trimmed = rest.trim();
+        let role_str = strip_trailing_directive_colon(trimmed)
+            .ok_or_else(|| directive_colon_error("@message", trimmed))?;
+        let role_trimmed = role_str.trim();
+
+        let role = if role_trimmed.starts_with('{') && role_trimmed.ends_with('}') {
+            // Dynamic role expression: @message {role_var}:
+            let inner = role_trimmed[1..role_trimmed.len() - 1].trim();
+            parse_expr_inner(inner)? // safe: state not yet mutated
+        } else {
+            // Bare-word role: @message system: → literal string "system"
+            if role_trimmed.is_empty() {
+                return Err(MdsError::syntax(
+                    "@message role must not be empty — use e.g. @message system:",
+                ));
+            }
+            Expr::StringLiteral(role_trimmed.to_string())
+        };
+
+        // Role is valid — now commit to the block and set flags.
+        // The guard restores both flags on every exit path (including `?`),
+        // making the invariant structural rather than manually maintained.
+        self.enter_block()?;
+        self.inside_message = true;
+        let _guard = MessageGuard(self);
+
+        let body = _guard.0.parse_body(&["@end"], &[])?;
+        let body = strip_trailing_newline(strip_leading_newline(body));
+
+        _guard.0.consume_end("@message")?;
+
+        // Guard drops here, restoring inside_message=false and depth-=1.
+        Ok(Node::Message(MessageBlock { role, body, offset }))
     }
 
     fn parse_define_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {

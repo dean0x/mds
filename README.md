@@ -65,6 +65,7 @@ Unlike general-purpose template engines, MDS is Markdown-native: no delimiters t
 - **Loops**: `@for item in list:` iteration over arrays and objects
 - **Functions**: `@define` reusable blocks with parameters
 - **Imports/Exports**: modular prompt libraries with alias, merge, and selective imports
+- **Messages**: `@message role: … @end` blocks compile to a JSON `[{role, content}]` array via `--format messages`
 - **Security**: path traversal guards, symlink rejection, file size limits
 - **Rich errors**: source-span diagnostics with line/column context
 
@@ -83,6 +84,7 @@ Build options:
   --out-dir <DIR>             Output directory (creates <stem>.md inside it)
   --vars <FILE>               JSON file with variable overrides
   --set KEY=VALUE             Set a single variable (repeatable)
+  --format <FORMAT>           markdown (default) or messages (JSON chat array)
 
 Exit codes:
   0   Success
@@ -115,7 +117,7 @@ TypeScript module declarations (`.mds` → `string`) are provided by `@mdscript/
 ### TypeScript / JavaScript
 
 ```ts
-import { init, compile, compileFile, isMdsError } from '@mdscript/mds';
+import { init, compile, compileFile, compileMessages, isMdsError } from '@mdscript/mds';
 
 await init();
 
@@ -127,6 +129,10 @@ const result = compile(source, { vars: { env: 'production' } });
 
 // Compile a file (resolves @import directives)
 const { output, dependencies } = await compileFile('./prompts/system.mds');
+
+// Compile @message blocks to a structured chat array
+const { messages, warnings } = compileMessages(source);
+// messages: [{ role: 'system', content: '...' }, { role: 'user', content: '...' }]
 
 // Error handling
 try {
@@ -152,7 +158,7 @@ live in [`examples/`](examples/).
 
 ## Language Reference
 
-See [spec.md](spec.md) for the full MDS v0.1 language specification.
+See [spec.md](spec.md) for the full MDS v0.2.0 language specification.
 
 ## Contributing
 

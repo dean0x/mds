@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use clap::{Parser, Subcommand};
-use mds::{MdsError, MAX_FILE_SIZE as MAX_STDIN_SIZE, MAX_TRAVERSAL_DEPTH};
+use mds::{MdsError, MAX_FILE_SIZE, MAX_TRAVERSAL_DEPTH};
 use miette::Result;
 use serde::Deserialize;
 
@@ -172,6 +172,18 @@ fn resolve_output_path(
     }
 }
 
+// ── Output format ─────────────────────────────────────────────────────────────
+
+/// Output format for the `build` command.
+#[derive(Debug, Default, Clone, PartialEq, clap::ValueEnum)]
+enum OutputFormat {
+    /// Render the template to Markdown text (default).
+    #[default]
+    Markdown,
+    /// Compile `@message` blocks to a pretty-printed JSON array.
+    Messages,
+}
+
 // ── CLI entry point ───────────────────────────────────────────────────────────
 
 /// Scan the current directory for `.mds` files.
@@ -232,7 +244,7 @@ struct Cli {
 enum Commands {
     /// Compile an MDS file to Markdown
     #[command(
-        after_help = "Examples:\n  mds build                                  Auto-detect the .mds file in current dir\n  mds build template.mds                     Compile to template.md (next to source)\n  mds build template.mds -o -               Compile to stdout\n  mds build template.mds -o output.md       Compile to specific file\n  mds build template.mds --out-dir dist     Compile to dist/template.md\n  mds build template.mds --vars vars.json   With variable overrides\n  mds build template.mds --set name=Alice   Set a single variable\n  echo \"Hello {name}!\" | mds build -         Compile from stdin (writes to stdout)"
+        after_help = "Examples:\n  mds build                                  Auto-detect the .mds file in current dir\n  mds build template.mds                     Compile to template.md (next to source)\n  mds build template.mds -o -               Compile to stdout\n  mds build template.mds -o output.md       Compile to specific file\n  mds build template.mds --out-dir dist     Compile to dist/template.md\n  mds build template.mds --vars vars.json   With variable overrides\n  mds build template.mds --set name=Alice   Set a single variable\n  mds build template.mds --format messages  Compile @message blocks to JSON\n  echo \"Hello {name}!\" | mds build -         Compile from stdin (writes to stdout)"
     )]
     Build {
         /// Input .mds file (use "-" for stdin; omit to auto-detect in current directory)
@@ -253,6 +265,9 @@ enum Commands {
         /// Set a runtime variable (repeatable, e.g. --set name=Alice --set count=3)
         #[arg(long = "set", value_name = "KEY=VALUE", value_parser = parse_key_value)]
         set_vars: Vec<(String, String)>,
+        /// Output format: "markdown" (default) or "messages" (JSON array of chat messages)
+        #[arg(long = "format", value_name = "FORMAT", default_value = "markdown")]
+        format: OutputFormat,
     },
     /// Validate an MDS file without rendering
     #[command(
@@ -397,20 +412,54 @@ fn reject_directory_input(input: &Path) -> Result<()> {
 
 /// Read from stdin and return the source string along with the current working directory.
 ///
-/// Reads at most `MAX_STDIN_SIZE + 1` bytes so we can detect over-sized input without
+/// Reads at most `MAX_FILE_SIZE + 1` bytes so we can detect over-sized input without
 /// buffering the entire stream first.
 fn read_stdin() -> Result<(String, PathBuf)> {
     let mut source = String::new();
     std::io::stdin()
-        .take(MAX_STDIN_SIZE + 1)
+        .take(MAX_FILE_SIZE + 1)
         .read_to_string(&mut source)
         .map_err(|e| miette::miette!("cannot read stdin: {e}"))?;
-    if source.len() as u64 > MAX_STDIN_SIZE {
+    if source.len() as u64 > MAX_FILE_SIZE {
         return Err(miette::miette!("stdin input exceeds maximum size of 10 MB"));
     }
     let cwd = std::env::current_dir()
         .map_err(|e| miette::miette!("cannot determine current directory: {e}"))?;
     Ok((source, cwd))
+}
+
+/// Read the source string for messages-mode compilation, handling both stdin and file inputs.
+///
+/// Returns `(source, base_dir)` where:
+/// - `source` is the UTF-8 text of the input
+/// - `base_dir` is the directory used to resolve relative imports (cwd for stdin, parent
+///   dir of the file otherwise)
+///
+/// Enforces `MAX_FILE_SIZE` on file reads so the messages-mode path has the same defense-in-depth
+/// protection as markdown mode (which goes through the resolver, which enforces the limit).
+/// Stdin is already guarded by `read_stdin`.
+///
+/// This helper is used only by the messages-mode arm of `run_build`. Markdown mode delegates
+/// its file reading to the core library (`compile_collecting_warnings`) which uses the same limit.
+fn read_build_input(input: &Path) -> Result<(String, PathBuf)> {
+    if input == Path::new("-") {
+        return read_stdin();
+    }
+    let path_str = input
+        .to_str()
+        .ok_or_else(|| miette::miette!("input path is not valid UTF-8"))?;
+    let bytes = std::fs::read(input).map_err(|e| miette::miette!("cannot read {path_str}: {e}"))?;
+    if bytes.len() as u64 > MAX_FILE_SIZE {
+        return Err(miette::miette!(
+            "file too large ({} bytes, max {} bytes): {path_str}",
+            bytes.len(),
+            MAX_FILE_SIZE
+        ));
+    }
+    let source = String::from_utf8(bytes)
+        .map_err(|e| miette::miette!("invalid UTF-8 in {path_str}: {e}"))?;
+    let base_dir = input.parent().unwrap_or(Path::new(".")).to_path_buf();
+    Ok((source, base_dir))
 }
 
 /// Resolve the input path: use the explicit value, or auto-detect from cwd.
@@ -463,6 +512,7 @@ struct BuildArgs {
     vars: Option<PathBuf>,
     set_vars: Vec<(String, String)>,
     quiet: bool,
+    format: OutputFormat,
 }
 
 fn run_build(args: BuildArgs) -> Result<()> {
@@ -473,6 +523,7 @@ fn run_build(args: BuildArgs) -> Result<()> {
         vars,
         set_vars,
         quiet,
+        format,
     } = args;
     let runtime_vars = build_runtime_vars(vars, set_vars)?;
 
@@ -485,6 +536,63 @@ fn run_build(args: BuildArgs) -> Result<()> {
 
     reject_directory_input(&input)?;
 
+    match format {
+        OutputFormat::Messages => {
+            // --out-dir is silently dropped in messages mode (output always goes to stdout
+            // or an explicit -o path).  Warn so the user knows their flag had no effect.
+            if out_dir.is_some() && !quiet {
+                eprintln!(
+                    "warning: --out-dir is ignored in --format messages mode; \
+                     use -o <file> to write to a file"
+                );
+            }
+            run_build_messages(input, output, runtime_vars, quiet)
+        }
+        OutputFormat::Markdown => run_build_markdown(input, output, out_dir, runtime_vars, quiet),
+    }
+}
+
+/// Compile `@message` blocks to a JSON array and write to stdout or `-o`.
+///
+/// Skips the output-dir / `mds.json` project-config logic — output always goes
+/// to stdout or an explicit `-o` path.
+fn run_build_messages(
+    input: PathBuf,
+    output: Option<String>,
+    runtime_vars: Option<HashMap<String, mds::Value>>,
+    quiet: bool,
+) -> Result<()> {
+    // Messages mode: output always goes to stdout (or -o); no output-dir / config logic.
+    let output_path = match output.as_deref() {
+        Some("-") | None => None,
+        Some(o) => Some(PathBuf::from(o)),
+    };
+    let (source, base_dir) = read_build_input(&input)?;
+    let result = mds::compile_messages_str_with_deps(&source, Some(&base_dir), runtime_vars)
+        .map_err(miette::Error::from)?;
+    if !quiet {
+        for w in &result.warnings {
+            eprintln!("{w}");
+        }
+    }
+    let mut json = serde_json::to_string_pretty(&result.messages)
+        .map_err(|e| miette::miette!("failed to serialize messages to JSON: {e}"))?;
+    // Append the trailing newline in-place to avoid a full copy of the serialized JSON.
+    json.push('\n');
+    write_output(output_path, &json, quiet)
+}
+
+/// Compile a template to Markdown and write to the resolved output destination.
+///
+/// Loads `mds.json` project config for output-dir resolution. Handles stdin
+/// (`-`) and file paths, emitting warnings to stderr unless `quiet` is set.
+fn run_build_markdown(
+    input: PathBuf,
+    output: Option<String>,
+    out_dir: Option<PathBuf>,
+    runtime_vars: Option<HashMap<String, mds::Value>>,
+    quiet: bool,
+) -> Result<()> {
     // Load project config (mds.json), walking up from the input file.
     let config = load_config(&input)?;
 
@@ -594,6 +702,7 @@ fn run(cli: Cli) -> Result<()> {
             out_dir,
             vars,
             set_vars,
+            format,
         } => run_build(BuildArgs {
             input,
             output,
@@ -601,6 +710,7 @@ fn run(cli: Cli) -> Result<()> {
             vars,
             set_vars,
             quiet,
+            format,
         }),
         Commands::Check {
             input,

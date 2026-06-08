@@ -743,3 +743,130 @@ fn module_cache_resolve_source_accepts_str() {
     let result = cache.resolve_source("Hello!\n", &base_dir, &HashMap::new(), &mut warnings);
     assert!(result.is_ok(), "expected ok for valid source: {result:?}");
 }
+
+// ── Messages API surface (I7: pin new public symbols) ─────────────────────────
+
+#[test]
+fn compile_messages_str_exists() {
+    // compile_messages_str must be callable and return the right type.
+    let _: fn(&str) -> Result<mds::CompileMessagesOutput, MdsError> =
+        |s| mds::compile_messages_str(s);
+}
+
+#[test]
+fn compile_messages_str_with_deps_exists() {
+    // compile_messages_str_with_deps is callable and compiles successfully.
+    let result =
+        mds::compile_messages_str_with_deps("@message system:\nHello.\n@end\n", None, None)
+            .expect("should compile");
+    assert_eq!(result.messages[0].role, "system");
+    assert_eq!(result.messages[0].content, "Hello.");
+    assert!(result.warnings.is_empty());
+    assert!(result.dependencies.is_empty());
+}
+
+#[test]
+fn compile_messages_virtual_exists() {
+    // compile_messages_virtual is callable (errors on missing entry, which is fine
+    // for a signature/existence check).
+    let _ = mds::compile_messages_virtual(HashMap::new(), "main.mds", None);
+}
+
+#[test]
+fn compile_messages_virtual_with_deps_exists() {
+    // compile_messages_virtual_with_deps compiles a virtual module successfully.
+    let mut modules = HashMap::new();
+    modules.insert(
+        "main.mds".to_string(),
+        "@message user:\nAsk something.\n@end\n".to_string(),
+    );
+    let result =
+        mds::compile_messages_virtual_with_deps(modules, "main.mds", None).expect("should compile");
+    assert_eq!(result.messages[0].role, "user");
+    assert_eq!(result.messages[0].content, "Ask something.");
+    assert!(result.dependencies.is_empty());
+}
+
+#[test]
+fn compile_messages_output_type_exists() {
+    // CompileMessagesOutput must be constructible and implement Debug + Clone + PartialEq.
+    let co = mds::CompileMessagesOutput {
+        messages: vec![],
+        warnings: vec!["warn".to_string()],
+        dependencies: vec!["lib.mds".to_string()],
+    };
+    let cloned = co.clone();
+    assert_eq!(co, cloned);
+    let _ = format!("{co:?}");
+}
+
+#[test]
+fn message_type_exists() {
+    // Message must be constructible and implement Debug + Clone + PartialEq.
+    let msg = mds::Message {
+        role: "user".to_string(),
+        content: "Hello.".to_string(),
+    };
+    let cloned = msg.clone();
+    assert_eq!(msg, cloned);
+    let _ = format!("{msg:?}");
+}
+
+#[test]
+fn message_serde_field_names_pinned() {
+    // CRITICAL: pin the serde field names "role" and "content" so that a future
+    // Rust rename cannot silently break the WASM/JS contract that depends on the
+    // JSON shape `[{"role":"...", "content":"..."}]`.
+    let msg = mds::Message {
+        role: "system".to_string(),
+        content: "You are helpful.".to_string(),
+    };
+    let json = serde_json::to_string(&msg).expect("Message must serialize to JSON");
+    assert!(
+        json.contains("\"role\""),
+        "Message JSON must contain 'role' key; got: {json}"
+    );
+    assert!(
+        json.contains("\"content\""),
+        "Message JSON must contain 'content' key; got: {json}"
+    );
+    assert!(
+        json.contains("\"system\""),
+        "role value must appear in JSON; got: {json}"
+    );
+    assert!(
+        json.contains("\"You are helpful.\""),
+        "content value must appear in JSON; got: {json}"
+    );
+    // Round-trip: deserialized value must reconstruct the original.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&json).expect("Message JSON must be valid");
+    assert_eq!(parsed["role"].as_str(), Some("system"));
+    assert_eq!(parsed["content"].as_str(), Some("You are helpful."));
+}
+
+#[test]
+fn compile_messages_output_to_json() {
+    // CompileMessagesOutput must serialize with "messages", "warnings", "dependencies" keys.
+    let co = mds::CompileMessagesOutput {
+        messages: vec![mds::Message {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }],
+        warnings: vec![],
+        dependencies: vec![],
+    };
+    let json = serde_json::to_string(&co).expect("should serialize");
+    assert!(
+        json.contains("\"messages\""),
+        "missing messages key: {json}"
+    );
+    assert!(
+        json.contains("\"warnings\""),
+        "missing warnings key: {json}"
+    );
+    assert!(
+        json.contains("\"dependencies\""),
+        "missing dependencies key: {json}"
+    );
+}

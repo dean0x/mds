@@ -436,6 +436,103 @@ You have access to:
 
 ---
 
+### 4.10 Messages (@message)
+
+`@message` blocks structure a template as a sequence of chat messages, enabling output as a JSON array instead of plain text.
+
+```mds
+@message system:
+You are a helpful assistant.
+@end
+
+@message user:
+Hello!
+@end
+```
+
+**Role forms:**
+
+| Form | Meaning |
+|------|---------|
+| `@message system:` | Bare word — the role is the literal string `"system"` |
+| `@message {role}:` | Expression — the role is evaluated at runtime from the variable |
+
+```mds
+---
+role: assistant
+---
+
+@message {role}:
+This role comes from the variable.
+@end
+```
+
+**Output modes:**
+
+| Mode | Invocation | Behaviour |
+|------|------------|-----------|
+| Text (default) | `compile_str` / `mds build` | `@message` body rendered inline; role markers ignored — backward compatible |
+| Messages | `compile_messages_str` / `compile_messages_virtual` / `mds build --format messages` | JSON array of `{role, content}` objects |
+
+```mds
+# text mode output:
+You are a helpful assistant.
+Hello!
+
+# messages mode output:
+[
+  { "role": "system", "content": "You are a helpful assistant." },
+  { "role": "user",   "content": "Hello!" }
+]
+```
+
+**Rules:**
+
+- Role must be a non-empty string; an empty or whitespace-only bare-word role is
+  a parse error
+- Bare-word roles are always literal strings — they never look up variables
+- Dynamic roles (`{expr}`) must evaluate to a non-empty, non-whitespace string at
+  runtime: a non-string value → type error; a string that trims to empty →
+  type error (the same rejection applies at runtime as at parse time)
+- Outer whitespace of the body is trimmed; inner whitespace is preserved
+- Empty bodies (trims to empty string) are silently skipped
+- Frontmatter is excluded from message content
+- Nested `@message` blocks are a parse error
+- In messages mode, text outside any `@message` block emits a warning and is ignored
+- A template with no `@message` blocks compiled in messages mode is a compile error
+- `@if` and `@for` around `@message` blocks work identically in both modes; the same iterable rules apply (see §4.4)
+- `@include` is silently ignored in messages mode and emits a warning; included module bodies are not surfaced as messages — compose with `@message` blocks directly
+
+**Control flow inside @message:**
+
+```mds
+---
+admin: true
+tools: [search, code]
+---
+
+@message system:
+@if admin:
+You have admin privileges.
+@end
+Available tools:
+@for tool in tools:
+- {tool}
+@end
+@end
+```
+
+**Resource limits:**
+
+| Limit | Value |
+|-------|-------|
+| `MAX_MESSAGE_COUNT` | 10,000 messages per compilation |
+| Cumulative content size | 50 MB total across all message bodies |
+
+Exceeding either limit returns a `resource_limit` error rather than allowing runaway memory use.
+
+---
+
 ## 5. Compilation Model
 
 | Phase | Description | Errors |
@@ -517,6 +614,7 @@ echo "Hello {name}!" | mds build -         # Compile from stdin (writes to stdou
 | `--out-dir <DIR>` | Output directory. Creates `<stem>.md` inside it. Created if absent. |
 | `--vars <FILE>` | JSON file with runtime variable overrides. |
 | `--set KEY=VALUE` | Set a single variable. Repeatable. Values are coerced to boolean, number, null, or array when possible. |
+| `--format <FORMAT>` | Output format: `markdown` (default) or `messages` (JSON `[{role, content}]` array). In `messages` mode, output goes to stdout or `-o <path>`; `--out-dir` and `mds.json` `output_dir` are ignored. |
 | `-q, --quiet` | Suppress status messages and warnings on stderr. |
 
 **Output path resolution** (precedence order, highest first):
@@ -582,7 +680,7 @@ Maximum config file size: 1 MB.
 | `0` | Success |
 | `1` | Template error (syntax, undefined variable, arity mismatch, recursion, etc.) |
 | `2` | I/O or file-system error (file not found, not an MDS file, I/O failure) |
-| `3` | Resource limit exceeded (output too large, too many iterations) |
+| `3` | Resource limit exceeded (output too large, too many iterations, message count exceeds `MAX_MESSAGE_COUNT` (10,000), or cumulative message content exceeds 50 MB) |
 
 ---
 
@@ -739,7 +837,6 @@ A language server (Rust) providing diagnostics, completions, go-to-definition fo
 
 These are intentionally deferred to keep the language simple and the compiler focused:
 
-- Structured JSON output (chat message arrays)
 - TypeScript/JS *language* features (note: runtime bindings for calling the compiler from JS/TS *are* provided via the `@mdscript/mds` npm package; this item refers to in-template scripting, which is out of scope)
 - Unbounded recursion: direct recursion is rejected; indirect chains are capped at depth 128 (see §4.5)
 - Macros, async functions, streaming
@@ -759,7 +856,7 @@ These are intentionally deferred to keep the language simple and the compiler fo
 ```
 file            := frontmatter? (directive | text)*
 frontmatter     := "---\n" yaml_content "---\n"
-directive       := import | export | define | include | if_block | for_block
+directive       := import | export | define | include | if_block | for_block | message_block
 
 import          := alias_import | merge_import | selective_import
 alias_import    := "@import" quoted_path "as" identifier
@@ -784,6 +881,10 @@ cond_value      := quoted_string | number | "true" | "false" | "null"
 number          := "-"? [0-9]+ ("." [0-9]+)?   (* not NaN or Infinity; those are rejected at parse time *)
 for_block       := "@for" loop_vars "in" dot_path ":" body "@end"
 loop_vars       := identifier | identifier "," identifier
+message_block   := "@message" role ":" body "@end"
+role            := bare_role | "{" message_role_expr "}"
+bare_role       := <any non-empty text up to the trailing ":"> (* literal string; no identifier validation *)
+message_role_expr := qualified_call | member_access | function_call | identifier
 
 text            := (raw_text | interpolation | escaped_brace)*
 interpolation   := "{" (qualified_call | member_access | function_call | identifier) "}"
