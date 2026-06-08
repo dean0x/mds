@@ -18,7 +18,7 @@ referencedFiles:
   - crates/mds-core/src/options.rs
   - Cargo.toml
 created: 2026-05-20
-updated: 2026-06-07
+updated: 2026-06-08T00:00:00Z
 ---
 
 # MDS Native Node.js Bindings (napi-rs)
@@ -233,7 +233,7 @@ When adding a new option key:
 - **`resolve_base_dir` now returns `String`, not `PathBuf`.** As of the unified backend refactor, the private `resolve_base_dir` helper in `mds-core/src/lib.rs` converts `Option<&Path>` directly to a UTF-8 `String` (failing explicitly on non-UTF-8 paths). `ModuleCache::resolve_source` correspondingly takes `&str` for path arguments instead of `&Path`. This is transparent to the napi layer because it calls the stable public wrappers (`compile_with_deps`, etc.), but matters if you read resolver internals.
 - **Test runner requires Node.js 22+.** Tests use the built-in `node:test` runner. Running them with Node 18 or 20 will fail with import errors or missing test API features.
 - **The built `.node` binary must exist before running tests.** Tests load `../mds-napi.node` directly via `require`. The file is produced by `cargo build --release` plus `napi-rs CLI`. Tests cannot be run from source alone.
-- **The napi test suite does not yet test `compileMessages`.** The `index.spec.mjs` currently only destructures `{ compile, compileFile, check, checkFile }` from the addon. `compileMessages` is exercised through the JS package (`@mdscript/mds`) integration tests against the WASM backend, not directly in the napi test file.
+- **The napi test suite now has full `compileMessages` coverage.** Tests M-1 through M-9 in `index.spec.mjs` cover: basic result shape, vars marshaling with dynamic role, no-`@message`-blocks error code, unknown option key rejection, basePath-relative `@import` with non-empty dependencies, `check_source_size` resource limit, null/undefined opts, and multi-message ordering. The addon destructures `{ compile, compileFile, check, checkFile, compileMessages }` from the native module. Total test count is 59 (50 pre-existing + 9 new), 8 suites.
 - **Dependency paths in `CompileResult` are absolute when using `compileFile`.** The `dependencies` field contains paths as returned by `mds-core`'s module cache, which normalizes them to absolute paths. For `compile` (source string variant), dependencies are also absolute if the provider files are resolved from an absolute `basePath`.
 - **`MdsError` is `#[non_exhaustive]`.** New variants (e.g. `BuiltinError` and `ArityMismatch`) do not break the napi layer's `throw_mds_error` — it maps errors by their code string. However, exhaustive match arms on `MdsError` in any future helper code will fail to compile when new variants are added.
 - **npm package name is `@mdscript/mds-napi`, not `mds-napi`.** The crate is named `mds-napi` but the published npm host package is `@mdscript/mds-napi`. Platform packages are `@mdscript/mds-napi-{platform}`. The `node.ts` loader uses `require('@mdscript/mds-napi')`.
@@ -248,7 +248,7 @@ When adding a new option key:
 - `crates/mds-napi/Cargo.toml` — crate manifest; declares `cdylib` type, `debug-panics` feature, workspace dependency pins, and the path+version dep on `mds-core`.
 - `crates/mds-napi/build.rs` — single call to `napi_build::setup()`, generates module registration.
 - `crates/mds-napi/package.json` — npm package metadata (`@mdscript/mds-napi`) used by `@napi-rs/cli` for binary distribution.
-- `crates/mds-napi/__test__/index.spec.mjs` — integration test suite (Node.js 22+, `node:test`), covers compile/compileFile/check/checkFile plus error shape and resource limits. Does not yet include `compileMessages` tests.
+- `crates/mds-napi/__test__/index.spec.mjs` — integration test suite (Node.js 22+, `node:test`), covers compile/compileFile/check/checkFile/compileMessages plus error shape, options validation, resource limits, and compilation parity. 59 tests, 8 suites (M-1 through M-9 are the compileMessages suite added in commit 5ab392b).
 - `crates/mds-core/src/lib.rs` — public API surface that napi bridges; `compile_with_deps`, `compile_str_with_deps`, `check_collecting_warnings`, `check_str_collecting_warnings`, `compile_messages_str_with_deps` are the functions called by the addon. Defines `MdsError` (`#[non_exhaustive]`).
 - `scripts/verify-napi-names.mjs` — A3 gate; verifies the hand-written loader's platform-package names and `.node` filenames match generated platform package names. Run in CI at stage-and-verify-napi and publish-npm steps.
 - `Cargo.toml` (workspace) — defines `panic = "unwind"` profiles and workspace-level napi dependency versions.

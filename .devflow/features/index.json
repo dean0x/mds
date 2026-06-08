@@ -21,12 +21,12 @@
         "crates/mds-core/src/options.rs",
         "Cargo.toml"
       ],
-      "lastUpdated": "2026-06-07T16:21:58.029Z",
+      "lastUpdated": "2026-06-08T05:01:45.690Z",
       "createdBy": "implement"
     },
     "mds-compiler": {
       "name": "MDS Compiler",
-      "description": "Use when working on the MDS compilation pipeline, adding directives, modifying scope/variable handling, extending the module system, debugging output rendering, modifying CLI output behavior, using the virtual filesystem / dependency tracking API, working with @message blocks, messages output mode, or the compile_messages API family. Keywords: lexer, parser, evaluator, resolver, validator, scope, frontmatter, interpolation, directive, import, export, include, define, for, if, elseif, builtins, Param, default arguments, And, Or, logical operators, ArityMismatch, BuiltinError, call_function, required_param_count, condvalue_to_value, MAX_LOGICAL_OPERANDS, message, @message, messages mode, compile_messages, compile_messages_str, compile_messages_virtual, CompileMessagesOutput, Message, evaluate_messages, collect_messages, EvalMessage, OutputFormat, --format messages, injection safety, bare-word role, dynamic role, inside_message, total_message_bytes, MAX_MESSAGE_COUNT, MAX_MESSAGES_TOTAL_SIZE, MAX_ARRAY_ELEMENTS, scan_imports, load_vars_file, load_vars_str, check_virtual, compile_file, read_build_input.",
+      "description": "Use when working on the MDS compilation pipeline, adding directives, modifying scope/variable handling, extending the module system, debugging output rendering, modifying CLI output behavior, using the virtual filesystem / dependency tracking API, working with @message blocks, messages output mode, or the compile_messages API family. Keywords: lexer, parser, evaluator, resolver, validator, scope, frontmatter, interpolation, directive, import, export, include, define, for, if, elseif, builtins, Param, default arguments, And, Or, logical operators, ArityMismatch, BuiltinError, call_function, required_param_count, condvalue_to_value, MAX_LOGICAL_OPERANDS, MAX_LOOP_ITERATIONS, message, @message, messages mode, compile_messages, compile_messages_str, compile_messages_virtual, CompileMessagesOutput, Message, evaluate_messages, collect_messages, EvalMessage, OutputFormat, --format messages, injection safety, bare-word role, dynamic role, inside_message, MessageGuard, validate_exports, total_message_bytes, MAX_MESSAGE_COUNT, MAX_MESSAGES_TOTAL_SIZE, MAX_ARRAY_ELEMENTS, scan_imports, load_vars_file, load_vars_str, check_virtual, compile_file, read_build_input, run_build_messages, run_build_markdown, BuildArgs.",
       "directories": [
         "crates/mds-core/src/",
         "crates/mds-cli/src/",
@@ -52,7 +52,7 @@
         "crates/mds-core/tests/messages.rs",
         "crates/mds-cli/tests/format_messages.rs"
       ],
-      "lastUpdated": "2026-06-07T16:22:08.443Z",
+      "lastUpdated": "2026-06-08T05:01:26.587Z",
       "createdBy": "implement"
     },
     "mds-js": {
@@ -73,7 +73,7 @@
         "packages/mds/package.json",
         "packages/mds/__test__/compile-messages.spec.mjs"
       ],
-      "lastUpdated": "2026-06-07T11:04:38.385Z",
+      "lastUpdated": "2026-06-08T05:01:55.885Z",
       "createdBy": "implement"
     }
   }
