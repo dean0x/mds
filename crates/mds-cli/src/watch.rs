@@ -30,8 +30,8 @@ use miette::Result;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::build::{
-    auto_detect_mds_file, build_runtime_vars, compile_and_write, load_config, resolve_output_path,
-    resolve_output_path_no_create, OutputFormat,
+    auto_detect_mds_file, build_runtime_vars, compile_and_write, compile_to_content, load_config,
+    resolve_output_path, resolve_output_path_no_create, write_output, OutputFormat,
 };
 
 // ── Public args struct ────────────────────────────────────────────────────────
@@ -412,6 +412,18 @@ fn run_watch_file(
     if !quiet {
         eprintln!("Watching {}", entry.display());
     }
+    // Track the last-written content per output target to suppress spurious rewrites
+    // from synthetic FSEvents delivered at watcher registration (macOS) and genuine
+    // no-op saves (content unchanged).  Key: resolved output path string, or the
+    // sentinel "<stdout>" when output_path is None.  Value: the exact content last
+    // written to that target.  Immutable by default — each rebuild returns a new
+    // value rather than mutating in place.
+    let output_key: String = output_path
+        .as_deref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<stdout>".to_string());
+    let mut last_written: HashMap<String, String> = HashMap::new();
+
     let initial_deps =
         match compile_and_write(&entry, output_path.clone(), runtime_vars, &format, quiet) {
             Ok(deps) => deps,
@@ -422,7 +434,10 @@ fn run_watch_file(
             }
         };
 
-    // Set up the watcher.
+    // Set up the watcher AFTER the initial compile so we can record the baseline
+    // content in last_written before any FSEvents arrive.  Any events already
+    // queued by the OS at registration time will be filtered out by the
+    // content-dedup check below (they produce identical output and are discarded).
     let (tx, rx) = mpsc::channel::<Msg>();
     let tx_fs = tx.clone();
     let mut watcher = RecommendedWatcher::new(
@@ -457,8 +472,29 @@ fn run_watch_file(
         }
     }
 
-    let mut current_deps = initial_deps;
-    let mut foi = files_of_interest(&entry, &current_deps, vars_path.as_deref());
+    // Record baseline content so the first synthetic FSEvent produces no spurious
+    // rebuild: compile the entry now (cheaply) to obtain the baseline string.
+    // We do this AFTER setting up watches so the baseline is taken from the same
+    // state the watcher will compare against.
+    {
+        let baseline_vars = build_runtime_vars(vars_path.clone(), static_set_vars.clone())?;
+        match compile_to_content(
+            &entry,
+            baseline_vars,
+            &format,
+            true, /* quiet for baseline */
+        ) {
+            Ok(out) => {
+                last_written.insert(output_key.clone(), out.content);
+            }
+            Err(_) => {
+                // Baseline compile failed (e.g. initial compile had an error too).
+                // Leave last_written empty so the next real rebuild always writes.
+            }
+        }
+    }
+
+    let mut foi = files_of_interest(&entry, &initial_deps, vars_path.as_deref());
 
     // ── Watch loop ────────────────────────────────────────────────────────────
     // The outer loop processes one event batch at a time and is bounded:
@@ -499,29 +535,48 @@ fn run_watch_file(
             clear_terminal();
         }
 
-        // Rebuild.
+        // Rebuild: compile to content first, then compare with last-written
+        // to detect content-identical rebuilds (synthetic FSEvents, no-op saves).
         let t0 = Instant::now();
         let runtime_vars = build_runtime_vars(vars_path.clone(), static_set_vars.clone())?;
-        match compile_and_write(&entry, output_path.clone(), runtime_vars, &format, quiet) {
-            Ok(new_deps) => {
-                let elapsed = t0.elapsed().as_millis();
-                // ADR-016: recompute dep set from fresh compilation output, never trust stale set.
-                let new_dirs = dirs_to_watch(&entry, &new_deps, vars_path.as_deref());
+        match compile_to_content(&entry, runtime_vars, &format, quiet) {
+            Ok(compiled) => {
+                // Content-based dedup: skip write + summary line when content is unchanged.
+                let content_changed = last_written
+                    .get(&output_key)
+                    .is_none_or(|prev| *prev != compiled.content);
+
+                // ADR-016: always recompute dep set and watched dirs from fresh output.
+                let new_dirs = dirs_to_watch(&entry, &compiled.dependencies, vars_path.as_deref());
                 watched_dirs = resync_watches(&mut watcher, &watched_dirs, &new_dirs);
-                foi = files_of_interest(&entry, &new_deps, vars_path.as_deref());
-                current_deps = new_deps;
-                let out_display = output_path
-                    .as_deref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "<stdout>".to_string());
-                if !quiet {
-                    eprintln!(
-                        "Recompiled {} ({} deps) in {}ms",
-                        out_display,
-                        current_deps.len(),
-                        elapsed
-                    );
+                foi = files_of_interest(&entry, &compiled.dependencies, vars_path.as_deref());
+
+                if content_changed {
+                    // Content differs — write the new output.
+                    match write_output(output_path.clone(), &compiled.content, quiet) {
+                        Ok(()) => {
+                            let elapsed = t0.elapsed().as_millis();
+                            let dep_count = compiled.dependencies.len();
+                            // Update the stored baseline so the next event compares correctly.
+                            last_written.insert(output_key.clone(), compiled.content);
+                            let out_display = output_path
+                                .as_deref()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|| "<stdout>".to_string());
+                            if !quiet {
+                                eprintln!(
+                                    "Recompiled {} ({} deps) in {}ms",
+                                    out_display, dep_count, elapsed
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("{e:?}");
+                        }
+                    }
                 }
+                // Content unchanged: no write, no summary line.
+                // last_written already holds the correct value.
             }
             Err(e) => {
                 // Compile error: print and keep watching with the current dep set.

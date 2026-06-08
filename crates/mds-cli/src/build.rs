@@ -419,7 +419,14 @@ pub(crate) fn write_output(
             }
         }
         None => {
+            use std::io::Write as _;
             print!("{compiled}");
+            // Flush stdout so pipe consumers receive the content immediately.
+            // This is a no-op when stdout is a file; on pipes it ensures the
+            // bytes are not held in the libc/Rust buffer until the process exits.
+            std::io::stdout()
+                .flush()
+                .map_err(|e| miette::miette!("cannot flush stdout: {e}"))?;
         }
     }
     Ok(())
@@ -466,29 +473,33 @@ pub(crate) fn auto_detect_mds_file() -> Result<PathBuf> {
 
 // ── Shared compile-and-write helper (used by build and watch) ─────────────────
 
-/// Compile `input` and write to `output_path`, returning the list of transitive deps.
+/// The compiled output content and its transitive dependency list.
 ///
-/// - Markdown mode: `mds::compile_with_deps` → print warnings (unless quiet) →
-///   `write_output` → return deps.
-/// - Messages mode: `read_build_input` → `mds::compile_messages_str_with_deps` →
-///   pretty JSON + trailing `\n` → `write_output` → return deps.
+/// Returned by [`compile_to_content`] so the watch loop can compare content before
+/// deciding whether to write (content-based dedup — see watch.rs).
+pub(crate) struct CompileOutput {
+    /// The compiled string ready to write (markdown or pretty JSON depending on format).
+    pub(crate) content: String,
+    /// Transitive dependency paths (empty when no `@import`s).
+    pub(crate) dependencies: Vec<String>,
+}
+
+/// Compile `input` and return the content + deps WITHOUT writing any output.
 ///
-/// The returned `Vec<String>` contains canonical absolute dependency paths (empty
-/// for stdin and for templates with no `@import`s).  `build` ignores the return
-/// value; `watch` uses it to update the set of watched files (ADR-016: deps
-/// recomputed on every rebuild, never trusted from a stale set).
+/// This is the pure "compile" step used by the watch loop for content-based dedup.
+/// `build` and the initial watch compile use [`compile_and_write`], which calls
+/// this internally and then always writes.
 ///
 /// # PF-004 compliance
 /// All file reads go through [`read_build_input`] or `mds::compile_with_deps`
 /// (which uses the resolver that enforces MAX_FILE_SIZE). There is no bare
 /// `std::fs::read_to_string` path here.
-pub(crate) fn compile_and_write(
+pub(crate) fn compile_to_content(
     input: &Path,
-    output_path: Option<PathBuf>,
     runtime_vars: Option<HashMap<String, mds::Value>>,
     format: &OutputFormat,
     quiet: bool,
-) -> Result<Vec<String>> {
+) -> Result<CompileOutput> {
     match format {
         OutputFormat::Markdown => {
             let result =
@@ -498,8 +509,10 @@ pub(crate) fn compile_and_write(
                     eprintln!("{w}");
                 }
             }
-            write_output(output_path, &result.output, quiet)?;
-            Ok(result.dependencies)
+            Ok(CompileOutput {
+                content: result.output,
+                dependencies: result.dependencies,
+            })
         }
         OutputFormat::Messages => {
             let (source, base_dir) = read_build_input(input)?;
@@ -514,10 +527,40 @@ pub(crate) fn compile_and_write(
             let mut json = serde_json::to_string_pretty(&result.messages)
                 .map_err(|e| miette::miette!("failed to serialize messages to JSON: {e}"))?;
             json.push('\n');
-            write_output(output_path, &json, quiet)?;
-            Ok(result.dependencies)
+            Ok(CompileOutput {
+                content: json,
+                dependencies: result.dependencies,
+            })
         }
     }
+}
+
+/// Compile `input` and write to `output_path`, returning the list of transitive deps.
+///
+/// - Markdown mode: `mds::compile_with_deps` → print warnings (unless quiet) →
+///   `write_output` → return deps.
+/// - Messages mode: `read_build_input` → `mds::compile_messages_str_with_deps` →
+///   pretty JSON + trailing `\n` → `write_output` → return deps.
+///
+/// The returned `Vec<String>` contains canonical absolute dependency paths (empty
+/// for stdin and for templates with no `@import`s).  `build` ignores the return
+/// value; `watch` uses it to update the set of watched files (ADR-016: deps
+/// recomputed on every rebuild, never trusted from a stale set).
+///
+/// # PF-004 compliance
+/// All file reads go through `compile_to_content` → [`read_build_input`] or
+/// `mds::compile_with_deps` (which uses the resolver that enforces MAX_FILE_SIZE).
+/// There is no bare `std::fs::read_to_string` path here.
+pub(crate) fn compile_and_write(
+    input: &Path,
+    output_path: Option<PathBuf>,
+    runtime_vars: Option<HashMap<String, mds::Value>>,
+    format: &OutputFormat,
+    quiet: bool,
+) -> Result<Vec<String>> {
+    let out = compile_to_content(input, runtime_vars, format, quiet)?;
+    write_output(output_path, &out.content, quiet)?;
+    Ok(out.dependencies)
 }
 
 // ── Build args struct ─────────────────────────────────────────────────────────

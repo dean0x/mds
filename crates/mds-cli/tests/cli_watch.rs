@@ -1335,3 +1335,168 @@ fn watch_no_arg_fails_with_multiple_mds_files() {
         "error should mention multiple files or instruct user to specify; got: {stderr}"
     );
 }
+
+// ── QA regression: no spurious startup recompiles and no duplicate stdout ───
+
+/// QA-R1: Start `mds watch` with no edits, wait 1.5s, stop.
+/// Asserts:
+///  - stderr contains exactly ONE "Compiled to" line (initial compile),
+///  - stderr contains ZERO "Recompiled" lines (no spurious rebuild from synthetic FS events).
+///
+/// Uses `--debounce 0` to make synthetic FSEvents arrive immediately (worst case).
+#[test]
+fn watch_startup_no_spurious_recompile() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("nochange.mds");
+    std::fs::write(&src, "---\nname: World\n---\nHello {name}!\n").unwrap();
+    let out = dir.path().join("nochange.md");
+
+    let mut child = ChildGuard(
+        mds_bin()
+            .args([
+                "watch",
+                src.to_str().unwrap(),
+                "-o",
+                out.to_str().unwrap(),
+                "--debounce",
+                "0",
+                // No -q: we NEED to observe stderr messages to catch spurious noise.
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+
+    // Drain stderr on a background thread so the pipe never fills.
+    let stderr_handle = child.0.stderr.take().expect("piped stderr");
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_buf_clone = stderr_buf.clone();
+    let _reader_thread = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut handle = stderr_handle;
+        let mut tmp = [0u8; 512];
+        loop {
+            match handle.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    stderr_buf_clone
+                        .lock()
+                        .unwrap()
+                        .extend_from_slice(&tmp[..n]);
+                }
+            }
+        }
+    });
+
+    // Wait for the initial compile to complete.
+    assert!(
+        wait_for_file_contains(&out, "Hello World!", TIMEOUT),
+        "initial compile should write output"
+    );
+
+    // Let the watcher idle for 1.5s — any synthetic FS events would fire within this window.
+    std::thread::sleep(Duration::from_millis(1500));
+
+    // Stop the child and collect all stderr.
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    std::thread::sleep(Duration::from_millis(50));
+
+    let stderr_bytes = stderr_buf.lock().unwrap().clone();
+    let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+
+    // There must be exactly ONE "Compiled to" message (the initial compile).
+    let compiled_count = stderr_str.matches("Compiled to").count();
+    assert_eq!(
+        compiled_count, 1,
+        "expected exactly 1 'Compiled to' line on startup (no double initial compile); \
+         got {compiled_count}; stderr was:\n{stderr_str}"
+    );
+
+    // There must be ZERO "Recompiled" lines — no rebuild without edits.
+    let recompiled_count = stderr_str.matches("Recompiled").count();
+    assert_eq!(
+        recompiled_count, 0,
+        "expected 0 'Recompiled' lines with no edits (spurious startup rebuild); \
+         got {recompiled_count}; stderr was:\n{stderr_str}"
+    );
+}
+
+/// QA-R2: Start `mds watch <file> -o -` with no edits, capture stdout, wait 1.5s, stop.
+/// Asserts: compiled content appears EXACTLY ONCE in stdout (no double-write on startup).
+///
+/// Uses `--debounce 0` which is the worst case: synthetic FSEvents from watcher
+/// registration arrive immediately and (before the fix) cause the content to be
+/// written 2-3x to stdout, corrupting downstream pipe consumers.
+#[test]
+fn watch_stdout_no_duplicate_write_on_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("stdout_once.mds");
+    // Use a distinctive marker so we can count occurrences.
+    std::fs::write(&src, "UNIQUE_MARKER_XYZ\n").unwrap();
+
+    let mut child = ChildGuard(
+        mds_bin()
+            .args([
+                "watch",
+                src.to_str().unwrap(),
+                "-o",
+                "-",
+                "--debounce",
+                "0",
+                // No -q: we want to observe full behavior.
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    // Drain stdout on a background thread.
+    let stdout_handle = child.0.stdout.take().expect("piped stdout");
+    let stdout_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stdout_buf_clone = stdout_buf.clone();
+    let _reader_thread = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut handle = stdout_handle;
+        let mut tmp = [0u8; 512];
+        loop {
+            match handle.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    stdout_buf_clone
+                        .lock()
+                        .unwrap()
+                        .extend_from_slice(&tmp[..n]);
+                }
+            }
+        }
+    });
+
+    // Let the watcher run long enough to capture initial compile + any spurious second write.
+    std::thread::sleep(Duration::from_millis(1500));
+
+    // Stop the child and collect all stdout.
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    std::thread::sleep(Duration::from_millis(50));
+
+    let stdout_bytes = stdout_buf.lock().unwrap().clone();
+    let stdout_str = String::from_utf8_lossy(&stdout_bytes);
+
+    // The marker should appear at least once (the initial compile wrote it).
+    assert!(
+        stdout_str.contains("UNIQUE_MARKER_XYZ"),
+        "compiled output must appear on stdout; got: {stdout_str:?}"
+    );
+
+    // Count how many times the marker appears — must be exactly 1.
+    let occurrence_count = stdout_str.matches("UNIQUE_MARKER_XYZ").count();
+    assert_eq!(
+        occurrence_count, 1,
+        "compiled content must be written to stdout EXACTLY ONCE on startup \
+         (no duplicate write from spurious synthetic FS event); \
+         got {occurrence_count} occurrences; stdout was:\n{stdout_str}"
+    );
+}
