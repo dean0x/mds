@@ -24,7 +24,7 @@ referencedFiles:
   - crates/mds-core/tests/messages.rs
   - crates/mds-cli/tests/format_messages.rs
 created: 2026-05-12
-updated: 2026-06-07
+updated: 2026-06-08T00:00:00Z
 ---
 
 # MDS Compiler
@@ -83,13 +83,14 @@ When adding a limit used by more than one pipeline stage, add it to `limits.rs`.
 
 ### Evaluator Constants (`crates/mds-core/src/evaluator.rs`)
 
-Three module-level constants defined directly in `evaluator.rs` (not in `limits.rs`):
+Four module-level constants defined directly in `evaluator.rs` (not in `limits.rs`):
 
 - `const MAX_CALL_DEPTH: usize = 128` — maximum call stack depth for user-defined function invocations
-- `const MAX_TOTAL_ITERATIONS: usize = 1_000_000` — cumulative iteration cap across all `@for` loops in one compilation
+- `const MAX_LOOP_ITERATIONS: usize = 100_000` — per-loop guard: a single `@for` loop cannot iterate over more than this many elements; checked before the loop begins (on array/string/map length), not inside the loop body
+- `const MAX_TOTAL_ITERATIONS: usize = 1_000_000` — cumulative iteration cap across all `@for` loops in one compilation; complements `MAX_LOOP_ITERATIONS` for nested-loop scenarios
 - `const MAX_WARNINGS: usize = 1_000` — maximum warnings added to `ctx.warnings` before suppression
 
-These are evaluator-specific and not shared with other pipeline stages.
+These are evaluator-specific and not shared with other pipeline stages. `MAX_LOOP_ITERATIONS` applies at the entry of `evaluate_for` (both the map and array/string branches); `MAX_TOTAL_ITERATIONS` is incremented inside the loop body. They are independent guards: `MAX_LOOP_ITERATIONS` stops a single oversized `@for` early; `MAX_TOTAL_ITERATIONS` stops accumulated cost from many smaller loops.
 
 ### Built-in Functions (`crates/mds-core/src/builtins.rs`)
 
@@ -172,6 +173,8 @@ The role field stores the parsed role expression. Bare words like `system` becom
 3. An empty role string is a hard parse error.
 4. Nested `@message` blocks are rejected via the `inside_message: bool` flag on the `Parser` struct.
 
+**`MessageGuard` RAII struct** — introduced to replace manual flag-restore in `parse_message_block`. Immediately after `enter_block()` sets `inside_message = true`, a `MessageGuard<'p, 'a>(&'p mut Parser<'a>)` is created. Its `Drop` implementation resets `inside_message = false` and decrements `depth`. This means all error paths (including `?` propagation) correctly restore state without relying on explicit cleanup branches. `debug_assert!(depth > 0)` guards against depth underflow.
+
 **`strip_trailing_directive_colon(s: &str) -> Option<&str>`** (in `parser_helpers.rs`) — strips the trailing `:` from a directive line. Quote-and-paren-aware. Returns `None` if no valid trailing colon. Used by `parse_message_block` as well as `@if`/`@for`/`@define`.
 
 **`find_unquoted_operator`** and **`split_on_unquoted_op`** — both have paren-depth tracking so operators inside `func(a || b)` are not treated as condition-level operators.
@@ -207,6 +210,8 @@ Imports `required_param_count` from `crate::ast` (not from evaluator).
 - `total_iterations: usize` — cumulative `@for` iteration counter, bounded by `MAX_TOTAL_ITERATIONS = 1_000_000`
 - `total_message_bytes: usize` — cumulative message content bytes in messages mode, bounded by `MAX_MESSAGES_TOTAL_SIZE`
 - `warnings: &mut Vec<String>` — borrowed reference to the warnings accumulator; new warnings are capped at `MAX_WARNINGS = 1_000`
+
+**`MAX_LOOP_ITERATIONS = 100_000`** — a per-loop guard in `evaluator.rs` (distinct from `MAX_TOTAL_ITERATIONS`). Applied at both entry points: `evaluate_for` for array/string iterables checks `.len()` before iterating; `evaluate_for` for object/map iterables checks `map.len()`. This prevents a single `@for` loop from consuming memory before the total-iterations budget would kick in.
 
 **Text-mode `Node::Message` handling** — in text mode, `@message` blocks are transparent: the body is rendered inline and the role marker is ignored. This maintains full backward compatibility — templates with `@message` blocks compile to plain Markdown without the wrapper syntax.
 
@@ -252,6 +257,8 @@ Both delegate to `process_module_messages`, which shares the tokenize/parse/buil
 **`ModuleCache::resolve_source` takes `base_dir: &str`** (not `&Path`) — the internal `resolve_base_dir` helper converts `Option<&Path>` to a UTF-8 `String` at the `lib.rs` level. Public callers go through `lib.rs` wrappers that accept `Option<&Path>`.
 
 **No-`@message`-blocks hard error** — `process_module_messages` checks `has_message_block(&module.body)` after validation. If no `@message` block is found, it returns `MdsError::syntax("compile_messages requires at least one @message block, but none were found in the template")`. This is not a silent fallback — it is a compile error.
+
+**`validate_exports` parity in messages mode** — `process_module_messages` now calls `validate_exports(&explicit_exports, &functions)` in the same position as `process_module` does. This ensures that `@export <undefined_function>` errors are reported identically in both text mode and messages mode. Previously, messages mode skipped this validation step (an instance of PF-004: alternate output path bypassing a check). The comment in the source explicitly cites this: "mirrors process_module exactly so @export errors in messages mode the same way it does in text mode (avoids PF-004)".
 
 **Frontmatter imports** (from PR #85):
 
@@ -322,7 +329,13 @@ The `build` subcommand accepts `--format <FORMAT>` (values: `markdown`, `message
 - The compiler calls `compile_messages_str_with_deps` instead of `compile*` — source is read via `read_build_input`, not the `mds::compile_collecting_warnings` path.
 - The result's `messages` array is serialized with `serde_json::to_string_pretty` and written as `{json}\n`.
 
-**`read_build_input(input: &Path) -> Result<(String, PathBuf)>`** — shared helper used by the messages-mode path (and available for other paths). Handles stdin (`-`) and file paths. Enforces `MAX_FILE_SIZE` on file reads (reads at most `MAX_FILE_SIZE + 1` bytes and errors if exceeded). Returns `(source_string, base_dir)`. This ensures the messages-mode path has the same size defense-in-depth as file-path compilation.
+**`run_build_messages(input, output, runtime_vars, quiet) -> Result<()>`** — extracted helper (refactored out of `run_build` in commit a375e58) that handles the messages-mode arm. Reads source via `read_build_input`, calls `compile_messages_str_with_deps`, serializes `result.messages` with `serde_json::to_string_pretty`, and writes via `write_output`. Skips all output-dir / `mds.json` config logic — output always goes to stdout or an explicit `-o` path.
+
+**`run_build_markdown(input, output, out_dir, runtime_vars, quiet) -> Result<()>`** — extracted helper for the markdown arm. Loads `mds.json` config, calls `resolve_output_path`, handles stdin or file compilation via `mds::compile_str_collecting_warnings` / `mds::compile_collecting_warnings`, and writes via `write_output`.
+
+**`run_build(args: BuildArgs) -> Result<()>`** — dispatches to `run_build_messages` or `run_build_markdown` based on `args.format`. `BuildArgs` is a plain struct carrying all build subcommand fields.
+
+**`read_build_input(input: &Path) -> Result<(String, PathBuf)>`** — shared helper used by the messages-mode path. Handles stdin (`-`) and file paths. Enforces `MAX_FILE_SIZE` on file reads (reads at most `MAX_FILE_SIZE + 1` bytes and errors if exceeded). Returns `(source_string, base_dir)`. This ensures the messages-mode path has the same size defense-in-depth as file-path compilation.
 
 **`read_stdin() -> Result<(String, PathBuf)>`** — reads from stdin, also enforcing `MAX_FILE_SIZE + 1` byte limit. Returns `(source, cwd)` where `cwd` is the current working directory used as `base_dir`.
 
@@ -431,6 +444,8 @@ When adding a new public function to `lib.rs`:
 - **Using `compile_collecting_warnings` for messages mode in the CLI** — messages mode calls `compile_messages_str_with_deps` via `read_build_input`, not the `compile_collecting_warnings` path. The distinction matters for file size enforcement.
 - **Calling `scan_imports` and expecting it to fail silently on bad syntax** — it returns a `Result` and propagates syntax errors.
 - **Calling `ModuleCache::resolve_source` with a `&Path` directly** — the method takes `base_dir: &str`. Convert via `path.to_str()` or go through `lib.rs` wrappers.
+- **Skipping `validate_exports` in a new compilation code path** — both `process_module` and `process_module_messages` call `validate_exports`; any new "alternate" path that produces or evaluates module content must also call it. Omitting it means `@export <undefined>` errors are silently dropped. Avoids PF-004.
+- **Manually restoring `inside_message` on error paths in `parse_message_block`** — use `MessageGuard` (RAII struct in `parser.rs`) instead. Manual flag-restore is error-prone and will be missed on new `?`-propagation paths. `MessageGuard::drop` handles both `inside_message = false` and `depth -= 1` atomically.
 
 ## Gotchas
 
@@ -468,7 +483,7 @@ When adding a new public function to `lib.rs`:
 - `crates/mds-core/src/validator.rs` — builtin-aware `validate_expr`; range arity checks; recursive `validate_condition`; `Node::Message` arm validates role + recurses body
 - `crates/mds-core/src/resolver.rs` — orchestrator; `ModuleCache`; `process_module_messages`; `resolve_key_messages` / `resolve_source_messages` (take `base_dir: &str`); `FrontmatterImport` enum and parse functions; import semantics; security enforcement
 - `crates/mds-core/src/lib.rs` — public API; `Message` struct; `CompileMessagesOutput` struct; `compile_messages*` function family; `scan_imports`; `load_vars_file`; `load_vars_str`; `check_virtual`; `compile_file`; `strip_reserved_keys` and `prepend_frontmatter`
-- `crates/mds-cli/src/main.rs` — CLI: `OutputFormat` enum; `--format messages` on `build`; `read_build_input` (shared file reader with `MAX_FILE_SIZE` enforcement); `run_build`/`run_check`/`run_init`; `exit_code`; `resolve_output_path`; `load_config`
+- `crates/mds-cli/src/main.rs` — CLI: `OutputFormat` enum; `--format messages` on `build`; `run_build` (dispatcher) → `run_build_messages` (messages path) + `run_build_markdown` (markdown path); `read_build_input` + `read_stdin` (file readers with `MAX_FILE_SIZE` enforcement); `BuildArgs` struct; `run_check`/`run_init`; `exit_code`; `resolve_output_path`; `load_config`
 - `crates/mds-core/tests/messages.rs` — integration tests for `@message` / messages mode
 - `crates/mds-cli/tests/format_messages.rs` — CLI integration tests for `--format messages`
 - `crates/mds-core/tests/api_surface.rs` — public API regression tests; update when adding public symbols

@@ -181,3 +181,21 @@ A fix may be incomplete, mis-scoped, or address a symptom rather than the root c
 - **Decision**: enforce the same non-empty-role invariant at runtime for dynamically-resolved roles, mirroring the parse-time rule, rather than trusting that parse-time validation covers all role values
 - **Consequences**: any invariant that can be violated by a value computed after parsing must be re-checked at the point the value becomes concrete — defense in depth keeps the runtime and parse-time contracts identical and prevents silently emitting a structurally invalid message. Extends ADR-010.
 - **Source**: self-learning:obs_u2v6w0
+
+## ADR-017: Triage every non-blocking review suggestion to an explicit verdict (fixed / false-positive / wont-fix / deferred) with recorded per-item reasoning
+
+- **Date**: 2026-06-07
+- **Status**: Accepted
+- **Context**: a code-review cycle produces a mix of blocking findings, should-fix items, and lower-value suggestions
+- **Decision**: give every suggestion an explicit verdict (fixed / false-positive / wont-fix / deferred) and record a short rationale for each wont-fix item rather than silently dropping it
+- **Consequences**: an auditable per-item disposition makes the resolution defensible, prevents the same suggestion being re-raised next cycle, and distinguishes a conscious wont-fix from an overlooked finding. Complements ADR on skipping a second review cycle (obs_m4n7p1).
+- **Source**: self-learning:obs_x5y9z3
+
+## ADR-018: Skip second code review cycle when convergence signal is strong: zero blocking issues and all should-fix items resolved
+
+- **Date**: 2026-06-07
+- **Status**: Accepted
+- **Context**: deciding whether to run a second code review cycle after all blocking issues resolved
+- **Decision**: skip the second cycle when the convergence signal is strong — zero blocking items, all should-fix items resolved, CI green, and only consciously deferred/wont-fix items remain
+- **Consequences**: a second cycle yields diminishing returns when the first cycle fixed everything actionable
+- **Source**: self-learning:obs_m4n7p1
