@@ -420,29 +420,6 @@ pub(crate) fn state_differs(
     false
 }
 
-/// Re-arm (idempotent) a set of watches on the watcher.
-///
-/// Skips paths that don't exist yet (returns `false` for that path but does not error).
-/// Swallows individual watch errors — missing paths are non-fatal.
-/// Returns `true` if ALL desired paths exist and were successfully re-armed.
-pub(crate) fn rearm(
-    watcher: &mut RecommendedWatcher,
-    paths: &BTreeSet<PathBuf>,
-    mode: RecursiveMode,
-) -> bool {
-    let mut all_ok = true;
-    for p in paths {
-        if !p.exists() {
-            all_ok = false;
-            continue;
-        }
-        if watcher.watch(p, mode).is_err() {
-            all_ok = false;
-        }
-    }
-    all_ok
-}
-
 /// Decide whether a missing/recovered external dep dir should trigger a full
 /// reconcile, and compute the new "missing" set for the next tick.
 ///
@@ -827,6 +804,21 @@ fn run_watch_file(
     let mut entry_was_missing = !entry.exists();
     // First tick should do a liveness check (closes startup race window).
     let mut first_tick = true;
+    // Edge-triggered tracking of watched dirs that were missing on the previous tick.
+    //
+    // Mirrors the `LivenessState.missing_external_dirs` pattern from dir mode
+    // (ADR-021 / AC-P1): a dir that STAYS missing must not trigger a recovery on
+    // every idle tick (which would cause a per-tick compile attempt and per-tick
+    // error spam when the entry's parent dir is permanently absent).  Recovery only
+    // fires when a previously-missing dir *reappears* (vanish→reappear edge) or when
+    // a currently-existing dir fails to re-arm (genuine watch loss).
+    let mut missing_watched_dirs: BTreeSet<PathBuf> = {
+        let desired = dirs_to_watch(&entry, &[], vars_path.as_deref())
+            .union(&watched_dirs)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        desired.into_iter().filter(|d| !d.exists()).collect()
+    };
 
     // ── Watch loop ────────────────────────────────────────────────────────────
     // The outer loop processes one event batch at a time and is bounded:
@@ -842,13 +834,31 @@ fn run_watch_file(
                         .union(&watched_dirs)
                         .cloned()
                         .collect();
-                let rearm_ok = rearm(&mut watcher, &desired_dirs, RecursiveMode::NonRecursive);
+                // Collect per-dir (exists, rearm_ok) statuses — same shape as ext_statuses
+                // in dir mode — so we can apply edge-triggered recovery logic.
+                let dir_statuses: Vec<(PathBuf, bool, bool)> = desired_dirs
+                    .iter()
+                    .map(|d| {
+                        let exists = d.exists();
+                        let rearm_ok =
+                            exists && watcher.watch(d, RecursiveMode::NonRecursive).is_ok();
+                        (d.clone(), exists, rearm_ok)
+                    })
+                    .collect();
+                // Edge-triggered recovery (ADR-021): reuse external_recovery_decision
+                // so the file-mode parent-dir logic is consistent with dir-mode's
+                // external-dep-dir logic.  A dir that STAYS missing does NOT trigger
+                // recovery; only vanish→reappear or re-arm failure does.
+                let (dirs_recovery, now_missing_dirs) =
+                    external_recovery_decision(&missing_watched_dirs, &dir_statuses);
+                missing_watched_dirs = now_missing_dirs;
 
                 // 2. Determine if we need a full reconcile:
-                //    (a) first tick, (b) re-arm had missing dirs that now exist,
+                //    (a) first tick, (b) edge-triggered dir recovery,
                 //    (c) file-mode: entry was missing and now exists.
                 let entry_now_exists = entry.exists();
-                let recovery = first_tick || !rearm_ok || (entry_was_missing && entry_now_exists);
+                let recovery =
+                    first_tick || dirs_recovery || (entry_was_missing && entry_now_exists);
                 first_tick = false;
                 entry_was_missing = !entry_now_exists;
 
@@ -1301,9 +1311,14 @@ fn run_watch_dir(
                 }
 
                 // 2. Recovery trigger.
+                //
+                // `root_exists && !root_ok` = existing root whose re-arm failed (genuine
+                // watch loss).  A *missing* root is handled by the vanish→reappear edge
+                // (`root_was_missing && root_now_exists`) and must NOT trigger recovery on
+                // every tick while absent — that would cause per-tick error spam (ADR-021).
                 let root_now_exists = root.exists();
                 let recovery = liveness.first_tick
-                    || !root_ok
+                    || (root_now_exists && !root_ok)
                     || external_recovery
                     || (liveness.root_was_missing && root_now_exists);
                 liveness.first_tick = false;

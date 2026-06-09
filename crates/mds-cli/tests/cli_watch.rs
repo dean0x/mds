@@ -3145,3 +3145,117 @@ fn watch_dir_mode_soak_50_edits_bounded_and_clean_exit() {
     // Drop (kills + waits) → clean exit verified by absence of panic.
     drop(child);
 }
+
+// ── QA Fix: File-mode parent dir deleted — bounded errors then recovers ───────
+
+/// Regression test for the edge-triggered recovery fix (ADR-021).
+///
+/// When the watched entry's PARENT DIRECTORY is deleted entirely, `rearm()` returns
+/// `false` every idle tick (the parent is missing).  Before the fix this forced
+/// `recovery = true` every tick → one compile attempt → one "file not found" error
+/// PER TICK, violating the design's error-settle intent (DD1: "print at most once per
+/// real attempt, not per tick").
+///
+/// After the fix the recovery logic is edge-triggered (mirrors the
+/// `external_recovery_decision` / `LivenessState.missing_external_dirs` pattern):
+/// - While the parent stays deleted, the watcher is quiet (no per-tick error).
+/// - The moment the parent reappears (vanish→reappear edge), recovery fires and
+///   recompiles (AC-W1 preserved).
+///
+/// At 150ms poll-interval over ≥6 ticks (~900ms idle with missing dir) the
+/// not-found error must appear ≤ 3 times (proving "not once-per-tick") — a
+/// per-tick implementation would produce ≥ 6 errors in that window.
+#[test]
+fn watch_file_mode_parent_dir_deleted_bounded_errors_then_recovers() {
+    // Place the source in a sub-directory so we can delete the parent without
+    // touching the tempdir root (which would delete the child process's cwd too).
+    let base = tempfile::tempdir().unwrap();
+    let src_dir = base.path().join("src");
+    std::fs::create_dir(&src_dir).unwrap();
+    let src = src_dir.join("tpl.mds");
+    // Force deterministic content so the recovery write is unambiguously detectable.
+    std::fs::write(&src, "V1-before\n").unwrap();
+    let out = src_dir.join("tpl.md");
+
+    let mut child = ChildGuard(
+        mds_bin()
+            .args([
+                "watch",
+                src.to_str().unwrap(),
+                "--debounce",
+                "0",
+                "--poll-interval",
+                "150",
+                // No -q: we need to observe stderr errors.
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+
+    let stderr_handle = child.0.stderr.take().expect("piped stderr");
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let buf_clone = stderr_buf.clone();
+    let _reader = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut handle = stderr_handle;
+        let mut tmp = [0u8; 512];
+        loop {
+            match handle.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf_clone.lock().unwrap().extend_from_slice(&tmp[..n]),
+            }
+        }
+    });
+
+    // Wait for initial compile.
+    assert!(
+        wait_for_file_contains(&out, "V1-before", TIMEOUT),
+        "initial compile should produce V1-before"
+    );
+
+    // Delete the ENTIRE parent directory (not just the file — this is the bug scenario).
+    std::fs::remove_dir_all(&src_dir).unwrap();
+
+    // Idle for ≥ 6 ticks at 150ms = ~900ms.  With a per-tick bug, this would produce
+    // ≥ 6 "file not found" / "No such file" errors.  With the fix, it should produce
+    // at most the initial native-event error(s) (≤ 3).
+    std::thread::sleep(Duration::from_millis(1050));
+
+    // Recreate the parent directory and write the file with new content.
+    std::fs::create_dir(&src_dir).unwrap();
+    std::fs::write(&src, "V2-recovered\n").unwrap();
+
+    // The watcher must recover (AC-W1 preserved) and recompile.
+    assert!(
+        wait_for_file_contains(&out, "V2-recovered", TIMEOUT),
+        "watcher must self-heal after parent dir delete+recreate and recompile with V2 content"
+    );
+
+    // Watcher must still be alive after recovery.
+    let still_alive = child.0.try_wait().unwrap().is_none();
+
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    std::thread::sleep(Duration::from_millis(100));
+
+    let stderr_bytes = stderr_buf.lock().unwrap().clone();
+    let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+
+    assert!(
+        still_alive,
+        "watcher must remain alive while parent dir is absent; stderr:\n{stderr_str}"
+    );
+
+    // Count error occurrences.  With a per-tick bug at 150ms over ≥6 ticks we'd see
+    // ≥ 6 errors; the fix bounds them to the initial native-event triggered error(s).
+    let error_count =
+        stderr_str.matches("file not found").count() + stderr_str.matches("No such file").count();
+    assert!(
+        error_count <= 3,
+        "error for missing parent dir must appear a BOUNDED number of times (≤ 3), \
+         not once per tick; got {error_count} occurrences over ≥6 ticks at 150ms; \
+         stderr:\n{stderr_str}"
+    );
+}
