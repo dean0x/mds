@@ -203,6 +203,26 @@ pub(crate) fn files_of_interest(
     set
 }
 
+/// Return `true` for filesystem event kinds that represent **content changes**.
+///
+/// `EventKind::Access(_)` covers inotify `IN_ACCESS`, `IN_OPEN`, and
+/// `IN_CLOSE_NOWRITE` — events emitted when a file is merely *read*, not
+/// written.  On Linux the compile step reads `.mds` source files, which causes
+/// inotify to emit Access events for those same files.  Without this filter the
+/// watcher ingests those events, re-compiles, reads again, emits more Access
+/// events, and enters a busy-loop (thousands of recompiles per second).
+///
+/// macOS FSEvents does not report reads, so this bug was invisible locally and
+/// only manifested in CI on `ubuntu-latest`.
+///
+/// Kept conservative: `Modify`, `Create`, `Remove`, `Any`, `Other` all return
+/// `true`.  `Access(Close(AccessMode::Write))` is technically a write-close but
+/// those paths also produce a `Modify` event on Linux, so excluding all Access
+/// variants is safe and simpler.
+pub(crate) fn is_content_event(kind: &notify::EventKind) -> bool {
+    !matches!(kind, notify::EventKind::Access(_))
+}
+
 /// Return `true` when an fs event is relevant to the current watch set.
 ///
 /// Matches by canonical path. Falls back to (file-name + parent) comparison
@@ -582,8 +602,12 @@ fn drain_debounce(rx: &mpsc::Receiver<Msg>, debounce_ms: u64) -> (BTreeSet<PathB
         let remaining = deadline - now;
         match rx.recv_timeout(remaining) {
             Ok(Msg::Fs(Ok(event))) => {
-                for p in event.paths {
-                    paths.insert(p);
+                // Drop Access events (inotify IN_ACCESS/IN_OPEN/IN_CLOSE_NOWRITE)
+                // — reads must not trigger recompiles; see is_content_event.
+                if is_content_event(&event.kind) {
+                    for p in event.paths {
+                        paths.insert(p);
+                    }
                 }
             }
             Ok(Msg::Fs(Err(e))) => {
@@ -946,6 +970,10 @@ fn run_watch_file(
                         false
                     }
                     Msg::Fs(Ok(ref event)) => {
+                        // Drop Access events (inotify reads) before path check.
+                        if !is_content_event(&event.kind) {
+                            continue;
+                        }
                         if !event_is_relevant(event, &foi) {
                             continue; // Not relevant — skip debounce entirely.
                         }
@@ -1390,8 +1418,14 @@ fn run_watch_dir(
                         eprintln!("warning: watch error: {e}");
                     }
                     Msg::Fs(Ok(event)) => {
-                        for p in event.paths {
-                            changed.insert(p);
+                        // Drop Access events (inotify IN_ACCESS/IN_OPEN/IN_CLOSE_NOWRITE).
+                        // On Linux reading a .mds source file during compile emits Access
+                        // events for that same file, which would re-seed it into `changed`
+                        // and cause a feedback loop at I/O speed (~3000/s).
+                        if is_content_event(&event.kind) {
+                            for p in event.paths {
+                                changed.insert(p);
+                            }
                         }
                     }
                 }
@@ -1748,6 +1782,53 @@ mod tests {
         assert!(foi.contains(&PathBuf::from("/b/dep2.mds")));
         assert!(foi.contains(&PathBuf::from("/c/vars.json")));
         assert_eq!(foi.len(), 4);
+    }
+
+    // T-U3a: is_content_event filters Access events, passes Modify/Create/Remove/Any/Other.
+    //
+    // Rationale: on Linux inotify emits Access events whenever a file is read.
+    // The compile step reads .mds sources, producing Access events that would
+    // re-trigger compilation in a feedback loop.  is_content_event drops all
+    // Access variants and lets through every kind that represents a real change.
+    #[test]
+    fn is_content_event_filters_access_passes_others() {
+        use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind};
+
+        // All Access variants must return false.
+        assert!(!is_content_event(&notify::EventKind::Access(
+            AccessKind::Read
+        )));
+        assert!(!is_content_event(&notify::EventKind::Access(
+            AccessKind::Open(AccessMode::Read)
+        )));
+        assert!(!is_content_event(&notify::EventKind::Access(
+            AccessKind::Close(AccessMode::Read)
+        )));
+        assert!(!is_content_event(&notify::EventKind::Access(
+            AccessKind::Close(AccessMode::Write)
+        )));
+        assert!(!is_content_event(&notify::EventKind::Access(
+            AccessKind::Any
+        )));
+        assert!(!is_content_event(&notify::EventKind::Access(
+            AccessKind::Other
+        )));
+
+        // Content-changing kinds must return true.
+        assert!(is_content_event(&notify::EventKind::Modify(
+            ModifyKind::Any
+        )));
+        assert!(is_content_event(&notify::EventKind::Modify(
+            ModifyKind::Data(notify::event::DataChange::Any)
+        )));
+        assert!(is_content_event(&notify::EventKind::Create(
+            CreateKind::File
+        )));
+        assert!(is_content_event(&notify::EventKind::Remove(
+            RemoveKind::File
+        )));
+        assert!(is_content_event(&notify::EventKind::Any));
+        assert!(is_content_event(&notify::EventKind::Other));
     }
 
     // T-U3: event_is_relevant matches tracked path, rejects sibling.
