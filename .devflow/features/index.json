@@ -1,6 +1,24 @@
 {
   "version": 1,
   "features": {
+    "mds-cli": {
+      "name": "MDS CLI",
+      "description": "Use when working on the mds command-line front-end: the build/check/watch subcommands, output-path resolution, mds.json project config, runtime variable assembly (--vars/--set), the file-watch architecture, or the stdout/stderr stream contract and exit-code mapping. mds-cli is the CLI layer that calls into mds-compiler (compile_with_deps / compile_messages_str_with_deps); see the mds-compiler feature for the compilation pipeline itself. Keywords: mds watch, mds build, mds check, clap, Commands, run_watch, run_watch_file, run_watch_dir, watch.rs, build.rs, compile_and_write, compile_to_content, resolve_output_path, resolve_output_path_no_create, load_config, MdsConfig, build_runtime_vars, write_output, read_build_input, auto_detect_mds_file, reject_directory_input, OutputFormat, BuildArgs, exit_code, notify, ctrlc, recommended_watcher, debounce, dirs_to_watch, files_of_interest, event_is_relevant, resync_watches, collect_mds_files, output_path_for, clear_terminal, last_written, content dedup, FSEvents synthetic events, MAX_FILE_SIZE, PF-004, ADR-016, --out-dir, --vars, --set, --clear, --debounce, --format messages.",
+      "directories": [
+        "crates/mds-cli/src/",
+        "crates/mds-cli/tests/"
+      ],
+      "referencedFiles": [
+        "crates/mds-cli/src/main.rs",
+        "crates/mds-cli/src/build.rs",
+        "crates/mds-cli/src/watch.rs",
+        "crates/mds-cli/tests/cli_watch.rs",
+        "crates/mds-cli/tests/common/mod.rs",
+        "crates/mds-cli/Cargo.toml"
+      ],
+      "lastUpdated": "2026-06-09T07:29:14.000Z",
+      "createdBy": "implement"
+    },
     "mds-napi": {
       "name": "MDS Native Node.js Bindings (napi-rs)",
       "description": "Use when adding new exports to the native Node.js addon, changing error codes or error shape, working with N-API raw system calls, updating options parsing, or investigating the panic-safety boundary. Keywords: napi-rs, native addon, node, N-API, napi_create_error, catch_unwind, cdylib, mds-napi, @mdscript/mds-napi, bindings, options.rs, VarsError, parse_json_vars, BuiltinError, builtin_type_error, compileMessages, Message, CompileMessagesResult, messages mode.",
