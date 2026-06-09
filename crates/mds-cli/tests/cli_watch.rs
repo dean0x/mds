@@ -1703,3 +1703,473 @@ fn watch_single_status_line_per_rebuild() {
          got {compiled_count}; stderr was:\n{stderr_str}"
     );
 }
+
+// ── AC-M1: Subtree-mirrored output (--out-dir) ────────────────────────────
+
+/// Editing a nested .mds file writes to the mirrored path, not a flat stem.
+#[test]
+fn watch_dir_mode_mirrors_subtree_to_out_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("deep.mds"), "---\nname: D\n---\nDeep {name}\n").unwrap();
+    let out_dir = dir.path().join("out");
+
+    let child = ChildGuard(
+        mds_bin()
+            .args([
+                "watch",
+                dir.path().to_str().unwrap(),
+                "--out-dir",
+                out_dir.to_str().unwrap(),
+                "--debounce",
+                "0",
+                "--poll-interval",
+                "0",
+                "-q",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    // Mirrored path: out/sub/deep.md (not out/deep.md).
+    let mirrored = out_dir.join("sub").join("deep.md");
+    assert!(
+        wait_for_file_contains(&mirrored, "Deep D", TIMEOUT),
+        "startup compile should write mirrored output to out/sub/deep.md"
+    );
+    // Flat path must NOT exist.
+    assert!(
+        !out_dir.join("deep.md").exists(),
+        "flat stem deep.md must not exist when mirroring is active"
+    );
+
+    drop(child);
+}
+
+/// Two files with the same stem in different subdirs write to independent
+/// mirrored outputs (no stem collision: AC-M1).
+#[test]
+fn watch_dir_mode_no_stem_collision_with_mirroring() {
+    let dir = tempfile::tempdir().unwrap();
+    let a_dir = dir.path().join("a");
+    let b_dir = dir.path().join("b");
+    std::fs::create_dir_all(&a_dir).unwrap();
+    std::fs::create_dir_all(&b_dir).unwrap();
+    std::fs::write(a_dir.join("x.mds"), "From A\n").unwrap();
+    std::fs::write(b_dir.join("x.mds"), "From B\n").unwrap();
+    let out_dir = dir.path().join("out");
+
+    let child = ChildGuard(
+        mds_bin()
+            .args([
+                "watch",
+                dir.path().to_str().unwrap(),
+                "--out-dir",
+                out_dir.to_str().unwrap(),
+                "--debounce",
+                "0",
+                "--poll-interval",
+                "0",
+                "-q",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    assert!(
+        wait_for_file_contains(&out_dir.join("a").join("x.md"), "From A", TIMEOUT),
+        "out/a/x.md should contain 'From A'"
+    );
+    assert!(
+        wait_for_file_contains(&out_dir.join("b").join("x.md"), "From B", TIMEOUT),
+        "out/b/x.md should contain 'From B'"
+    );
+
+    // Delete a/x.mds → out/a/x.md should be removed, out/b/x.md must survive (AC-M4).
+    std::fs::remove_file(a_dir.join("x.mds")).unwrap();
+    assert!(
+        wait_for_file_gone(&out_dir.join("a").join("x.md"), TIMEOUT),
+        "out/a/x.md should be removed when a/x.mds is deleted"
+    );
+    assert!(
+        out_dir.join("b").join("x.md").exists(),
+        "out/b/x.md must not be affected by deletion of a/x.mds"
+    );
+
+    drop(child);
+}
+
+// ── AC-R1/R2/R8: Reverse-dependency tracking + partials ──────────────────
+
+/// Editing a shared partial rebuilds all transitive importers (AC-R1).
+#[test]
+fn watch_dir_mode_shared_partial_rebuilds_importers() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Shared partial.
+    let partial = dir.path().join("_shared.mds");
+    std::fs::write(
+        &partial,
+        "@define greet(name):\nHello {name}!\n@end\n\n@export greet\n",
+    )
+    .unwrap();
+
+    // Two importers.
+    let a = dir.path().join("a.mds");
+    let b = dir.path().join("b.mds");
+    std::fs::write(&a, "@import \"./_shared.mds\" as s\n{s.greet(\"A\")}\n").unwrap();
+    std::fs::write(&b, "@import \"./_shared.mds\" as s\n{s.greet(\"B\")}\n").unwrap();
+
+    let out_dir = dir.path().join("out");
+
+    let child = ChildGuard(
+        mds_bin()
+            .args([
+                "watch",
+                dir.path().to_str().unwrap(),
+                "--out-dir",
+                out_dir.to_str().unwrap(),
+                "--debounce",
+                "0",
+                "--poll-interval",
+                "0",
+                "-q",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    assert!(
+        wait_for_file_contains(&out_dir.join("a.md"), "Hello A!", TIMEOUT),
+        "a.md should contain Hello A! on startup"
+    );
+    assert!(
+        wait_for_file_contains(&out_dir.join("b.md"), "Hello B!", TIMEOUT),
+        "b.md should contain Hello B! on startup"
+    );
+    // The partial itself must NOT have emitted _shared.md (AC-R8).
+    assert!(
+        !out_dir.join("_shared.md").exists(),
+        "_shared.md must not be written for a _-prefixed partial (DD2)"
+    );
+
+    // Edit the partial — both importers must rebuild.
+    std::fs::write(
+        &partial,
+        "@define greet(name):\nHi {name}!\n@end\n\n@export greet\n",
+    )
+    .unwrap();
+
+    assert!(
+        wait_for_file_contains(&out_dir.join("a.md"), "Hi A!", TIMEOUT),
+        "a.md should update after editing the shared partial"
+    );
+    assert!(
+        wait_for_file_contains(&out_dir.join("b.md"), "Hi B!", TIMEOUT),
+        "b.md should update after editing the shared partial"
+    );
+    // Partial output must still not exist.
+    assert!(
+        !out_dir.join("_shared.md").exists(),
+        "_shared.md must not appear after editing the partial"
+    );
+
+    drop(child);
+}
+
+/// Transitive chain A→B→C: editing C updates A, B and C (AC-R2).
+#[test]
+fn watch_dir_mode_chain_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // C defines a value, B re-exports, A uses B.
+    let c = dir.path().join("_c.mds");
+    std::fs::write(&c, "@define val():\nV1\n@end\n\n@export val\n").unwrap();
+    let b = dir.path().join("_b.mds");
+    std::fs::write(
+        &b,
+        "@import \"./_c.mds\" as c\n@define val():\n{c.val()}\n@end\n\n@export val\n",
+    )
+    .unwrap();
+    let a = dir.path().join("a.mds");
+    std::fs::write(&a, "@import \"./_b.mds\" as b\n{b.val()}\n").unwrap();
+
+    let out_dir = dir.path().join("out");
+
+    let child = ChildGuard(
+        mds_bin()
+            .args([
+                "watch",
+                dir.path().to_str().unwrap(),
+                "--out-dir",
+                out_dir.to_str().unwrap(),
+                "--debounce",
+                "0",
+                "--poll-interval",
+                "0",
+                "-q",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    assert!(
+        wait_for_file_contains(&out_dir.join("a.md"), "V1", TIMEOUT),
+        "a.md should contain V1 initially"
+    );
+
+    // Edit C — A must update.
+    std::fs::write(&c, "@define val():\nV2\n@end\n\n@export val\n").unwrap();
+    assert!(
+        wait_for_file_contains(&out_dir.join("a.md"), "V2", TIMEOUT),
+        "a.md should update to V2 after editing _c.mds (transitive chain)"
+    );
+
+    drop(child);
+}
+
+// ── AC-C1: --poll-interval parse/clamp/exit-2 ────────────────────────────
+
+/// `--poll-interval 0` disables the self-heal probe (native events only, smoke test).
+#[test]
+fn watch_poll_interval_zero_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("hello.mds");
+    std::fs::write(&src, "---\nname: World\n---\nHello {name}!\n").unwrap();
+    let out = dir.path().join("hello.md");
+
+    let child = ChildGuard(
+        mds_bin()
+            .args([
+                "watch",
+                src.to_str().unwrap(),
+                "--debounce",
+                "0",
+                "--poll-interval",
+                "0",
+                "-q",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    assert!(
+        wait_for_file_contains(&out, "Hello World!", TIMEOUT),
+        "--poll-interval 0 should still do the initial compile"
+    );
+
+    // Verify a real edit also works.
+    std::fs::write(&src, "---\nname: Poll\n---\nHello {name}!\n").unwrap();
+    assert!(
+        wait_for_file_contains(&out, "Hello Poll!", TIMEOUT),
+        "--poll-interval 0: edit should still trigger rebuild via native event"
+    );
+
+    drop(child);
+}
+
+/// Non-numeric `--poll-interval` must exit 2 (clap parse error).
+#[test]
+fn watch_poll_interval_invalid_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("hello.mds");
+    std::fs::write(&src, "Hello!\n").unwrap();
+
+    let output = mds_bin()
+        .args([
+            "watch",
+            src.to_str().unwrap(),
+            "--poll-interval",
+            "notanumber",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    // Clap parse errors exit 2.
+    let code = output.status.code().unwrap_or(-1);
+    assert_eq!(
+        code, 2,
+        "invalid --poll-interval should exit 2 (clap error), got {code}"
+    );
+}
+
+/// `--poll-interval` value is clamped to ≥50ms (smoke test: just verify startup works).
+#[test]
+fn watch_poll_interval_tiny_clamped() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("hello.mds");
+    std::fs::write(&src, "Clamped!\n").unwrap();
+    let out = dir.path().join("hello.md");
+
+    // 1ms should be clamped to 50ms — watcher must still start and compile.
+    let child = ChildGuard(
+        mds_bin()
+            .args([
+                "watch",
+                src.to_str().unwrap(),
+                "--debounce",
+                "0",
+                "--poll-interval",
+                "1",
+                "-q",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    assert!(
+        wait_for_file_contains(&out, "Clamped!", TIMEOUT),
+        "--poll-interval 1 (clamped to 50ms) should still work"
+    );
+    drop(child);
+}
+
+// ── AC-W4: Idle watcher emits zero Recompiled across ticks ───────────────
+
+/// Idle for ≥2.5s (≥2 ticks at default 1000ms) in single-file mode must emit
+/// zero "Recompiled" lines (no phantom rebuild from the liveness probe).
+#[test]
+fn watch_file_mode_idle_no_recompile_across_ticks() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("idle.mds");
+    std::fs::write(&src, "---\nname: World\n---\nIdle {name}!\n").unwrap();
+    let out = dir.path().join("idle.md");
+
+    let mut child = ChildGuard(
+        mds_bin()
+            .args([
+                "watch",
+                src.to_str().unwrap(),
+                "--debounce",
+                "0",
+                "--poll-interval",
+                "100",
+                // No -q: we need to observe stderr.
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+
+    let stderr_handle = child.0.stderr.take().expect("piped stderr");
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let buf_clone = stderr_buf.clone();
+    let _reader = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut handle = stderr_handle;
+        let mut tmp = [0u8; 512];
+        loop {
+            match handle.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf_clone.lock().unwrap().extend_from_slice(&tmp[..n]),
+            }
+        }
+    });
+
+    // Wait for initial compile.
+    assert!(
+        wait_for_file_contains(&out, "Idle World!", TIMEOUT),
+        "initial compile should succeed"
+    );
+
+    // Idle for 2.5s (≥2 ticks at 100ms poll-interval — well above the minimum).
+    std::thread::sleep(Duration::from_millis(2500));
+
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    std::thread::sleep(Duration::from_millis(100));
+
+    let stderr_bytes = stderr_buf.lock().unwrap().clone();
+    let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+
+    let recompiled_count = stderr_str.matches("Recompiled").count();
+    assert_eq!(
+        recompiled_count, 0,
+        "idle single-file watcher must emit 0 Recompiled across ticks; \
+         got {recompiled_count}; stderr:\n{stderr_str}"
+    );
+}
+
+/// Idle for ≥2.5s (≥2 ticks) in dir mode must emit zero "Recompiled" lines (AC-W4).
+#[test]
+fn watch_dir_mode_idle_no_recompile_across_ticks() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("a.mds"),
+        "---\nname: A\n---\nFile A: {name}\n",
+    )
+    .unwrap();
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir(&out_dir).unwrap();
+
+    let mut child = ChildGuard(
+        mds_bin()
+            .args([
+                "watch",
+                dir.path().to_str().unwrap(),
+                "--out-dir",
+                out_dir.to_str().unwrap(),
+                "--debounce",
+                "0",
+                "--poll-interval",
+                "100",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+
+    let stderr_handle = child.0.stderr.take().expect("piped stderr");
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let buf_clone = stderr_buf.clone();
+    let _reader = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut handle = stderr_handle;
+        let mut tmp = [0u8; 512];
+        loop {
+            match handle.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf_clone.lock().unwrap().extend_from_slice(&tmp[..n]),
+            }
+        }
+    });
+
+    assert!(
+        wait_for_file_contains(&out_dir.join("a.md"), "File A: A", TIMEOUT),
+        "initial compile should succeed"
+    );
+
+    // Idle for 2.5s (≥2 ticks at 100ms).
+    std::thread::sleep(Duration::from_millis(2500));
+
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    std::thread::sleep(Duration::from_millis(100));
+
+    let stderr_bytes = stderr_buf.lock().unwrap().clone();
+    let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+
+    let recompiled_count = stderr_str.matches("Recompiled").count();
+    assert_eq!(
+        recompiled_count, 0,
+        "idle dir-mode watcher must emit 0 Recompiled across ticks; \
+         got {recompiled_count}; stderr:\n{stderr_str}"
+    );
+}

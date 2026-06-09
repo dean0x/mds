@@ -84,16 +84,17 @@ enum Commands {
     /// Watch an MDS file (or directory) and recompile on changes
     ///
     /// Single-file mode tracks transitive imports — editing any imported file
-    /// triggers a recompile of the entry.  Directory mode compiles each changed
-    /// `.mds` file independently; it does NOT track reverse dependencies (editing
-    /// a shared partial will not recompile files that import it).
+    /// triggers a recompile of the entry. Directory mode tracks a reverse-dependency
+    /// graph: editing a shared partial recompiles all transitive importers.
+    /// `_`-prefixed files are partials (tracked, not emitted to their own output).
+    /// Cross-root imports are watched NonRecursively.
     ///
-    /// Known limitations:
-    /// - If the entry file's parent directory is deleted, the watch is lost.
-    /// - In directory mode, two files with the same stem in the same flat --out-dir
-    ///   will produce the same output filename (last-write-wins).
+    /// Output mirrors the source subtree under `--out-dir` / `mds.json output_dir`.
+    ///
+    /// A liveness-gated reconcile fallback re-arms watches each tick and does a full
+    /// rescan only on watch loss/recovery. Use `--poll-interval 0` to disable.
     #[command(
-        after_help = "Examples:\n  mds watch template.mds              Watch a single file, write template.md\n  mds watch template.mds -o out.md    Watch to a specific output file\n  mds watch template.mds -o -         Watch, stream output to stdout\n  mds watch .                         Watch all .mds files in current directory\n  mds watch src/ --out-dir dist       Watch directory, write to dist/\n  mds watch template.mds --vars v.json  Watch with variable overrides\n  mds watch template.mds --clear      Clear terminal before each rebuild"
+        after_help = "Examples:\n  mds watch template.mds              Watch a single file, write template.md\n  mds watch template.mds -o out.md    Watch to a specific output file\n  mds watch template.mds -o -         Watch, stream output to stdout\n  mds watch .                         Watch all .mds files in current directory\n  mds watch src/ --out-dir dist       Watch directory, mirror to dist/ subtree\n  mds watch template.mds --vars v.json  Watch with variable overrides\n  mds watch template.mds --clear      Clear terminal before each rebuild\n  mds watch src/ --poll-interval 500  Self-heal check every 500ms\n  mds watch src/ --poll-interval 0    Disable self-heal (native events only)"
     )]
     Watch {
         /// File or directory to watch. Omit to auto-detect a single .mds file.
@@ -104,6 +105,7 @@ enum Commands {
         #[arg(short = 'o', long = "output", conflicts_with = "out_dir")]
         output: Option<String>,
         /// Output directory for compiled files (directory mode).
+        /// Output mirrors the source subtree: src/a/b/foo.mds → out/a/b/foo.md.
         /// Mutually exclusive with -o/--output.
         #[arg(long = "out-dir", conflicts_with = "output")]
         out_dir: Option<PathBuf>,
@@ -120,9 +122,16 @@ enum Commands {
         /// Clear the terminal before each rebuild (only when stderr is a TTY)
         #[arg(long)]
         clear: bool,
-        /// Debounce window in milliseconds (default 100; use 0 for immediate rebuilds)
+        /// Debounce window in milliseconds (default 100; use 0 for immediate rebuilds).
+        /// Controls how long to wait for burst coalescing after the first event.
         #[arg(long = "debounce", value_name = "MS", default_value = "100")]
         debounce: u64,
+        /// Self-heal poll interval in milliseconds (default 1000).
+        /// Each tick re-arms watches and runs a liveness check; a full rescan only
+        /// runs on watch loss/recovery. Use 0 to disable (native events only).
+        /// Non-zero values are clamped to a 50ms minimum.
+        #[arg(long = "poll-interval", value_name = "MS", default_value = "1000")]
+        poll_interval: u64,
     },
 }
 
@@ -248,6 +257,7 @@ fn run(cli: Cli) -> Result<()> {
             format,
             clear,
             debounce,
+            poll_interval,
         } => watch::run_watch(watch::WatchArgs {
             input,
             output,
@@ -258,6 +268,7 @@ fn run(cli: Cli) -> Result<()> {
             clear,
             debounce,
             quiet,
+            poll_interval,
         }),
     }
 }

@@ -137,18 +137,6 @@ pub(crate) fn resolve_output_path(
     resolve_output_path_impl(input, output, out_dir, config, true)
 }
 
-/// Like [`resolve_output_path`] but skips directory creation (pure path computation).
-///
-/// Used by watch mode to compute a deletion target without creating directories.
-pub(crate) fn resolve_output_path_no_create(
-    input: &Option<PathBuf>,
-    output: &Option<String>,
-    out_dir: &Option<PathBuf>,
-    config: &Option<(MdsConfig, PathBuf)>,
-) -> Result<Option<PathBuf>> {
-    resolve_output_path_impl(input, output, out_dir, config, false)
-}
-
 fn resolve_output_path_impl(
     input: &Option<PathBuf>,
     output: &Option<String>,
@@ -851,27 +839,6 @@ mod tests {
             result,
             Some(PathBuf::from("out.md")),
             "-o should win over mds.json config"
-        );
-    }
-
-    #[test]
-    fn resolve_output_path_no_create_does_not_create_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let out_dir = dir.path().join("new_subdir");
-        // out_dir does not exist yet
-        assert!(!out_dir.exists());
-        let result = resolve_output_path_no_create(
-            &Some(PathBuf::from("foo.mds")),
-            &None,
-            &Some(out_dir.clone()),
-            &None,
-        )
-        .unwrap();
-        assert_eq!(result, Some(out_dir.join("foo.md")));
-        // The directory must NOT have been created (no side effects).
-        assert!(
-            !out_dir.exists(),
-            "resolve_output_path_no_create must not create directories"
         );
     }
 }
