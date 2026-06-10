@@ -129,21 +129,30 @@ pub(crate) fn output_path_for(source: &Path, root: &Path, base: &OutputBase) -> 
                 }
             };
             // Replace the extension on the relative path.
-            let stem = rel
-                .file_stem()
-                .unwrap_or_else(|| rel.as_os_str())
-                .to_os_string();
+            let stem = rel.file_stem().unwrap_or(rel.as_os_str()).to_os_string();
             let mut name = stem;
             name.push(".md");
             let out = d.join(rel.parent().unwrap_or(Path::new(""))).join(name);
             // AC-M7 containment invariant: the output path must remain inside the out-dir.
-            // A `debug_assert!` here catches any future refactor that accidentally produces
-            // an escaping component (e.g. an absolute or `..`-containing `rel`).
-            debug_assert!(
-                out.starts_with(d),
-                "output_path_for: AC-M7 violated — output {out:?} escaped out-dir {d:?}"
-            );
-            out
+            // Enforced at runtime (not only in debug builds) so the path-escape boundary
+            // is guarded in production. If `strip_prefix` produced a relative path that
+            // somehow contains `..` or an absolute component, fall back to the flat
+            // `d/<stem>.md` form which is guaranteed to be inside `d` (reliability.md / #5).
+            if out.starts_with(d) {
+                out
+            } else {
+                debug_assert!(
+                    false,
+                    "output_path_for: AC-M7 violated — output {out:?} escaped out-dir {d:?}"
+                );
+                let stem = source
+                    .file_stem()
+                    .unwrap_or(source.as_os_str())
+                    .to_os_string();
+                let mut flat_name = stem;
+                flat_name.push(".md");
+                d.join(flat_name)
+            }
         }
         OutputBase::NextToSource => source.with_extension("md"),
     }
@@ -531,14 +540,13 @@ pub(crate) fn resync_watches(
 
 // ── Small shared helpers ──────────────────────────────────────────────────────
 
-/// Emit "Stopped watching." to stderr (unless quiet) and return `Ok(())`.
+/// Emit "Stopped watching." to stderr (unless quiet).
 ///
 /// Called at every Ctrl+C exit point in both watch loops.
-fn stop_watching(quiet: bool) -> Result<()> {
+fn stop_watching(quiet: bool) {
     if !quiet {
         eprintln!("Stopped watching.");
     }
-    Ok(())
 }
 
 /// Receive the next message from the watch channel.
@@ -807,8 +815,16 @@ fn liveness_probe_file(
             (d.clone(), exists, rearm_ok)
         })
         .collect();
-    // Remove vanished dirs from armed_dirs so the next tick re-arms them.
-    state.armed_dirs.retain(|d| d.exists());
+    // Remove vanished dirs from armed_dirs using the already-computed exists flags
+    // rather than re-stating each dir (avoids a second stat per dir per tick).
+    let vanished: Vec<PathBuf> = dir_statuses
+        .iter()
+        .filter(|(_, exists, _)| !exists)
+        .map(|(d, _, _)| d.clone())
+        .collect();
+    for d in vanished {
+        state.armed_dirs.remove(&d);
+    }
     // Edge-triggered recovery (ADR-021): mirrors external_recovery_decision used in
     // dir mode — a dir that STAYS missing must not trigger recovery every tick.
     let (dirs_recovery, now_missing_dirs) =
@@ -1118,7 +1134,10 @@ fn run_watch_file(
             }
             Ok(Some(msg)) => match handle_fs_event_file(msg, &state.foi, &rx, debounce_ms, clear) {
                 FileEventAction::Skip => continue,
-                FileEventAction::Stop => return stop_watching(ctx.quiet),
+                FileEventAction::Stop => {
+                    stop_watching(ctx.quiet);
+                    return Ok(());
+                }
                 FileEventAction::Rebuild => rebuild_file(&ctx, &mut watcher, &mut state),
             },
             // Unreachable: recv_timeout returns Ok(None) for Timeout, not an Err.
@@ -1126,7 +1145,8 @@ fn run_watch_file(
         }
     }
 
-    stop_watching(ctx.quiet)
+    stop_watching(ctx.quiet);
+    Ok(())
 }
 
 // ── Directory watch ───────────────────────────────────────────────────────────
@@ -1210,6 +1230,12 @@ struct LivenessState {
     first_tick: bool,
     /// Tracks whether the root existed on the previous tick.
     root_was_missing: bool,
+    /// Whether the OS watcher was successfully armed for the root on the last tick.
+    ///
+    /// Mirrors the `armed_dirs` discipline from file mode: skip `watcher.watch(root, …)`
+    /// on healthy ticks so the OS-level re-WalkDir / FSEvents stream teardown does not
+    /// happen every idle tick — O(1) idle cost regardless of subtree size (ADR-021).
+    root_armed: bool,
     /// External dep dirs that were missing on the previous tick.
     ///
     /// Recovery is **edge-triggered**: a missing external dir triggers a full
@@ -1217,6 +1243,14 @@ struct LivenessState {
     /// missing. A permanently-missing external dir must NOT force an O(tree) walk
     /// on every idle tick (ADR-021 / AC-P1).
     missing_external_dirs: BTreeSet<PathBuf>,
+    /// External dep dirs that are currently armed with the OS watcher.
+    ///
+    /// Used to call `watcher.unwatch()` when an external dir is pruned from
+    /// `state.external_dep_dirs` (e.g. because a cross-root @import was edited away).
+    /// Prevents inotify/FSEvents watch leaks for the process lifetime (avoids
+    /// approaching `fs.inotify.max_user_watches`). Mirrors the `resync_watches`
+    /// discipline from file mode.
+    armed_external_dirs: BTreeSet<PathBuf>,
 }
 
 /// Compile a single in-root source file, update `state`, and optionally write output.
@@ -1229,12 +1263,13 @@ struct LivenessState {
 /// When `false` the graph is refreshed but no output file is created (used for partials
 /// and external-only deps where the caller decides skip/continue).
 ///
-/// Returns `true` on compile success, `false` on compile error (error already printed).
-///
 /// # Invariants preserved
 /// - ADR-016: dep set recomputed from fresh `compile_to_content` output.
 /// - PF-004: all reads go through `compile_to_content`.
 /// - Error-settle: `state.last_mtimes` updated on both write error and compile error.
+///
+/// Compile success/failure is already signalled via `state.errored`; the caller uses
+/// that set rather than this function's return value, so the return type is `()`.
 fn compile_one_source(
     src: &Path,
     root: &Path,
@@ -1242,7 +1277,7 @@ fn compile_one_source(
     runtime_vars: &Option<HashMap<String, mds::Value>>,
     quiet: bool,
     state: &mut DirWatchState,
-) -> bool {
+) {
     let out = output_path_for(src, root, output_base);
     let t0 = Instant::now();
     match compile_to_content(src, runtime_vars.clone(), &OutputFormat::Markdown, quiet) {
@@ -1253,7 +1288,7 @@ fn compile_one_source(
             if is_partial(src) {
                 state.record_success(src, dep_paths, root, None, None);
                 settle_mtime(src, &mut state.last_mtimes);
-                return true;
+                return;
             }
 
             // Content-based dedup: skip write when content unchanged.
@@ -1294,12 +1329,10 @@ fn compile_one_source(
                 state.record_success(src, dep_paths, root, None, None);
                 settle_mtime(src, &mut state.last_mtimes);
             }
-            true
         }
         Err(e) => {
             eprintln!("{e:?}");
             state.record_error(src);
-            false
         }
     }
 }
@@ -1342,25 +1375,78 @@ fn liveness_probe_dir(
     liveness: &mut LivenessState,
     state: &mut DirWatchState,
 ) {
-    // 1. Re-arm root as Recursive.
-    let root_ok = if ctx.root.exists() {
-        watcher.watch(&ctx.root, RecursiveMode::Recursive).is_ok()
+    // 1. Re-arm root as Recursive (gated — ADR-021 / issue #1 idle O(1) fix).
+    //
+    // Skip the `watcher.watch()` syscall on healthy ticks when root is already armed:
+    // on Linux `notify` re-WalkDirs the entire subtree + calls `inotify_add_watch` per
+    // subdirectory on every `watch()` call regardless of mode; on macOS it tears down
+    // and recreates the FSEvents stream.  Only re-arm when:
+    //   (a) first_tick — not yet armed
+    //   (b) root was missing last tick but now exists (vanish→reappear edge)
+    //   (c) root_armed is false — a previous arm attempt failed; retry
+    let root_now_exists = ctx.root.exists();
+    let need_root_rearm = liveness.first_tick
+        || (liveness.root_was_missing && root_now_exists)
+        || !liveness.root_armed;
+    let root_ok = if root_now_exists && need_root_rearm {
+        let ok = watcher.watch(&ctx.root, RecursiveMode::Recursive).is_ok();
+        liveness.root_armed = ok;
+        ok
+    } else if root_now_exists {
+        // Already armed and still healthy — treat as ok without a syscall.
+        true
     } else {
+        // Root does not exist — unarmed until it reappears.
+        liveness.root_armed = false;
         false
     };
+
     // Unwatch dirs that were pruned from external_dep_dirs by a previous batch
-    // (issue #2 fix: process_dir_batch_incremental recomputes live external dirs).
+    // (issue #2 fix: release OS watches when cross-root @imports are edited away to
+    // prevent inotify/FSEvents watch leaks approaching fs.inotify.max_user_watches).
+    // `armed_external_dirs` tracks which dirs the OS watcher currently holds so we
+    // can call `unwatch()` precisely on the difference.
+    let dropped_external: Vec<PathBuf> = liveness
+        .armed_external_dirs
+        .iter()
+        .filter(|d| !state.external_dep_dirs.contains(*d))
+        .cloned()
+        .collect();
+    for d in &dropped_external {
+        // Non-fatal: dir may have already been deleted.
+        let _ = watcher.unwatch(d);
+        liveness.armed_external_dirs.remove(d);
+    }
+
     // Also clean up any stale entries from missing_external_dirs.
     liveness
         .missing_external_dirs
         .retain(|d| state.external_dep_dirs.contains(d));
-    // Re-arm external dirs (edge-triggered — ADR-021 / AC-P1).
+
+    // Re-arm external dirs — gated like root re-arm: skip the syscall for dirs
+    // that are already armed and still healthy (O(1) per healthy dir per tick).
     let ext_statuses: Vec<(PathBuf, bool, bool)> = state
         .external_dep_dirs
         .iter()
         .map(|ext_dir| {
             let exists = ext_dir.exists();
-            let rearm_ok = exists && watcher.watch(ext_dir, RecursiveMode::NonRecursive).is_ok();
+            let already_armed = liveness.armed_external_dirs.contains(ext_dir);
+            let rearm_ok = if exists {
+                if already_armed {
+                    // Already armed and healthy — skip the syscall.
+                    true
+                } else {
+                    let ok = watcher.watch(ext_dir, RecursiveMode::NonRecursive).is_ok();
+                    if ok {
+                        liveness.armed_external_dirs.insert(ext_dir.clone());
+                    }
+                    ok
+                }
+            } else {
+                // Dir does not exist — ensure it is not marked as armed.
+                liveness.armed_external_dirs.remove(ext_dir);
+                false
+            };
             (ext_dir.clone(), exists, rearm_ok)
         })
         .collect();
@@ -1376,7 +1462,7 @@ fn liveness_probe_dir(
     //    `root_now_exists && !root_ok` = existing root whose re-arm failed (genuine watch loss).
     //    A *missing* root is handled by the `root_was_missing && root_now_exists` vanish→reappear
     //    edge and must NOT trigger recovery on every tick while absent (per-tick error spam).
-    let root_now_exists = ctx.root.exists();
+    //    Note: `root_now_exists` and `root_ok` are already computed above in section 1.
     let recovery = liveness.first_tick
         || (root_now_exists && !root_ok)
         || external_recovery
@@ -1571,15 +1657,20 @@ fn dir_watch_startup(
     let vars_path = canonicalize_vars_path(vars);
     let static_set_vars = set_vars;
 
-    // Resolve the out_dir as absolute if it isn't already.
+    // Resolve the out_dir as absolute and canonicalized so that
+    // the `starts_with(&root)` in-root exclusion check is reliable even when
+    // `cwd` contains symlinks (root is already canonical from run_watch, security #8).
     let abs_out_dir: Option<PathBuf> = out_dir.as_ref().map(|d| {
-        if d.is_absolute() {
+        let abs = if d.is_absolute() {
             d.clone()
         } else {
             std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .join(d)
-        }
+        };
+        // Best-effort: canonicalize when the path exists; fall back to absolute form when
+        // the out-dir doesn't yet exist (it will be created by write_output on first write).
+        abs.canonicalize().unwrap_or(abs)
     });
 
     // Compute the OutputBase (Fix 2 — subtree mirroring). Reject `..` at startup.
@@ -1743,9 +1834,22 @@ fn dir_watch_startup(
     // Pre-loop mtime snapshot for liveness probe state.
     state.last_mtimes = snapshot_state(&state.known_set());
 
+    // Track which external dep dirs were successfully armed during startup (lines above
+    // called watcher.watch() for each; treat all existing dirs as armed, missing ones
+    // as unarmed so the first tick arms them when they reappear).
+    let startup_armed_external: BTreeSet<PathBuf> = state
+        .external_dep_dirs
+        .iter()
+        .filter(|d| d.exists())
+        .cloned()
+        .collect();
+
     let liveness = LivenessState {
         first_tick: true,
         root_was_missing: !root.exists(),
+        // root_armed = true when root existed at startup (watcher.watch was just called).
+        // false when root was missing at startup so the first tick re-arms it on appearance.
+        root_armed: root.exists(),
         // Seed with any external dep dirs that don't exist yet so their first
         // appearance is treated as a recovery edge (not a per-tick walk).
         missing_external_dirs: state
@@ -1754,6 +1858,7 @@ fn dir_watch_startup(
             .filter(|d| !d.exists())
             .cloned()
             .collect(),
+        armed_external_dirs: startup_armed_external,
     };
 
     let ctx = DirWatchCtx {
@@ -1807,13 +1912,17 @@ fn run_watch_dir(
             }
             Ok(Some(msg)) => match handle_fs_event_dir(msg, &ctx, &rx, &mut state) {
                 DirEventOutcome::Skip | DirEventOutcome::Done => {}
-                DirEventOutcome::Stop => return stop_watching(ctx.quiet),
+                DirEventOutcome::Stop => {
+                    stop_watching(ctx.quiet);
+                    return Ok(());
+                }
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
 
-    stop_watching(ctx.quiet)
+    stop_watching(ctx.quiet);
+    Ok(())
 }
 
 /// Process a batch of changed `.mds` paths in directory mode.
@@ -1877,10 +1986,10 @@ fn process_dir_batch_vars_changed(
                 }
             }
         }
-        // Clean up dedup + graph entries for the deleted source.
-        state.last_written.remove(&out);
-        state.forward_deps.remove(*del_src);
-        state.errored.remove(*del_src);
+        // Use the canonical forget() helper so ALL state maps are cleaned up uniformly
+        // (forward_deps, errored, known_files, last_written) — the previous open-coded
+        // triple-remove inadvertently omitted known_files.remove (complexity.md / issue #4).
+        state.forget(del_src, &out);
     }
 
     // Snapshot the old maps, clear them so compile_one_source's record_success
