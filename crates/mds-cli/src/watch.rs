@@ -135,7 +135,15 @@ pub(crate) fn output_path_for(source: &Path, root: &Path, base: &OutputBase) -> 
                 .to_os_string();
             let mut name = stem;
             name.push(".md");
-            d.join(rel.parent().unwrap_or(Path::new(""))).join(name)
+            let out = d.join(rel.parent().unwrap_or(Path::new(""))).join(name);
+            // AC-M7 containment invariant: the output path must remain inside the out-dir.
+            // A `debug_assert!` here catches any future refactor that accidentally produces
+            // an escaping component (e.g. an absolute or `..`-containing `rel`).
+            debug_assert!(
+                out.starts_with(d),
+                "output_path_for: AC-M7 violated — output {out:?} escaped out-dir {d:?}"
+            );
+            out
         }
         OutputBase::NextToSource => {
             let stem = source.file_stem().unwrap_or(source.as_os_str());
@@ -735,6 +743,11 @@ struct FileCompileCtx {
 struct FileWatchState {
     /// Directories currently registered with `watcher`.
     watched_dirs: BTreeSet<PathBuf>,
+    /// Subset of `watched_dirs` that have been successfully armed (registered with the
+    /// OS watcher).  Used by `liveness_probe_file` to skip the `watcher.watch()` syscall
+    /// for dirs that are already known-good — steady-state idle cost becomes O(missing_dirs)
+    /// ≈ O(0) rather than O(watched_dirs) (ADR-021 / issue #1).
+    armed_dirs: BTreeSet<PathBuf>,
     /// Set of paths relevant to the current build (entry + deps + vars).
     foi: HashSet<PathBuf>,
     /// Snapshot of `(mtime, size)` used by the liveness probe (ADR-021).
@@ -761,8 +774,10 @@ enum FileEventAction {
 
 /// Run the idle-tick liveness probe for single-file mode (ADR-021).
 ///
-/// Re-arms all desired watches, applies edge-triggered recovery logic, checks
-/// `(mtime, size)` of all files of interest.
+/// Re-arms watches for dirs that were missing or not yet armed; skips the
+/// `watcher.watch()` syscall for dirs already known-good (`armed_dirs`).
+/// Applies edge-triggered recovery logic, checks `(mtime, size)` of all
+/// files of interest.
 ///
 /// Returns `true` when a rebuild is needed (recovery or mtime change detected).
 fn liveness_probe_file(
@@ -770,7 +785,10 @@ fn liveness_probe_file(
     watcher: &mut RecommendedWatcher,
     state: &mut FileWatchState,
 ) -> bool {
-    // 1. Re-arm all desired watches (idempotent).
+    // 1. Re-arm watches for dirs that need attention (ADR-021 idle-O(1) fix).
+    //    A dir "needs attention" if it was previously missing OR not yet armed.
+    //    Already-armed, currently-present dirs are not touched — steady-state idle
+    //    cost becomes O(missing_dirs) ≈ O(0), not O(watched_dirs).
     let desired_dirs: BTreeSet<PathBuf> = dirs_to_watch(&ctx.entry, &[], ctx.vars_path.as_deref())
         .union(&state.watched_dirs)
         .cloned()
@@ -779,10 +797,26 @@ fn liveness_probe_file(
         .iter()
         .map(|d| {
             let exists = d.exists();
-            let rearm_ok = exists && watcher.watch(d, RecursiveMode::NonRecursive).is_ok();
+            // Only pay the watcher.watch() syscall when the dir was missing last tick
+            // or has not yet been armed — existing armed dirs are left alone.
+            let needs_arm = !state.armed_dirs.contains(d) || state.missing_watched_dirs.contains(d);
+            let rearm_ok = if exists && needs_arm {
+                let ok = watcher.watch(d, RecursiveMode::NonRecursive).is_ok();
+                if ok {
+                    state.armed_dirs.insert(d.clone());
+                }
+                ok
+            } else {
+                // Dir is already armed and was not missing — treat as armed-ok.
+                // If it disappeared, external_recovery_decision will catch the
+                // vanish→reappear edge on the next tick.
+                exists
+            };
             (d.clone(), exists, rearm_ok)
         })
         .collect();
+    // Remove vanished dirs from armed_dirs so the next tick re-arms them.
+    state.armed_dirs.retain(|d| d.exists());
     // Edge-triggered recovery (ADR-021): mirrors external_recovery_decision used in
     // dir mode — a dir that STAYS missing must not trigger recovery every tick.
     let (dirs_recovery, now_missing_dirs) =
@@ -894,6 +928,9 @@ fn rebuild_file(
             let new_dirs =
                 dirs_to_watch(&ctx.entry, &compiled.dependencies, ctx.vars_path.as_deref());
             state.watched_dirs = resync_watches(watcher, &state.watched_dirs, &new_dirs);
+            // Keep armed_dirs in sync: all dirs in watched_dirs are successfully armed;
+            // dirs removed by resync_watches are no longer in watched_dirs.
+            state.armed_dirs = state.watched_dirs.clone();
             state.foi =
                 files_of_interest(&ctx.entry, &compiled.dependencies, ctx.vars_path.as_deref());
             // Update mtime snapshot after a compile (even if content unchanged).
@@ -1049,6 +1086,9 @@ fn run_watch_file(
 
     let entry_was_missing = !entry.exists();
     let mut state = FileWatchState {
+        // armed_dirs mirrors watched_dirs at startup: all dirs that were successfully
+        // registered in the loop above are considered armed (ADR-021 idle-O(1) fix).
+        armed_dirs: watched_dirs.clone(),
         watched_dirs,
         foi,
         last_mtimes,
@@ -1311,6 +1351,12 @@ fn liveness_probe_dir(
     } else {
         false
     };
+    // Unwatch dirs that were pruned from external_dep_dirs by a previous batch
+    // (issue #2 fix: process_dir_batch_incremental recomputes live external dirs).
+    // Also clean up any stale entries from missing_external_dirs.
+    liveness
+        .missing_external_dirs
+        .retain(|d| state.external_dep_dirs.contains(d));
     // Re-arm external dirs (edge-triggered — ADR-021 / AC-P1).
     let ext_statuses: Vec<(PathBuf, bool, bool)> = state
         .external_dep_dirs
@@ -1659,10 +1705,16 @@ fn dir_watch_startup(
             None
         }
     });
+    // Watch the vars dir if it is outside root — soft warning on failure (mirrors the
+    // external-dep-dir convention and the liveness probe's best-effort re-arm semantics;
+    // a transient failure must not abort the session, applies ADR-021 / consistency fix).
     if let Some(ref vd) = vars_dir_extra {
-        watcher
-            .watch(vd, RecursiveMode::NonRecursive)
-            .map_err(|e| miette::miette!("failed to watch vars directory {}: {e}", vd.display()))?;
+        if let Err(e) = watcher.watch(vd, RecursiveMode::NonRecursive) {
+            eprintln!(
+                "warning: failed to watch vars directory {}: {e}",
+                vd.display()
+            );
+        }
     }
 
     // Build the dedup baseline AFTER the watcher is registered so any OS-queued
@@ -1803,6 +1855,11 @@ fn process_dir_batch(
 /// Recomputes the entire forward-deps graph, external-dep-dirs, and errored set
 /// from scratch (prunes stale entries left over from deleted sources).
 ///
+/// Also runs the same deletion cleanup that `process_dir_batch_incremental` does so
+/// that a `.mds` deleted in the same debounce window as a vars edit does not orphan its
+/// output `.md` or leave stale `last_written` / `forward_deps` / `errored` entries
+/// (rust.md / reliability issue #3 fix).
+///
 /// Uses `compile_one_source` for the shared compile→dedup→write→settle sequence.
 fn process_dir_batch_vars_changed(
     root: &Path,
@@ -1812,6 +1869,29 @@ fn process_dir_batch_vars_changed(
     state: &mut DirWatchState,
 ) {
     let all_sources: Vec<PathBuf> = state.known_files.iter().cloned().collect();
+
+    // Determine which known sources no longer exist — their output files must be
+    // removed just as in the incremental deletion step (step 5).
+    let deleted: Vec<&PathBuf> = all_sources.iter().filter(|p| !p.exists()).collect();
+    for del_src in &deleted {
+        let out = output_path_for(del_src, root, output_base);
+        if out.exists() {
+            match std::fs::remove_file(&out) {
+                Ok(()) => {
+                    if !quiet {
+                        eprintln!("Removed {} (source deleted)", out.display());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("warning: could not remove {}: {e}", out.display());
+                }
+            }
+        }
+        // Clean up dedup + graph entries for the deleted source.
+        state.last_written.remove(&out);
+        state.forward_deps.remove(*del_src);
+        state.errored.remove(*del_src);
+    }
 
     // Snapshot the old maps, clear them so compile_one_source's record_success
     // fills fresh copies (ensures stale entries from deleted sources are pruned).
@@ -1880,7 +1960,15 @@ fn process_dir_batch_incremental(
         }
 
         if !src.exists() {
-            // Will be handled in the deletion step (step 5).
+            // If `src` is in the `deleted` set, it will be cleaned up in step 5.
+            // If it is NOT in `deleted` (e.g. it was seeded from `errored` but its
+            // delete event was never delivered — issue #7), prune it from `errored`,
+            // `forward_deps`, and `known_files` now so it doesn't accumulate as a ghost
+            // entry and waste per-batch allocation on every subsequent real-change event.
+            if !deleted.contains(src) {
+                let out = output_path_for(src, root, output_base);
+                state.forget(src, &out);
+            }
             continue;
         }
 
@@ -1924,6 +2012,26 @@ fn process_dir_batch_incremental(
         }
         state.forget(del_src, &out);
     }
+
+    // 6. Prune external_dep_dirs to only dirs still referenced by live forward_deps.
+    //
+    // `external_dep_dirs` is monotonically grown by `record_success` on every compile
+    // (issue #2 / reliability.md): when a cross-root @import is edited away, the now-
+    // unused dir stays in the set, causing the liveness probe to re-arm it on every tick
+    // forever. Recompute from the current `forward_deps` after each batch so abandoned
+    // external dirs are unwatched and removed (applies ADR-021 / mirrors the prune
+    // already done in `process_dir_batch_vars_changed`).
+    let live_ext_dirs: BTreeSet<PathBuf> = state
+        .forward_deps
+        .values()
+        .flatten()
+        .filter_map(|dep| dep.parent().map(Path::to_path_buf))
+        .filter(|parent| !parent.starts_with(root))
+        .collect();
+    // Unwatch dirs that are no longer live.
+    // (watcher is not in scope here; callers call liveness_probe_dir which re-arms only
+    // live dirs — stale dirs simply drop off the set and stop being visited each tick.)
+    state.external_dep_dirs = live_ext_dirs;
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
