@@ -711,6 +711,231 @@ pub(crate) fn run_watch(args: WatchArgs) -> Result<()> {
 
 // ── Single-file watch ─────────────────────────────────────────────────────────
 
+/// Compile-time context for single-file watch mode.
+///
+/// Holds the parameters that are resolved once at startup and passed to every
+/// rebuild — replaces the 6-7 individual constant args on `rebuild_file` and
+/// `liveness_probe_file`, removing the `#[allow(clippy::too_many_arguments)]`
+/// suppressions (issue #6 / zero-warnings policy).
+struct FileCompileCtx {
+    entry: PathBuf,
+    vars_path: Option<PathBuf>,
+    static_set_vars: Vec<(String, String)>,
+    format: OutputFormat,
+    output_path: Option<PathBuf>,
+    output_key: String,
+    quiet: bool,
+}
+
+/// Mutable loop state for single-file watch mode.
+///
+/// Groups the per-loop variables that are updated on every rebuild or liveness tick,
+/// mirroring `DirWatchState` for directory mode (eliminates the asymmetry noted in
+/// the architecture review).
+struct FileWatchState {
+    /// Directories currently registered with `watcher`.
+    watched_dirs: BTreeSet<PathBuf>,
+    /// Set of paths relevant to the current build (entry + deps + vars).
+    foi: HashSet<PathBuf>,
+    /// Snapshot of `(mtime, size)` used by the liveness probe (ADR-021).
+    last_mtimes: HashMap<PathBuf, (Option<std::time::SystemTime>, Option<u64>)>,
+    /// Content-dedup map keyed by output-path string (or `"<stdout>"`).
+    last_written: HashMap<String, String>,
+    /// Whether the entry file was missing on the previous liveness tick.
+    entry_was_missing: bool,
+    /// True on the very first tick; forces a reconcile to close the startup race window.
+    first_tick: bool,
+    /// Parent dirs that were missing on the previous tick (edge-triggered recovery).
+    missing_watched_dirs: BTreeSet<PathBuf>,
+}
+
+/// Outcome returned by `handle_fs_event_file` to tell the loop what to do next.
+enum FileEventAction {
+    /// Skip this message (Access event or irrelevant path) — go back to `recv_next`.
+    Skip,
+    /// Ctrl+C received — stop watching.
+    Stop,
+    /// Rebuild triggered.
+    Rebuild,
+}
+
+/// Run the idle-tick liveness probe for single-file mode (ADR-021).
+///
+/// Re-arms all desired watches, applies edge-triggered recovery logic, checks
+/// `(mtime, size)` of all files of interest.
+///
+/// Returns `true` when a rebuild is needed (recovery or mtime change detected).
+fn liveness_probe_file(
+    ctx: &FileCompileCtx,
+    watcher: &mut RecommendedWatcher,
+    state: &mut FileWatchState,
+) -> bool {
+    // 1. Re-arm all desired watches (idempotent).
+    let desired_dirs: BTreeSet<PathBuf> = dirs_to_watch(&ctx.entry, &[], ctx.vars_path.as_deref())
+        .union(&state.watched_dirs)
+        .cloned()
+        .collect();
+    let dir_statuses: Vec<(PathBuf, bool, bool)> = desired_dirs
+        .iter()
+        .map(|d| {
+            let exists = d.exists();
+            let rearm_ok = exists && watcher.watch(d, RecursiveMode::NonRecursive).is_ok();
+            (d.clone(), exists, rearm_ok)
+        })
+        .collect();
+    // Edge-triggered recovery (ADR-021): mirrors external_recovery_decision used in
+    // dir mode — a dir that STAYS missing must not trigger recovery every tick.
+    let (dirs_recovery, now_missing_dirs) =
+        external_recovery_decision(&state.missing_watched_dirs, &dir_statuses);
+    state.missing_watched_dirs = now_missing_dirs;
+
+    // 2. Determine if we need a full reconcile:
+    //    (a) first tick, (b) edge-triggered dir recovery,
+    //    (c) entry was missing and now exists (vanish→reappear edge).
+    let entry_now_exists = ctx.entry.exists();
+    let recovery =
+        state.first_tick || dirs_recovery || (state.entry_was_missing && entry_now_exists);
+    state.first_tick = false;
+    state.entry_was_missing = !entry_now_exists;
+
+    // 3. Cheap (mtime, size) check on files_of_interest.
+    let changed = state_differs(&state.foi, &state.last_mtimes);
+
+    recovery || changed
+}
+
+/// Classify an incoming `Msg` for single-file mode.
+///
+/// Returns the action the loop should take: skip irrelevant messages, stop on
+/// Ctrl+C, or proceed to rebuild after draining the debounce window.
+fn handle_fs_event_file(
+    msg: Msg,
+    foi: &HashSet<PathBuf>,
+    rx: &mpsc::Receiver<Msg>,
+    debounce_ms: u64,
+    clear: bool,
+) -> FileEventAction {
+    let interrupted = match msg {
+        Msg::Interrupt => true,
+        Msg::Fs(Err(e)) => {
+            eprintln!("warning: watch error: {e}");
+            // Non-fatal watch error — skip but don't rebuild.
+            return FileEventAction::Skip;
+        }
+        Msg::Fs(Ok(ref event)) => {
+            // Drop Access events (inotify reads) before path check.
+            if !is_content_event(&event.kind) {
+                return FileEventAction::Skip;
+            }
+            if !event_is_relevant(event, foi) {
+                return FileEventAction::Skip; // Not relevant — skip debounce entirely.
+            }
+            false
+        }
+    };
+
+    if interrupted {
+        return FileEventAction::Stop;
+    }
+
+    // Drain the debounce window.
+    let (_extra_paths, interrupted2) = drain_debounce(rx, debounce_ms);
+    if interrupted2 {
+        return FileEventAction::Stop;
+    }
+
+    // Clear terminal if requested (only when stderr is a TTY).
+    if clear {
+        clear_terminal();
+    }
+
+    FileEventAction::Rebuild
+}
+
+/// Compile `entry`, compare with last-written content, resync watches, and write
+/// if changed.  Called from both the idle-tick and the FS-event branch of
+/// `run_watch_file` — the single canonical implementation of the
+/// compile→dedup→resync→write→settle sequence for single-file mode.
+///
+/// `ctx` holds compile-time constants; `state` holds all mutable loop state;
+/// `watcher` is passed separately (non-Clone, distinct lifecycle role).
+///
+/// # Invariants preserved
+/// - ADR-016: `foi` and `watched_dirs` always recomputed from fresh dep output.
+/// - PF-004: all reads go through `compile_to_content`.
+/// - Error-settle: `last_mtimes` updated on vars error, compile error, and write error.
+fn rebuild_file(
+    ctx: &FileCompileCtx,
+    watcher: &mut RecommendedWatcher,
+    state: &mut FileWatchState,
+) {
+    // Soft-error: vars file may be temporarily absent (AC-W7 / AC-C5).
+    // Print the error, settle mtime to avoid re-fire, and keep watching.
+    let runtime_vars = match build_runtime_vars(ctx.vars_path.clone(), ctx.static_set_vars.clone())
+    {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e:?}");
+            state.last_mtimes = snapshot_state(&state.foi);
+            return;
+        }
+    };
+
+    let t0 = Instant::now();
+    match compile_to_content(&ctx.entry, runtime_vars, &ctx.format, ctx.quiet) {
+        Ok(compiled) => {
+            // Content-based dedup: skip write + summary line when unchanged.
+            let content_changed = state
+                .last_written
+                .get(&ctx.output_key)
+                .is_none_or(|prev| *prev != compiled.content);
+
+            // ADR-016: always recompute dep set from fresh output.
+            let new_dirs =
+                dirs_to_watch(&ctx.entry, &compiled.dependencies, ctx.vars_path.as_deref());
+            state.watched_dirs = resync_watches(watcher, &state.watched_dirs, &new_dirs);
+            state.foi =
+                files_of_interest(&ctx.entry, &compiled.dependencies, ctx.vars_path.as_deref());
+            // Update mtime snapshot after a compile (even if content unchanged).
+            state.last_mtimes = snapshot_state(&state.foi);
+
+            if content_changed {
+                match write_output(ctx.output_path.clone(), &compiled.content, ctx.quiet, false) {
+                    Ok(()) => {
+                        let elapsed = t0.elapsed().as_millis();
+                        let dep_count = compiled.dependencies.len();
+                        let out_display = ctx
+                            .output_path
+                            .as_deref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<stdout>".to_string());
+                        state
+                            .last_written
+                            .insert(ctx.output_key.clone(), compiled.content);
+                        if !ctx.quiet {
+                            eprintln!(
+                                "Recompiled {} ({} deps) in {}ms",
+                                out_display, dep_count, elapsed
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("{e:?}");
+                        // Error-settle: update snapshot so we don't re-fire.
+                        state.last_mtimes = snapshot_state(&state.foi);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{e:?}");
+            // Error-settle: snapshot current state so the tick gate
+            // won't re-fire on the same unchanged files (AC-R7/W6).
+            state.last_mtimes = snapshot_state(&state.foi);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_watch_file(
     entry: PathBuf,
@@ -738,17 +963,11 @@ fn run_watch_file(
     if !quiet {
         eprintln!("Watching {}", entry.display());
     }
-    // Track the last-written content per output target to suppress spurious rewrites
-    // from synthetic FSEvents delivered at watcher registration (macOS) and genuine
-    // no-op saves (content unchanged).  Key: resolved output path string, or the
-    // sentinel "<stdout>" when output_path is None.  Value: the exact content last
-    // written to that target.  Immutable by default — each rebuild returns a new
-    // value rather than mutating in place.
+    // Key: resolved output path string, or the sentinel "<stdout>" when output_path is None.
     let output_key: String = output_path
         .as_deref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "<stdout>".to_string());
-    let mut last_written: HashMap<String, String> = HashMap::new();
 
     let initial_deps =
         match compile_and_write(&entry, output_path.clone(), runtime_vars, &format, quiet) {
@@ -761,9 +980,7 @@ fn run_watch_file(
         };
 
     // Set up the watcher AFTER the initial compile so we can record the baseline
-    // content in last_written before any FSEvents arrive.  Any events already
-    // queued by the OS at registration time will be filtered out by the
-    // content-dedup check below (they produce identical output and are discarded).
+    // content in last_written before any FSEvents arrive.
     let (tx, rx) = mpsc::channel::<Msg>();
     let tx_fs = tx.clone();
     let mut watcher = RecommendedWatcher::new(
@@ -798,10 +1015,9 @@ fn run_watch_file(
         }
     }
 
-    // Record baseline content so the first synthetic FSEvent produces no spurious
-    // rebuild: compile the entry now (cheaply) to obtain the baseline string.
-    // We do this AFTER setting up watches so the baseline is taken from the same
-    // state the watcher will compare against.
+    // Record baseline content AFTER setting up watches to suppress the first
+    // synthetic FSEvent from macOS (baseline taken from the same state the watcher sees).
+    let mut last_written: HashMap<String, String> = HashMap::new();
     {
         let baseline_vars = build_runtime_vars(vars_path.clone(), static_set_vars.clone())?;
         match compile_to_content(
@@ -814,34 +1030,45 @@ fn run_watch_file(
                 last_written.insert(output_key.clone(), out.content);
             }
             Err(_) => {
-                // Baseline compile failed (e.g. initial compile had an error too).
-                // Leave last_written empty so the next real rebuild always writes.
+                // Baseline compile failed — leave last_written empty so next rebuild always writes.
             }
         }
     }
 
-    let mut foi = files_of_interest(&entry, &initial_deps, vars_path.as_deref());
+    let foi = files_of_interest(&entry, &initial_deps, vars_path.as_deref());
 
-    // Pre-loop state: snapshot (mtime, size) for liveness probe (ADR-021 / DD1).
-    let mut last_mtimes = snapshot_state(&foi);
-    // Track whether the entry existed before the loop starts (for file-mode liveness).
-    let mut entry_was_missing = !entry.exists();
-    // First tick should do a liveness check (closes startup race window).
-    let mut first_tick = true;
-    // Edge-triggered tracking of watched dirs that were missing on the previous tick.
-    //
-    // Mirrors the `LivenessState.missing_external_dirs` pattern from dir mode
-    // (ADR-021 / AC-P1): a dir that STAYS missing must not trigger a recovery on
-    // every idle tick (which would cause a per-tick compile attempt and per-tick
-    // error spam when the entry's parent dir is permanently absent).  Recovery only
-    // fires when a previously-missing dir *reappears* (vanish→reappear edge) or when
-    // a currently-existing dir fails to re-arm (genuine watch loss).
-    let mut missing_watched_dirs: BTreeSet<PathBuf> = {
+    // Build pre-loop FileWatchState (mtime snapshot + edge-trigger seeds).
+    let missing_watched_dirs: BTreeSet<PathBuf> = {
         let desired = dirs_to_watch(&entry, &[], vars_path.as_deref())
             .union(&watched_dirs)
             .cloned()
             .collect::<BTreeSet<_>>();
         desired.into_iter().filter(|d| !d.exists()).collect()
+    };
+    let last_mtimes = snapshot_state(&foi);
+
+    let entry_was_missing = !entry.exists();
+    let mut state = FileWatchState {
+        watched_dirs,
+        foi,
+        last_mtimes,
+        last_written,
+        entry_was_missing,
+        first_tick: true,
+        missing_watched_dirs,
+    };
+
+    // Build compile-time context (replaces the 7 individual constant args previously
+    // threaded through rebuild_file / liveness_probe_file — removes both
+    // #[allow(clippy::too_many_arguments)] suppressions).
+    let ctx = FileCompileCtx {
+        entry,
+        vars_path,
+        static_set_vars,
+        format,
+        output_path,
+        output_key,
+        quiet,
     };
 
     // ── Watch loop ────────────────────────────────────────────────────────────
@@ -852,220 +1079,22 @@ fn run_watch_file(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Ok(None) => {
                 // Idle tick — run liveness probe (ADR-021).
-                // 1. Re-arm all desired watches (idempotent).
-                let desired_dirs: BTreeSet<PathBuf> =
-                    dirs_to_watch(&entry, &[], vars_path.as_deref())
-                        .union(&watched_dirs)
-                        .cloned()
-                        .collect();
-                // Collect per-dir (exists, rearm_ok) statuses — same shape as ext_statuses
-                // in dir mode — so we can apply edge-triggered recovery logic.
-                let dir_statuses: Vec<(PathBuf, bool, bool)> = desired_dirs
-                    .iter()
-                    .map(|d| {
-                        let exists = d.exists();
-                        let rearm_ok =
-                            exists && watcher.watch(d, RecursiveMode::NonRecursive).is_ok();
-                        (d.clone(), exists, rearm_ok)
-                    })
-                    .collect();
-                // Edge-triggered recovery (ADR-021): reuse external_recovery_decision
-                // so the file-mode parent-dir logic is consistent with dir-mode's
-                // external-dep-dir logic.  A dir that STAYS missing does NOT trigger
-                // recovery; only vanish→reappear or re-arm failure does.
-                let (dirs_recovery, now_missing_dirs) =
-                    external_recovery_decision(&missing_watched_dirs, &dir_statuses);
-                missing_watched_dirs = now_missing_dirs;
-
-                // 2. Determine if we need a full reconcile:
-                //    (a) first tick, (b) edge-triggered dir recovery,
-                //    (c) file-mode: entry was missing and now exists.
-                let entry_now_exists = entry.exists();
-                let recovery =
-                    first_tick || dirs_recovery || (entry_was_missing && entry_now_exists);
-                first_tick = false;
-                entry_was_missing = !entry_now_exists;
-
-                // 3. Cheap (mtime,size) check on files_of_interest.
-                let changed = state_differs(&foi, &last_mtimes);
-
-                if recovery || changed {
-                    // Rebuild: compile to content first, then compare with last-written.
-                    let t0 = Instant::now();
-                    // Soft-error: vars file may be temporarily absent (AC-W7 / AC-C5).
-                    // Print the error, settle mtime to avoid re-fire, and keep watching.
-                    let runtime_vars =
-                        match build_runtime_vars(vars_path.clone(), static_set_vars.clone()) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                eprintln!("{e:?}");
-                                last_mtimes = snapshot_state(&foi);
-                                continue;
-                            }
-                        };
-                    match compile_to_content(&entry, runtime_vars, &format, quiet) {
-                        Ok(compiled) => {
-                            // Content-based dedup: skip write + summary line when unchanged.
-                            let content_changed = last_written
-                                .get(&output_key)
-                                .is_none_or(|prev| *prev != compiled.content);
-
-                            // ADR-016: always recompute dep set from fresh output.
-                            let new_dirs =
-                                dirs_to_watch(&entry, &compiled.dependencies, vars_path.as_deref());
-                            watched_dirs = resync_watches(&mut watcher, &watched_dirs, &new_dirs);
-                            foi = files_of_interest(
-                                &entry,
-                                &compiled.dependencies,
-                                vars_path.as_deref(),
-                            );
-                            // Update mtime snapshot after a compile (even if content unchanged).
-                            last_mtimes = snapshot_state(&foi);
-
-                            if content_changed {
-                                match write_output(
-                                    output_path.clone(),
-                                    &compiled.content,
-                                    quiet,
-                                    false,
-                                ) {
-                                    Ok(()) => {
-                                        let elapsed = t0.elapsed().as_millis();
-                                        let dep_count = compiled.dependencies.len();
-                                        last_written.insert(output_key.clone(), compiled.content);
-                                        let out_display = output_path
-                                            .as_deref()
-                                            .map(|p| p.display().to_string())
-                                            .unwrap_or_else(|| "<stdout>".to_string());
-                                        if !quiet {
-                                            eprintln!(
-                                                "Recompiled {} ({} deps) in {}ms",
-                                                out_display, dep_count, elapsed
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("{e:?}");
-                                        // Error-settle: update snapshot so we don't re-fire.
-                                        last_mtimes = snapshot_state(&foi);
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("{e:?}");
-                            // Error-settle: snapshot current state so the tick gate
-                            // won't re-fire on the same unchanged files (AC-R7/W6).
-                            last_mtimes = snapshot_state(&foi);
-                        }
-                    }
+                if liveness_probe_file(&ctx, &mut watcher, &mut state) {
+                    rebuild_file(&ctx, &mut watcher, &mut state);
                 }
                 continue;
             }
-            Ok(Some(msg)) => {
-                let interrupted = match msg {
-                    Msg::Interrupt => true,
-                    Msg::Fs(Err(e)) => {
-                        eprintln!("warning: watch error: {e}");
-                        false
-                    }
-                    Msg::Fs(Ok(ref event)) => {
-                        // Drop Access events (inotify reads) before path check.
-                        if !is_content_event(&event.kind) {
-                            continue;
-                        }
-                        if !event_is_relevant(event, &foi) {
-                            continue; // Not relevant — skip debounce entirely.
-                        }
-                        false
-                    }
-                };
-
-                if interrupted {
-                    return stop_watching(quiet);
-                }
-
-                // Drain the debounce window.
-                let (_extra_paths, interrupted2) = drain_debounce(&rx, debounce_ms);
-                if interrupted2 {
-                    return stop_watching(quiet);
-                }
-
-                // Clear terminal if requested (only when stderr is a TTY).
-                if clear {
-                    clear_terminal();
-                }
-
-                // Rebuild: compile to content first, then compare with last-written
-                // to detect content-identical rebuilds (synthetic FSEvents, no-op saves).
-                let t0 = Instant::now();
-                // Soft-error: vars file may be temporarily absent (AC-W7 / AC-C5).
-                let runtime_vars =
-                    match build_runtime_vars(vars_path.clone(), static_set_vars.clone()) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            eprintln!("{e:?}");
-                            last_mtimes = snapshot_state(&foi);
-                            continue;
-                        }
-                    };
-                match compile_to_content(&entry, runtime_vars, &format, quiet) {
-                    Ok(compiled) => {
-                        // Content-based dedup.
-                        let content_changed = last_written
-                            .get(&output_key)
-                            .is_none_or(|prev| *prev != compiled.content);
-
-                        // ADR-016: always recompute dep set and watched dirs from fresh output.
-                        let new_dirs =
-                            dirs_to_watch(&entry, &compiled.dependencies, vars_path.as_deref());
-                        watched_dirs = resync_watches(&mut watcher, &watched_dirs, &new_dirs);
-                        foi =
-                            files_of_interest(&entry, &compiled.dependencies, vars_path.as_deref());
-                        // Keep mtime baseline in sync after every event-driven rebuild.
-                        last_mtimes = snapshot_state(&foi);
-
-                        if content_changed {
-                            match write_output(output_path.clone(), &compiled.content, quiet, false)
-                            {
-                                Ok(()) => {
-                                    let elapsed = t0.elapsed().as_millis();
-                                    let dep_count = compiled.dependencies.len();
-                                    last_written.insert(output_key.clone(), compiled.content);
-                                    let out_display = output_path
-                                        .as_deref()
-                                        .map(|p| p.display().to_string())
-                                        .unwrap_or_else(|| "<stdout>".to_string());
-                                    if !quiet {
-                                        eprintln!(
-                                            "Recompiled {} ({} deps) in {}ms",
-                                            out_display, dep_count, elapsed
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("{e:?}");
-                                    last_mtimes = snapshot_state(&foi);
-                                }
-                            }
-                        }
-                        // Content unchanged: no write, no summary line.
-                        // last_written already holds the correct value.
-                    }
-                    Err(e) => {
-                        // Compile error: print and keep watching.
-                        eprintln!("{e:?}");
-                        // Error-settle: snapshot so the liveness probe won't re-fire.
-                        last_mtimes = snapshot_state(&foi);
-                    }
-                }
-            }
+            Ok(Some(msg)) => match handle_fs_event_file(msg, &state.foi, &rx, debounce_ms, clear) {
+                FileEventAction::Skip => continue,
+                FileEventAction::Stop => return stop_watching(ctx.quiet),
+                FileEventAction::Rebuild => rebuild_file(&ctx, &mut watcher, &mut state),
+            },
             // Unreachable: recv_timeout returns Ok(None) for Timeout, not an Err.
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
 
-    stop_watching(quiet)
+    stop_watching(ctx.quiet)
 }
 
 // ── Directory watch ───────────────────────────────────────────────────────────
@@ -1090,6 +1119,54 @@ struct DirWatchState {
     last_mtimes: HashMap<PathBuf, (Option<std::time::SystemTime>, Option<u64>)>,
 }
 
+impl DirWatchState {
+    /// Record a successful compile for `src` with the given dep paths and output content.
+    ///
+    /// Updates `forward_deps`, removes from `errored`, inserts into `known_files`,
+    /// and updates `external_dep_dirs` for any deps outside `root`.
+    fn record_success(
+        &mut self,
+        src: &Path,
+        dep_paths: Vec<PathBuf>,
+        root: &Path,
+        out: Option<&Path>,
+        content: Option<String>,
+    ) {
+        // Track external dep dirs (DD3 — cross-root).
+        for dep in &dep_paths {
+            if let Some(parent) = dep.parent() {
+                if !parent.starts_with(root) {
+                    self.external_dep_dirs.insert(parent.to_path_buf());
+                }
+            }
+        }
+        self.forward_deps.insert(src.to_path_buf(), dep_paths);
+        self.errored.remove(src);
+        self.known_files.insert(src.to_path_buf());
+        if let (Some(out_path), Some(c)) = (out, content) {
+            self.last_written.insert(out_path.to_path_buf(), c);
+        }
+    }
+
+    /// Record a compile error for `src`.
+    ///
+    /// Inserts into `errored`, clears `forward_deps` entry (empty vec), and
+    /// updates `last_mtimes` for error-settle (avoids re-fire on unchanged file).
+    fn record_error(&mut self, src: &Path) {
+        self.errored.insert(src.to_path_buf());
+        self.forward_deps.insert(src.to_path_buf(), vec![]);
+        settle_mtime(src, &mut self.last_mtimes);
+    }
+
+    /// Remove all state for a deleted source and its output.
+    fn forget(&mut self, src: &Path, out: &Path) {
+        self.last_written.remove(out);
+        self.forward_deps.remove(src);
+        self.errored.remove(src);
+        self.known_files.remove(src);
+    }
+}
+
 /// State for the dir-mode liveness probe (ADR-021).
 struct LivenessState {
     /// Set to true on the very first tick so we do a reconcile after startup.
@@ -1105,8 +1182,342 @@ struct LivenessState {
     missing_external_dirs: BTreeSet<PathBuf>,
 }
 
+/// Compile a single in-root source file, update `state`, and optionally write output.
+///
+/// This is the shared kernel for both the `vars_changed` full-recompile loop and the
+/// per-affected-source incremental loop in `process_dir_batch` — collapsing the
+/// 2× duplicated compile→dedup→write→error-settle block inside that function.
+///
+/// `write_output_file`: when `true` the compiled content is written (non-partial sources).
+/// When `false` the graph is refreshed but no output file is created (used for partials
+/// and external-only deps where the caller decides skip/continue).
+///
+/// Returns `true` on compile success, `false` on compile error (error already printed).
+///
+/// # Invariants preserved
+/// - ADR-016: dep set recomputed from fresh `compile_to_content` output.
+/// - PF-004: all reads go through `compile_to_content`.
+/// - Error-settle: `state.last_mtimes` updated on both write error and compile error.
+fn compile_one_source(
+    src: &Path,
+    root: &Path,
+    output_base: &OutputBase,
+    runtime_vars: &Option<HashMap<String, mds::Value>>,
+    quiet: bool,
+    state: &mut DirWatchState,
+) -> bool {
+    let out = output_path_for(src, root, output_base);
+    let t0 = Instant::now();
+    match compile_to_content(src, runtime_vars.clone(), &OutputFormat::Markdown, quiet) {
+        Ok(compiled) => {
+            let dep_paths: Vec<PathBuf> = compiled.dependencies.iter().map(PathBuf::from).collect();
+
+            // Partials (DD2): refresh graph edges but do NOT write output.
+            if is_partial(src) {
+                state.record_success(src, dep_paths, root, None, None);
+                settle_mtime(src, &mut state.last_mtimes);
+                return true;
+            }
+
+            // Content-based dedup: skip write when content unchanged.
+            let content_changed = state
+                .last_written
+                .get(&out)
+                .is_none_or(|prev| *prev != compiled.content);
+
+            if content_changed {
+                match write_output(Some(out.clone()), &compiled.content, quiet, false) {
+                    Ok(()) => {
+                        let elapsed = t0.elapsed().as_millis();
+                        let dep_count = compiled.dependencies.len();
+                        if !quiet {
+                            eprintln!(
+                                "Recompiled {} ({} deps) in {}ms",
+                                out.display(),
+                                dep_count,
+                                elapsed
+                            );
+                        }
+                        state.record_success(
+                            src,
+                            dep_paths,
+                            root,
+                            Some(&out),
+                            Some(compiled.content),
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("{e:?}");
+                        // Error-settle: update mtime so the gate won't re-fire.
+                        state.record_error(src);
+                    }
+                }
+            } else {
+                // Content unchanged — still update graph + known_files + mtime baseline.
+                state.record_success(src, dep_paths, root, None, None);
+                settle_mtime(src, &mut state.last_mtimes);
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("{e:?}");
+            state.record_error(src);
+            false
+        }
+    }
+}
+
+/// Return value from `dir_watch_startup` bundling the watcher, channel, state,
+/// liveness state, and context struct produced during startup.
+struct DirStartup {
+    watcher: RecommendedWatcher,
+    rx: mpsc::Receiver<Msg>,
+    state: DirWatchState,
+    liveness: LivenessState,
+    ctx: DirWatchCtx,
+}
+
+/// Compile-time context for directory-mode watch, parallel to `FileCompileCtx`.
+///
+/// Groups the parameters resolved once at startup and threaded into every
+/// liveness-probe and event-handler call — removes `#[allow(clippy::too_many_arguments)]`
+/// from the extracted helper functions (issue #6 / zero-warnings policy).
+struct DirWatchCtx {
+    root: PathBuf,
+    vars_path: Option<PathBuf>,
+    static_set_vars: Vec<(String, String)>,
+    output_base: OutputBase,
+    exclude_prefix: Option<PathBuf>,
+    vars_dir_extra: Option<PathBuf>,
+    clear: bool,
+    debounce_ms: u64,
+    quiet: bool,
+}
+
+/// Run the idle-tick liveness probe for directory mode (ADR-021, DD1).
+///
+/// Re-arms root + external dirs + vars dir. Applies edge-triggered recovery
+/// to decide whether a full reconcile (collect_mds_files diff) is needed.
+/// Mutates `liveness` state for next tick.
+fn liveness_probe_dir(
+    ctx: &DirWatchCtx,
+    watcher: &mut RecommendedWatcher,
+    liveness: &mut LivenessState,
+    state: &mut DirWatchState,
+) {
+    // 1. Re-arm root as Recursive.
+    let root_ok = if ctx.root.exists() {
+        watcher.watch(&ctx.root, RecursiveMode::Recursive).is_ok()
+    } else {
+        false
+    };
+    // Re-arm external dirs (edge-triggered — ADR-021 / AC-P1).
+    let ext_statuses: Vec<(PathBuf, bool, bool)> = state
+        .external_dep_dirs
+        .iter()
+        .map(|ext_dir| {
+            let exists = ext_dir.exists();
+            let rearm_ok = exists && watcher.watch(ext_dir, RecursiveMode::NonRecursive).is_ok();
+            (ext_dir.clone(), exists, rearm_ok)
+        })
+        .collect();
+    let (external_recovery, now_missing_external) =
+        external_recovery_decision(&liveness.missing_external_dirs, &ext_statuses);
+    if let Some(ref vd) = ctx.vars_dir_extra {
+        if vd.exists() {
+            let _ = watcher.watch(vd, RecursiveMode::NonRecursive);
+        }
+    }
+
+    // 2. Recovery trigger (ADR-021):
+    //    `root_now_exists && !root_ok` = existing root whose re-arm failed (genuine watch loss).
+    //    A *missing* root is handled by the `root_was_missing && root_now_exists` vanish→reappear
+    //    edge and must NOT trigger recovery on every tick while absent (per-tick error spam).
+    let root_now_exists = ctx.root.exists();
+    let recovery = liveness.first_tick
+        || (root_now_exists && !root_ok)
+        || external_recovery
+        || (liveness.root_was_missing && root_now_exists);
+    liveness.first_tick = false;
+    liveness.root_was_missing = !root_now_exists;
+    liveness.missing_external_dirs = now_missing_external;
+
+    if recovery {
+        // Full reconcile: re-collect all files and diff vs known_files.
+        let current_files: BTreeSet<PathBuf> =
+            collect_mds_files(&ctx.root, MAX_COLLECT_DEPTH, ctx.exclude_prefix.as_deref())
+                .into_iter()
+                .map(|p| graph_key(&p))
+                .collect();
+
+        let appeared: BTreeSet<PathBuf> = current_files
+            .difference(&state.known_files)
+            .cloned()
+            .collect();
+        let removed: BTreeSet<PathBuf> = state
+            .known_files
+            .difference(&current_files)
+            .cloned()
+            .collect();
+
+        if !appeared.is_empty() || !removed.is_empty() {
+            // Soft-error: vars file may be temporarily absent (AC-W7 / AC-C5).
+            let runtime_vars =
+                match build_runtime_vars(ctx.vars_path.clone(), ctx.static_set_vars.clone()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("{e:?}");
+                        let known_set: HashSet<PathBuf> =
+                            state.known_files.iter().cloned().collect();
+                        state.last_mtimes = snapshot_state(&known_set);
+                        return;
+                    }
+                };
+            let mut batch: BTreeSet<PathBuf> = appeared.clone();
+            batch.extend(removed.iter().cloned());
+            process_dir_batch(
+                &batch,
+                false, /* vars_changed */
+                &ctx.root,
+                &ctx.output_base,
+                &runtime_vars,
+                ctx.quiet,
+                state,
+            );
+        }
+
+        // Replace known_files with the current snapshot.
+        state.known_files = current_files;
+        // Refresh mtime snapshot.
+        let known_set: HashSet<PathBuf> = state.known_files.iter().cloned().collect();
+        state.last_mtimes = snapshot_state(&known_set);
+    }
+}
+
+/// Outcome returned by `handle_fs_event_dir` to tell the loop what to do next.
+enum DirEventOutcome {
+    /// Skip — nothing relevant (Access event, no .mds paths, no vars change).
+    Skip,
+    /// Ctrl+C received — stop watching.
+    Stop,
+    /// Batch computed and process_dir_batch already called by the handler.
+    Done,
+}
+
+/// Process a single incoming `Msg` for directory mode.
+///
+/// Collects changed paths, drains the debounce window, filters irrelevant paths,
+/// reloads vars, and calls `process_dir_batch`. Returns `DirEventOutcome` so the
+/// caller knows whether to `continue`, `return`, or proceed.
+fn handle_fs_event_dir(
+    msg: Msg,
+    ctx: &DirWatchCtx,
+    rx: &mpsc::Receiver<Msg>,
+    state: &mut DirWatchState,
+) -> DirEventOutcome {
+    let mut changed: BTreeSet<PathBuf> = BTreeSet::new();
+
+    let interrupted = match msg {
+        Msg::Interrupt => true,
+        Msg::Fs(Err(e)) => {
+            eprintln!("warning: watch error: {e}");
+            return DirEventOutcome::Skip;
+        }
+        Msg::Fs(Ok(event)) => {
+            // Drop Access events (inotify IN_ACCESS/IN_OPEN/IN_CLOSE_NOWRITE).
+            // On Linux reading a .mds source file during compile emits Access
+            // events that would re-seed the watcher in a busy-loop (~3000/s).
+            if is_content_event(&event.kind) {
+                for p in event.paths {
+                    changed.insert(p);
+                }
+            }
+            false
+        }
+    };
+
+    if interrupted {
+        return DirEventOutcome::Stop;
+    }
+
+    // Drain debounce window.
+    let (extra, interrupted2) = drain_debounce(rx, ctx.debounce_ms);
+    changed.extend(extra);
+    if interrupted2 {
+        return DirEventOutcome::Stop;
+    }
+
+    // Defense-in-depth: ignore events from inside the out-dir subtree.
+    if let OutputBase::Dir(ref od) = ctx.output_base {
+        changed.retain(|p| !p.starts_with(od));
+    }
+
+    // Check if the vars file changed.
+    let vars_changed = ctx
+        .vars_path
+        .as_deref()
+        .map(|vf| changed.contains(vf))
+        .unwrap_or(false);
+
+    // Collect .mds paths that are either under root OR in known external dep dirs.
+    let mds_changed: BTreeSet<PathBuf> = changed
+        .iter()
+        .filter(|p| {
+            p.extension().and_then(|e| e.to_str()) == Some("mds")
+                && (p.starts_with(&ctx.root)
+                    || state
+                        .external_dep_dirs
+                        .iter()
+                        .any(|d| p.parent() == Some(d.as_path())))
+        })
+        .map(|p| graph_key(p))
+        .collect();
+
+    if mds_changed.is_empty() && !vars_changed {
+        return DirEventOutcome::Skip; // Nothing relevant changed.
+    }
+
+    if ctx.clear {
+        clear_terminal();
+    }
+
+    // ADR-016: reload vars from disk on every rebuild.
+    // Soft-error: vars file may be temporarily absent (AC-W7 / AC-C5).
+    let runtime_vars = match build_runtime_vars(ctx.vars_path.clone(), ctx.static_set_vars.clone())
+    {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e:?}");
+            let known_set: HashSet<PathBuf> = state.known_files.iter().cloned().collect();
+            state.last_mtimes = snapshot_state(&known_set);
+            return DirEventOutcome::Done;
+        }
+    };
+
+    process_dir_batch(
+        &mds_changed,
+        vars_changed,
+        &ctx.root,
+        &ctx.output_base,
+        &runtime_vars,
+        ctx.quiet,
+        state,
+    );
+
+    DirEventOutcome::Done
+}
+
+/// Perform all one-time startup work for directory-mode watch.
+///
+/// Loads config, compiles all sources at startup, sets up the watcher +
+/// Ctrl+C handler, records the dedup baseline, seeds the mtime snapshot,
+/// and builds the context structs needed by the event loop.
+///
+/// Extracted from `run_watch_dir` to separate the ~186-line setup from the
+/// event loop — each half is independently readable and the startup can be
+/// tested in isolation (review issue #3 / architecture.md).
 #[allow(clippy::too_many_arguments)]
-fn run_watch_dir(
+fn dir_watch_startup(
     root: PathBuf,
     out_dir: Option<PathBuf>,
     vars: Option<PathBuf>,
@@ -1114,8 +1525,7 @@ fn run_watch_dir(
     clear: bool,
     debounce_ms: u64,
     quiet: bool,
-    tick: Option<Duration>,
-) -> Result<()> {
+) -> Result<DirStartup> {
     // Load config once from the root directory.
     let config = load_config(&root)?;
     // Canonicalize so path matches notify event paths (resolves /tmp → /private/tmp on macOS).
@@ -1285,13 +1695,13 @@ fn run_watch_dir(
         }
     }
 
-    // Pre-loop mtime snapshot for liveness probe state (converts known_files to HashSet for snapshot_state).
+    // Pre-loop mtime snapshot for liveness probe state.
     {
         let known_set: HashSet<PathBuf> = state.known_files.iter().cloned().collect();
         state.last_mtimes = snapshot_state(&known_set);
     }
 
-    let mut liveness = LivenessState {
+    let liveness = LivenessState {
         first_tick: true,
         root_was_missing: !root.exists(),
         // Seed with any external dep dirs that don't exist yet so their first
@@ -1304,218 +1714,74 @@ fn run_watch_dir(
             .collect(),
     };
 
+    let ctx = DirWatchCtx {
+        root,
+        vars_path,
+        static_set_vars,
+        output_base,
+        exclude_prefix,
+        vars_dir_extra,
+        clear,
+        debounce_ms,
+        quiet,
+    };
+
+    Ok(DirStartup {
+        watcher,
+        rx,
+        state,
+        liveness,
+        ctx,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_watch_dir(
+    root: PathBuf,
+    out_dir: Option<PathBuf>,
+    vars: Option<PathBuf>,
+    set_vars: Vec<(String, String)>,
+    clear: bool,
+    debounce_ms: u64,
+    quiet: bool,
+    tick: Option<Duration>,
+) -> Result<()> {
+    let DirStartup {
+        mut watcher,
+        rx,
+        mut state,
+        mut liveness,
+        ctx,
+    } = dir_watch_startup(root, out_dir, vars, set_vars, clear, debounce_ms, quiet)?;
+
     // ── Watch loop ────────────────────────────────────────────────────────────
     loop {
         match recv_next(&rx, tick) {
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Ok(None) => {
                 // Idle tick — run liveness probe (ADR-021, DD1).
-                // 1. Re-arm all desired watches (root as Recursive, external dirs as NonRecursive).
-                let root_ok = if root.exists() {
-                    watcher.watch(&root, RecursiveMode::Recursive).is_ok()
-                } else {
-                    false
-                };
-                // External dirs are edge-triggered: a missing one only forces a
-                // reconcile when it reappears, never while it stays missing — a
-                // permanently-missing external dir must not cause an O(tree) walk
-                // on every idle tick (ADR-021 / AC-P1).
-                let ext_statuses: Vec<(PathBuf, bool, bool)> = state
-                    .external_dep_dirs
-                    .iter()
-                    .map(|ext_dir| {
-                        let exists = ext_dir.exists();
-                        let rearm_ok =
-                            exists && watcher.watch(ext_dir, RecursiveMode::NonRecursive).is_ok();
-                        (ext_dir.clone(), exists, rearm_ok)
-                    })
-                    .collect();
-                let (external_recovery, now_missing_external) =
-                    external_recovery_decision(&liveness.missing_external_dirs, &ext_statuses);
-                if let Some(ref vd) = vars_dir_extra {
-                    if vd.exists() {
-                        let _ = watcher.watch(vd, RecursiveMode::NonRecursive);
-                    }
-                }
-
-                // 2. Recovery trigger.
-                //
-                // `root_exists && !root_ok` = existing root whose re-arm failed (genuine
-                // watch loss).  A *missing* root is handled by the vanish→reappear edge
-                // (`root_was_missing && root_now_exists`) and must NOT trigger recovery on
-                // every tick while absent — that would cause per-tick error spam (ADR-021).
-                let root_now_exists = root.exists();
-                let recovery = liveness.first_tick
-                    || (root_now_exists && !root_ok)
-                    || external_recovery
-                    || (liveness.root_was_missing && root_now_exists);
-                liveness.first_tick = false;
-                liveness.root_was_missing = !root_now_exists;
-                liveness.missing_external_dirs = now_missing_external;
-
-                if recovery {
-                    // Full reconcile: re-collect all files and diff vs known_files.
-                    let current_files: BTreeSet<PathBuf> =
-                        collect_mds_files(&root, MAX_COLLECT_DEPTH, exclude_prefix.as_deref())
-                            .into_iter()
-                            .map(|p| graph_key(&p))
-                            .collect();
-
-                    let appeared: BTreeSet<PathBuf> = current_files
-                        .difference(&state.known_files)
-                        .cloned()
-                        .collect();
-                    let removed: BTreeSet<PathBuf> = state
-                        .known_files
-                        .difference(&current_files)
-                        .cloned()
-                        .collect();
-
-                    if !appeared.is_empty() || !removed.is_empty() {
-                        // Soft-error: vars file may be temporarily absent (AC-W7 / AC-C5).
-                        let runtime_vars =
-                            match build_runtime_vars(vars_path.clone(), static_set_vars.clone()) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    eprintln!("{e:?}");
-                                    let known_set: HashSet<PathBuf> =
-                                        state.known_files.iter().cloned().collect();
-                                    state.last_mtimes = snapshot_state(&known_set);
-                                    continue;
-                                }
-                            };
-                        let mut batch: BTreeSet<PathBuf> = appeared.clone();
-                        batch.extend(removed.iter().cloned());
-                        process_dir_batch(
-                            &batch,
-                            false, /* vars_changed */
-                            &root,
-                            &output_base,
-                            &runtime_vars,
-                            quiet,
-                            &mut state,
-                        );
-                    }
-
-                    // Replace known_files with the current snapshot.
-                    state.known_files = current_files.clone();
-                    // Refresh mtime snapshot.
-                    let known_set: HashSet<PathBuf> = state.known_files.iter().cloned().collect();
-                    state.last_mtimes = snapshot_state(&known_set);
-                }
+                liveness_probe_dir(&ctx, &mut watcher, &mut liveness, &mut state);
                 continue;
             }
-            Ok(Some(msg)) => {
-                // Collect paths from the triggering event.
-                let mut changed: BTreeSet<PathBuf> = BTreeSet::new();
-                let mut interrupted = false;
-
-                match msg {
-                    Msg::Interrupt => {
-                        interrupted = true;
-                    }
-                    Msg::Fs(Err(e)) => {
-                        eprintln!("warning: watch error: {e}");
-                    }
-                    Msg::Fs(Ok(event)) => {
-                        // Drop Access events (inotify IN_ACCESS/IN_OPEN/IN_CLOSE_NOWRITE).
-                        // On Linux reading a .mds source file during compile emits Access
-                        // events for that same file, which would re-seed it into `changed`
-                        // and cause a feedback loop at I/O speed (~3000/s).
-                        if is_content_event(&event.kind) {
-                            for p in event.paths {
-                                changed.insert(p);
-                            }
-                        }
-                    }
-                }
-
-                if interrupted {
-                    return stop_watching(quiet);
-                }
-
-                // Drain debounce window.
-                let (extra, interrupted2) = drain_debounce(&rx, debounce_ms);
-                changed.extend(extra);
-                if interrupted2 {
-                    return stop_watching(quiet);
-                }
-
-                // Defense-in-depth: ignore events from inside the out-dir subtree.
-                if let OutputBase::Dir(ref od) = output_base {
-                    changed.retain(|p| !p.starts_with(od));
-                }
-
-                // Check if the vars file changed.
-                let vars_changed = vars_path
-                    .as_deref()
-                    .map(|vf| changed.contains(vf))
-                    .unwrap_or(false);
-
-                // Collect .mds paths that are either under root OR in known external dep dirs.
-                let mds_changed: BTreeSet<PathBuf> = changed
-                    .iter()
-                    .filter(|p| {
-                        p.extension().and_then(|e| e.to_str()) == Some("mds")
-                            && (p.starts_with(&root)
-                                || state
-                                    .external_dep_dirs
-                                    .iter()
-                                    .any(|d| p.parent() == Some(d.as_path())))
-                    })
-                    .map(|p| graph_key(p))
-                    .collect();
-
-                if mds_changed.is_empty() && !vars_changed {
-                    continue; // Nothing relevant changed.
-                }
-
-                if clear {
-                    clear_terminal();
-                }
-
-                // ADR-016: reload vars from disk on every rebuild.
-                // Soft-error: vars file may be temporarily absent (AC-W7 / AC-C5).
-                let runtime_vars =
-                    match build_runtime_vars(vars_path.clone(), static_set_vars.clone()) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            eprintln!("{e:?}");
-                            let known_set: HashSet<PathBuf> =
-                                state.known_files.iter().cloned().collect();
-                            state.last_mtimes = snapshot_state(&known_set);
-                            continue;
-                        }
-                    };
-
-                process_dir_batch(
-                    &mds_changed,
-                    vars_changed,
-                    &root,
-                    &output_base,
-                    &runtime_vars,
-                    quiet,
-                    &mut state,
-                );
-            }
+            Ok(Some(msg)) => match handle_fs_event_dir(msg, &ctx, &rx, &mut state) {
+                DirEventOutcome::Skip | DirEventOutcome::Done => {}
+                DirEventOutcome::Stop => return stop_watching(ctx.quiet),
+            },
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
 
-    stop_watching(quiet)
+    stop_watching(ctx.quiet)
 }
 
 /// Process a batch of changed `.mds` paths in directory mode.
 ///
+/// Thin dispatcher: delegates to `process_dir_batch_vars_changed` when all
+/// known files must be recompiled (vars file changed), or to
+/// `process_dir_batch_incremental` for a normal seed-and-propagate pass.
+///
 /// Called by both the event path and the reconcile path so the same state
 /// transitions apply uniformly.
-///
-/// Steps:
-/// 1. Partition changed paths into `existing` / `deleted`.
-/// 2. Compute seeds = existing ∪ deleted ∪ (errored ∩ real-change batch).
-/// 3. Compute affected = transitive importers of seeds.
-/// 4. Compile each affected source (that is NOT an external-only dep).
-/// 5. Delete outputs for removed sources.
 fn process_dir_batch(
     changed: &BTreeSet<PathBuf>,
     vars_changed: bool,
@@ -1525,81 +1791,65 @@ fn process_dir_batch(
     quiet: bool,
     state: &mut DirWatchState,
 ) {
+    if vars_changed {
+        process_dir_batch_vars_changed(root, output_base, runtime_vars, quiet, state);
+    } else {
+        process_dir_batch_incremental(changed, root, output_base, runtime_vars, quiet, state);
+    }
+}
+
+/// Full recompile of all known files triggered by a vars-file change.
+///
+/// Recomputes the entire forward-deps graph, external-dep-dirs, and errored set
+/// from scratch (prunes stale entries left over from deleted sources).
+///
+/// Uses `compile_one_source` for the shared compile→dedup→write→settle sequence.
+fn process_dir_batch_vars_changed(
+    root: &Path,
+    output_base: &OutputBase,
+    runtime_vars: &Option<HashMap<String, mds::Value>>,
+    quiet: bool,
+    state: &mut DirWatchState,
+) {
+    let all_sources: Vec<PathBuf> = state.known_files.iter().cloned().collect();
+
+    // Snapshot the old maps, clear them so compile_one_source's record_success
+    // fills fresh copies (ensures stale entries from deleted sources are pruned).
+    state.forward_deps.clear();
+    state.errored.clear();
+    state.external_dep_dirs.clear();
+
+    for src in &all_sources {
+        if src.exists() {
+            compile_one_source(src, root, output_base, runtime_vars, quiet, state);
+        }
+    }
+
+    // Prune known_files to currently-existing sources.
+    state.known_files = all_sources.into_iter().filter(|p| p.exists()).collect();
+}
+
+/// Incremental recompile: compile only transitive importers of the changed seeds.
+///
+/// Steps:
+/// 1. Partition changed paths into `existing` / `deleted`.
+/// 2. Compute seeds = existing ∪ deleted ∪ (errored ∩ real-change batch).
+/// 3. Compute affected = transitive importers of seeds (ADR-016 snapshot).
+/// 4. Compile each affected source that exists and is not an external-only dep.
+/// 5. Delete outputs for removed sources.
+///
+/// Uses `compile_one_source` for the shared compile→dedup→write→settle sequence.
+fn process_dir_batch_incremental(
+    changed: &BTreeSet<PathBuf>,
+    root: &Path,
+    output_base: &OutputBase,
+    runtime_vars: &Option<HashMap<String, mds::Value>>,
+    quiet: bool,
+    state: &mut DirWatchState,
+) {
     // 1. Partition.
     let (existing, deleted): (BTreeSet<PathBuf>, BTreeSet<PathBuf>) =
         changed.iter().cloned().partition(|p| p.exists());
-
-    // When vars changed, recompile ALL known files.
-    if vars_changed {
-        let all_sources: Vec<PathBuf> = state.known_files.iter().cloned().collect();
-        // Refresh forward_deps and errored for all sources.
-        let mut new_forward_deps: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-        let mut new_errored: HashSet<PathBuf> = HashSet::new();
-        let mut new_external_dep_dirs: BTreeSet<PathBuf> = BTreeSet::new();
-
-        for src in &all_sources {
-            if !src.exists() {
-                continue;
-            }
-            let out = output_path_for(src, root, output_base);
-            let t0 = Instant::now();
-            match compile_to_content(src, runtime_vars.clone(), &OutputFormat::Markdown, quiet) {
-                Ok(compiled) => {
-                    let dep_paths: Vec<PathBuf> =
-                        compiled.dependencies.iter().map(PathBuf::from).collect();
-                    for dep in &dep_paths {
-                        if let Some(parent) = dep.parent() {
-                            if !parent.starts_with(root) {
-                                new_external_dep_dirs.insert(parent.to_path_buf());
-                            }
-                        }
-                    }
-                    new_forward_deps.insert(src.clone(), dep_paths);
-
-                    if !is_partial(src) {
-                        let content_changed = state
-                            .last_written
-                            .get(&out)
-                            .is_none_or(|prev| *prev != compiled.content);
-                        if content_changed {
-                            match write_output(Some(out.clone()), &compiled.content, quiet, false) {
-                                Ok(()) => {
-                                    let elapsed = t0.elapsed().as_millis();
-                                    state.last_written.insert(out.clone(), compiled.content);
-                                    if !quiet {
-                                        eprintln!(
-                                            "Recompiled {} ({} deps) in {}ms",
-                                            out.display(),
-                                            compiled.dependencies.len(),
-                                            elapsed
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("{e:?}");
-                                    // Error-settle: update mtime so the gate won't re-fire.
-                                    settle_mtime(src, &mut state.last_mtimes);
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("{e:?}");
-                    new_errored.insert(src.clone());
-                    new_forward_deps.insert(src.clone(), vec![]);
-                    settle_mtime(src, &mut state.last_mtimes);
-                }
-            }
-        }
-        // Prune: replace maps with freshly computed ones (bounded by current file count).
-        state.forward_deps = new_forward_deps;
-        state.errored = new_errored;
-        state.external_dep_dirs = new_external_dep_dirs;
-        // Refresh known_files to prune removed entries.
-        state.known_files = all_sources.into_iter().filter(|p| p.exists()).collect();
-        return;
-    }
 
     // 2. Seeds = existing ∪ deleted ∪ errored-if-real-change.
     let has_real_change = !existing.is_empty() || !deleted.is_empty();
@@ -1634,9 +1884,9 @@ fn process_dir_batch(
             continue;
         }
 
-        // External deps are graph nodes but never emit their own output.
+        // External deps are graph nodes but never emit their own output (DD3).
         if !is_in_root {
-            // Compile to refresh deps, but don't write output.
+            // Compile to refresh deps only; suppress output by using quiet=true.
             match compile_to_content(src, runtime_vars.clone(), &OutputFormat::Markdown, true) {
                 Ok(compiled) => {
                     let dep_paths: Vec<PathBuf> =
@@ -1653,83 +1903,13 @@ fn process_dir_batch(
             continue;
         }
 
-        let out = output_path_for(src, root, output_base);
-        let t0 = Instant::now();
-        match compile_to_content(src, runtime_vars.clone(), &OutputFormat::Markdown, quiet) {
-            Ok(compiled) => {
-                let dep_paths: Vec<PathBuf> =
-                    compiled.dependencies.iter().map(PathBuf::from).collect();
-
-                // Resync external dep dirs: check if deps gained/lost out-of-root paths.
-                let new_ext_dirs: BTreeSet<PathBuf> = dep_paths
-                    .iter()
-                    .filter_map(|d| d.parent())
-                    .filter(|p| !p.starts_with(root))
-                    .map(Path::to_path_buf)
-                    .collect();
-                // Add newly seen external dirs to tracking (watcher re-arm in liveness probe).
-                for d in &new_ext_dirs {
-                    state.external_dep_dirs.insert(d.clone());
-                }
-
-                state.forward_deps.insert(src.clone(), dep_paths);
-                state.errored.remove(src);
-
-                // Partials: refresh graph edges but do NOT write output (DD2).
-                if is_partial(src) {
-                    // Update known_files if this is a new partial.
-                    state.known_files.insert(src.clone());
-                    settle_mtime(src, &mut state.last_mtimes);
-                    continue;
-                }
-
-                let content_changed = state
-                    .last_written
-                    .get(&out)
-                    .is_none_or(|prev| *prev != compiled.content);
-
-                if content_changed {
-                    match write_output(Some(out.clone()), &compiled.content, quiet, false) {
-                        Ok(()) => {
-                            let elapsed = t0.elapsed().as_millis();
-                            state.last_written.insert(out.clone(), compiled.content);
-                            state.known_files.insert(src.clone());
-                            if !quiet {
-                                eprintln!(
-                                    "Recompiled {} ({} deps) in {}ms",
-                                    out.display(),
-                                    compiled.dependencies.len(),
-                                    elapsed
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("{e:?}");
-                            settle_mtime(src, &mut state.last_mtimes);
-                        }
-                    }
-                } else {
-                    // Content unchanged — update known_files and mtime baseline.
-                    state.known_files.insert(src.clone());
-                    settle_mtime(src, &mut state.last_mtimes);
-                }
-            }
-            Err(e) => {
-                // Compile error: add to errored set, keep prior graph edges.
-                eprintln!("{e:?}");
-                state.errored.insert(src.clone());
-                settle_mtime(src, &mut state.last_mtimes);
-            }
-        }
+        // In-root source: full compile→dedup→write→settle via shared helper.
+        compile_one_source(src, root, output_base, runtime_vars, quiet, state);
     }
 
     // 5. Deletions: after importers recompiled, clean up graph + outputs.
     for del_src in &deleted {
         let out = output_path_for(del_src, root, output_base);
-        state.last_written.remove(&out);
-        state.forward_deps.remove(del_src);
-        state.errored.remove(del_src);
-        state.known_files.remove(del_src);
         if out.exists() {
             match std::fs::remove_file(&out) {
                 Ok(()) => {
@@ -1742,6 +1922,7 @@ fn process_dir_batch(
                 }
             }
         }
+        state.forget(del_src, &out);
     }
 }
 
