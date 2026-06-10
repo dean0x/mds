@@ -629,6 +629,23 @@ fn drain_debounce(rx: &mpsc::Receiver<Msg>, debounce_ms: u64) -> (BTreeSet<PathB
     (paths, false)
 }
 
+// ── Poll-interval clamp (ADR-021) ─────────────────────────────────────────────
+
+/// Convert a raw `--poll-interval` value (milliseconds) into a tick duration.
+///
+/// - `0` → `None` (blocking `recv`, no liveness probe)
+/// - nonzero → `Some(max(value, 50ms))` — floor prevents a busy-spin liveness probe
+///
+/// Extracted so the clamp contract can be verified by unit tests independently of
+/// the full watch loop.
+fn clamp_poll_interval(poll_interval: u64) -> Option<Duration> {
+    if poll_interval == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(poll_interval.max(50)))
+    }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub(crate) fn run_watch(args: WatchArgs) -> Result<()> {
@@ -684,11 +701,7 @@ pub(crate) fn run_watch(args: WatchArgs) -> Result<()> {
         .map_err(|e| miette::miette!("cannot resolve path {}: {e}", resolved_input.display()))?;
 
     // Clamp poll_interval: 0 = disable; nonzero ≥ 50ms floor (ADR-021).
-    let tick_opt: Option<Duration> = if poll_interval == 0 {
-        None // blocking recv, no liveness probe
-    } else {
-        Some(Duration::from_millis(poll_interval.max(50)))
-    };
+    let tick_opt: Option<Duration> = clamp_poll_interval(poll_interval);
 
     if is_dir {
         run_watch_dir(
@@ -2626,6 +2639,53 @@ mod tests {
         assert!(
             state_differs(&paths, &snap),
             "should detect deleted file as changed"
+        );
+    }
+
+    // AC-C: clamp_poll_interval contract — 0 disables liveness probe; nonzero values ≥50ms
+    // are passed through; values below 50ms are clamped up to the floor.
+    #[test]
+    fn clamp_poll_interval_zero_disables_probe() {
+        assert_eq!(
+            clamp_poll_interval(0),
+            None,
+            "poll_interval=0 must disable the liveness probe (blocking recv)"
+        );
+    }
+
+    #[test]
+    fn clamp_poll_interval_one_clamped_to_50ms() {
+        assert_eq!(
+            clamp_poll_interval(1),
+            Some(Duration::from_millis(50)),
+            "poll_interval=1 must be clamped to the 50ms floor"
+        );
+    }
+
+    #[test]
+    fn clamp_poll_interval_exactly_50_unchanged() {
+        assert_eq!(
+            clamp_poll_interval(50),
+            Some(Duration::from_millis(50)),
+            "poll_interval=50 (at the floor) must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn clamp_poll_interval_above_floor_unchanged() {
+        assert_eq!(
+            clamp_poll_interval(1000),
+            Some(Duration::from_millis(1000)),
+            "poll_interval=1000 (above floor) must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn clamp_poll_interval_75ms_unchanged() {
+        assert_eq!(
+            clamp_poll_interval(75),
+            Some(Duration::from_millis(75)),
+            "poll_interval=75 (above floor) must pass through unchanged"
         );
     }
 

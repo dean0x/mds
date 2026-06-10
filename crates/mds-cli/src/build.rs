@@ -117,9 +117,7 @@ pub(crate) fn prepare_output_dir(dir: &Path, input_path: Option<&Path>) -> Resul
 
 /// Resolve the output path according to the precedence chain.
 ///
-/// When `create` is `true`, any required output directory is created via
-/// `create_dir_all`. When `false`, the path is computed without side effects
-/// (used by watch to compute a deletion target without creating directories).
+/// Any required output directory is created via `create_dir_all`.
 ///
 /// Precedence:
 /// 1. `-o -`                         → stdout (returns `None`)
@@ -133,16 +131,6 @@ pub(crate) fn resolve_output_path(
     output: &Option<String>,
     out_dir: &Option<PathBuf>,
     config: &Option<(MdsConfig, PathBuf)>,
-) -> Result<Option<PathBuf>> {
-    resolve_output_path_impl(input, output, out_dir, config, true)
-}
-
-fn resolve_output_path_impl(
-    input: &Option<PathBuf>,
-    output: &Option<String>,
-    out_dir: &Option<PathBuf>,
-    config: &Option<(MdsConfig, PathBuf)>,
-    create: bool,
 ) -> Result<Option<PathBuf>> {
     // 1 & 2. Explicit `-o` flag: `-` means stdout, anything else is a literal path.
     match output.as_deref() {
@@ -164,11 +152,7 @@ fn resolve_output_path_impl(
 
     // 4. `--out-dir <dir>`
     if let Some(dir) = out_dir {
-        if create {
-            return Ok(Some(prepare_output_dir(dir, input_path)?));
-        } else {
-            return Ok(Some(compute_output_dir_path(dir, input_path)));
-        }
+        return Ok(Some(prepare_output_dir(dir, input_path)?));
     }
 
     // 5. `mds.json` output_dir
@@ -187,11 +171,7 @@ fn resolve_output_path_impl(
                 ));
             }
             let dir = config_dir.join(output_dir);
-            if create {
-                return Ok(Some(prepare_output_dir(&dir, input_path)?));
-            } else {
-                return Ok(Some(compute_output_dir_path(&dir, input_path)));
-            }
+            return Ok(Some(prepare_output_dir(&dir, input_path)?));
         }
     }
 
