@@ -830,13 +830,10 @@ fn liveness_probe_file(
         .collect();
     // Remove vanished dirs from armed_dirs using the already-computed exists flags
     // rather than re-stating each dir (avoids a second stat per dir per tick).
-    let vanished: Vec<PathBuf> = dir_statuses
-        .iter()
-        .filter(|(_, exists, _)| !exists)
-        .map(|(d, _, _)| d.clone())
-        .collect();
-    for d in vanished {
-        state.armed_dirs.remove(&d);
+    for (d, exists, _) in &dir_statuses {
+        if !exists {
+            state.armed_dirs.remove(d);
+        }
     }
     // Edge-triggered recovery (ADR-021): mirrors external_recovery_decision used in
     // dir mode — a dir that STAYS missing must not trigger recovery every tick.
