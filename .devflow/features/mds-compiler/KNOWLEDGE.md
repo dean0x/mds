@@ -320,8 +320,8 @@ All `compile_messages*` functions carry `#[must_use]`.
 The CLI is split across three source files as of the watch refactor (Issue #57):
 
 - **`main.rs`** — CLI entry point only: `Cli` struct (clap), `Commands` enum (`Build`, `Check`, `Init`, `Watch`), `main()`, `run()`, `run_check()`, `run_init()`. Imports `OutputFormat`, `BuildArgs`, `run_build`, `build_runtime_vars`, `exit_code`, `parse_key_value`, `reject_directory_input`, `resolve_input` from `build`. Imports `run_watch`, `WatchArgs` from `watch`.
-- **`build.rs`** — all shared build logic and the `build` subcommand: `OutputFormat`, `BuildArgs`, `run_build()`, `run_build_messages()`, `run_build_markdown()`, `compile_to_content()`, `compile_and_write()`, `resolve_input()`, `read_build_input()`, `read_stdin()`, `write_output()`, `load_config()`, `resolve_output_path()`, `resolve_output_path_no_create()`, `build_runtime_vars()`, `parse_key_value()`, `parse_cli_value()`, `exit_code()`, `auto_detect_mds_file()`, `reject_directory_input()`, `load_optional_vars_file()`, `derive_output_filename()`, `compute_output_dir_path()`, `prepare_output_dir()`. Also defines the **local** `pub(crate) struct CompileOutput { content, dependencies }`.
-- **`watch.rs`** — watch subcommand: `WatchArgs`, `run_watch()`, `run_watch_file()`, `run_watch_dir()`, `compile_all_dir()`, and watch-specific helpers (`dirs_to_watch`, `files_of_interest`, `event_is_relevant`, `collect_mds_files`, `output_path_for`, `canonicalize_vars_path`, `clear_terminal`, `resync_watches`, `drain_debounce`). Calls `compile_and_write` from `build.rs` for all compilation.
+- **`build.rs`** — all shared build logic and the `build` subcommand: `OutputFormat`, `BuildArgs`, `run_build()`, `run_build_messages()`, `run_build_markdown()`, `compile_to_content()`, `compile_and_write()`, `resolve_input()`, `read_build_input()`, `read_stdin()`, `write_output()`, `load_config()`, `resolve_output_path()`, `build_runtime_vars()`, `parse_key_value()`, `parse_cli_value()`, `exit_code()`, `auto_detect_mds_file()`, `reject_directory_input()`, `load_optional_vars_file()`, `derive_output_filename()`, `compute_output_dir_path()`, `prepare_output_dir()`. Also defines the **local** `pub(crate) struct CompileOutput { content, dependencies }`. Note: `resolve_output_path_no_create` was removed in the dir-mode refactor.
+- **`watch.rs`** — watch subcommand: `WatchArgs`, `run_watch()`, `run_watch_file()`, `run_watch_dir()`, `dir_watch_startup()`; context structs `FileCompileCtx`, `FileWatchState`, `DirWatchCtx`, `DirWatchState` (with methods `record_success`, `record_error`, `known_set`, `forget`), `LivenessState`, `DirStartup`; extracted helpers `rebuild_file`, `liveness_probe_file`, `liveness_probe_dir`, `handle_fs_event_file`, `handle_fs_event_dir`, `compile_one_source`, `process_dir_batch`, `process_dir_batch_incremental`, `process_dir_batch_vars_changed`; pure helpers (`dirs_to_watch`, `files_of_interest`, `event_is_relevant`, `collect_mds_files`, `output_path_for`, `canonicalize_vars_path`, `clear_terminal`, `resync_watches`, `drain_debounce`, `affected_sources`, `is_partial`, `graph_key`, `snapshot_state`, `state_differs`, `external_recovery_decision`, `is_content_event`, `recv_next`, `stop_watching`). Calls `compile_and_write` and `compile_to_content` from `build.rs` for all compilation. `compile_all_dir` was removed — startup compile is now inline in `dir_watch_startup`.
 
 **Important naming distinction**: `build::CompileOutput` (defined in `build.rs`) is a CLI-internal struct with `{ content: String, dependencies: Vec<String> }`. It is **not** the same as `mds::CompileOutput` (defined in `mds-core/src/lib.rs`) which has `{ output: String, warnings: Vec<String>, dependencies: Vec<String> }`. The CLI struct exists to carry pre-serialized content (plain Markdown or pretty JSON) through `compile_to_content` → `compile_and_write`, abstracting away the format difference.
 
@@ -391,9 +391,13 @@ The `watch` subcommand (added in Issue #57) recompiles `.mds` files on save usin
 - `--debounce <MS>` (default 100ms) batches rapid saves before triggering a rebuild.
 
 **`run_watch_dir(...) -> Result<()>`** — directory mode:
-- Compiles all `.mds` files in the root directory (bounded depth walk via `collect_mds_files`).
-- On changes, recompiles only the changed `.mds` files independently; does NOT track reverse dependencies (editing a shared partial will not recompile all files that import it).
-- On source deletion, removes the matching output file.
+- Delegates startup to `dir_watch_startup`, then runs the event loop.
+- Compiles all `.mds` files in the root directory at startup (bounded depth walk via `collect_mds_files`).
+- Tracks a reverse-dependency graph (`forward_deps`): editing a shared partial recompiles all transitive importers via `affected_sources` DFS.
+- `_`-prefixed partials are tracked in the graph but never emit their own `.md` output.
+- Cross-root dependencies are watched NonRecursively; their parent dirs are tracked in `external_dep_dirs`.
+- Output mirrors the source subtree under `--out-dir` / `mds.json output_dir` via `OutputBase`.
+- On source deletion, removes the matching output file and cleans graph state.
 - `--format messages` is not supported in directory mode.
 
 **Watch helper functions** (all `pub(crate)` in `watch.rs`):
@@ -401,7 +405,7 @@ The `watch` subcommand (added in Issue #57) recompiles `.mds` files on save usin
 - `files_of_interest(entry, deps, vars_file) -> HashSet<PathBuf>` — the set of paths that should trigger a rebuild when changed.
 - `event_is_relevant(event, watched) -> bool` — filters notify events to only those touching `files_of_interest`.
 - `collect_mds_files(root, max_depth) -> Vec<PathBuf>` — bounded recursive directory scan for `.mds` files.
-- `output_path_for(source, out_dir, config) -> PathBuf` — derives the output path for a source file in directory mode (uses `resolve_output_path_no_create`).
+- `output_path_for(source, root, base: &OutputBase) -> PathBuf` — derives the mirrored output path for a source file in directory mode. Infallible, no dir creation. `Dir(d)`: mirrors source subtree under `d`; `NextToSource`: `source.with_extension("md")`. Path-escape guard (AC-M7) via `debug_assert!`.
 - `canonicalize_vars_path(vars) -> Option<PathBuf>` — canonicalizes the vars file path if provided.
 - `clear_terminal()` — writes ANSI clear-screen escape sequence to stderr if stderr is a TTY.
 - `resync_watches(watcher, current_dirs, new_dirs) -> BTreeSet<PathBuf>` — unregisters removed dirs, registers added dirs; returns the new active set.
@@ -410,11 +414,11 @@ The `watch` subcommand (added in Issue #57) recompiles `.mds` files on save usin
 **Msg enum** (private, in `watch.rs`):
 ```rust
 enum Msg {
-    Event(notify::Event),
-    Quit,
+    Fs(notify::Result<Event>),
+    Interrupt,
 }
 ```
-The `notify` watcher and `ctrlc` handler both send to the same `mpsc::Sender<Msg>` channel. `drain_debounce` drains this channel to collect events over the debounce window.
+The `notify` watcher and `ctrlc` handler both send to the same `mpsc::Sender<Msg>` channel. `drain_debounce` drains this channel to collect events over the debounce window. The `Fs` variant wraps `notify::Result` to propagate watcher errors (not just success events) through the same channel.
 
 ### Error System (`crates/mds-core/src/error.rs`)
 
@@ -531,7 +535,7 @@ When adding a new way to read input in the CLI:
 - **Looking for `OutputFormat`, `BuildArgs`, `run_build_messages`, or `run_build_markdown` in `main.rs`** — these now live in `build.rs` after the watch refactor (Issue #57). `main.rs` only contains the `Cli`/`Commands` structs and entry point.
 - **Confusing `build::CompileOutput` with `mds::CompileOutput`** — the CLI-internal `build::CompileOutput { content: String, dependencies: Vec<String> }` holds pre-serialized content (Markdown string or pretty JSON). The core `mds::CompileOutput { output: String, warnings: Vec<String>, dependencies: Vec<String> }` holds the raw compiled string plus warnings. Different structs; different purposes.
 - **Calling `std::fs::read_to_string` directly in CLI input paths** — always route through `read_build_input` or `mds::compile_with_deps` to enforce `MAX_FILE_SIZE`. Avoids PF-004.
-- **Expecting `mds watch <dir>` to track reverse dependencies** — directory mode compiles each changed `.mds` file independently. Editing a shared partial does NOT recompile files that import it.
+- **Calling `compile_all_dir` in `watch.rs`** — this function was removed. Startup compilation is now inline in `dir_watch_startup`. Use `compile_one_source` for the shared compile→dedup→write→settle sequence in dir mode.
 
 ## Gotchas
 

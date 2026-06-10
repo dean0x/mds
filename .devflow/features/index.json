@@ -3,7 +3,7 @@
   "features": {
     "mds-cli": {
       "name": "MDS CLI",
-      "description": "Use when adding new subcommands, changing output-path resolution logic, modifying the watch architecture (single-file or directory mode), adding new compile paths, updating mds.json config handling, debugging stdout/stderr stream separation, or investigating exit codes. Keywords: mds build, mds check, mds watch, mds init, OutputFormat, messages mode, run_build, run_watch, build.rs, watch.rs, mds.json, output_dir, resolve_output_path, resolve_output_base, OutputBase, output_path_for, compile_and_write, compile_to_content, debounce, notify, ctrlc, content-dedup, last_written, dirs_to_watch, files_of_interest, exit_code, MAX_FILE_SIZE, read_build_input, BuildArgs, WatchArgs, forward_deps, affected_sources, is_partial, graph_key, process_dir_batch, liveness_probe, snapshot_state, state_differs, rearm, poll_interval, is_content_event, inotify Access, Linux busy-loop, external_recovery_decision, edge-triggered recovery, missing_watched_dirs, missing_external_dirs, recv_next, settle_mtime.",
+      "description": "Use when adding new subcommands, changing output-path resolution logic, modifying the watch architecture (single-file or directory mode), adding new compile paths, updating mds.json config handling, debugging stdout/stderr stream separation, or investigating exit codes. Keywords: mds build, mds check, mds watch, mds init, OutputFormat, messages mode, run_build, run_watch, build.rs, watch.rs, mds.json, output_dir, resolve_output_path, resolve_output_base, OutputBase, output_path_for, compile_and_write, compile_to_content, debounce, notify, ctrlc, content-dedup, last_written, dirs_to_watch, files_of_interest, exit_code, MAX_FILE_SIZE, read_build_input, BuildArgs, WatchArgs, forward_deps, affected_sources, is_partial, graph_key, process_dir_batch, process_dir_batch_incremental, process_dir_batch_vars_changed, liveness_probe_file, liveness_probe_dir, snapshot_state, state_differs, poll_interval, is_content_event, inotify Access, Linux busy-loop, external_recovery_decision, edge-triggered recovery, missing_watched_dirs, missing_external_dirs, recv_next, settle_mtime, FileCompileCtx, FileWatchState, DirWatchCtx, DirWatchState, LivenessState, compile_one_source, DirStartup, dir_watch_startup, handle_fs_event_file, handle_fs_event_dir, rebuild_file, armed_dirs, known_set, record_success, record_error, forget, stop_watching.",
       "directories": [
         "crates/mds-cli/src/",
         "crates/mds-cli/tests/"
@@ -16,7 +16,7 @@
         "crates/mds-cli/tests/common/mod.rs",
         "crates/mds-cli/Cargo.toml"
       ],
-      "lastUpdated": "2026-06-10T09:26:50.122Z",
+      "lastUpdated": "2026-06-10T17:34:31.143Z",
       "createdBy": "implement"
     },
     "mds-napi": {
@@ -39,7 +39,7 @@
         "crates/mds-core/src/options.rs",
         "Cargo.toml"
       ],
-      "lastUpdated": "2026-06-09T21:41:13.101Z",
+      "lastUpdated": "2026-06-10T17:34:40.090Z",
       "createdBy": "implement"
     },
     "mds-compiler": {
@@ -72,7 +72,7 @@
         "crates/mds-core/tests/messages.rs",
         "crates/mds-cli/tests/format_messages.rs"
       ],
-      "lastUpdated": "2026-06-10T09:27:10.208Z",
+      "lastUpdated": "2026-06-10T17:34:54.459Z",
       "createdBy": "implement"
     },
     "mds-js": {
