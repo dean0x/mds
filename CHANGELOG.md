@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default 100), `--poll-interval` (self-heal tick in ms, default 1000; `0` disables).
   Status/warnings/errors go to stderr; compiled content goes to stdout only when `-o -`.
   Ctrl+C exits cleanly with code 0. Depends on `notify 8` and `ctrlc 3.5` (both
-  MSRV 1.77 ≤ 1.88).
+  compatible with the workspace MSRV of 1.88).
 - Internal refactor: build logic extracted from `main.rs` into `build.rs` with
   `pub(crate)` helpers; `compile_and_write` shared helper routes both markdown and
   messages modes through `read_build_input` / `compile_with_deps`, preserving the

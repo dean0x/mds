@@ -82,7 +82,7 @@ Global options:
 
 Build/Watch options:
   -o, --output <PATH>         Output file, or "-" for stdout
-  --out-dir <DIR>             Output directory (creates <stem>.md inside it)
+  --out-dir <DIR>             Output directory (build/single-file watch: <stem>.md; dir-mode watch: mirrors source subtree)
   --vars <FILE>               JSON file with variable overrides (reloaded each rebuild)
   --set KEY=VALUE             Set a single variable (repeatable)
   --format <FORMAT>           markdown (default) or messages (JSON chat array)
@@ -98,7 +98,7 @@ Watch-only options:
 Exit codes:
   0   Success (or clean Ctrl+C in watch mode)
   1   Template error (syntax, undefined variable, arity mismatch)
-  2   I/O error (file not found, not an MDS file)
+  2   I/O error (file not found, not an MDS file), or invalid CLI argument (clap parse error)
   3   Resource limit exceeded
 ```
 
@@ -121,7 +121,7 @@ mds watch src/ --out-dir dist   # mirror source subtree under dist/
                                 # src/a/b/foo.mds → dist/a/b/foo.md  (not dist/foo.md)
 ```
 
-> **Breaking change (v0.3.0):** Directory mode with `--out-dir` or `mds.json output_dir`
+> **Breaking change (next release):** Directory mode with `--out-dir` or `mds.json output_dir`
 > now mirrors the source subtree instead of writing flat stems. Old flat outputs are
 > orphaned and must be removed manually.
 
