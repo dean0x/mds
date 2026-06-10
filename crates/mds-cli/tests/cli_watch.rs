@@ -2088,6 +2088,14 @@ fn watch_file_mode_idle_no_recompile_across_ticks() {
         "initial compile should succeed"
     );
 
+    // Record a positive observable: the output file's mtime and content before idling.
+    // If the watcher spuriously recompiles, the mtime will advance — making the failure
+    // deterministic rather than a timing-luck race on the stderr count alone.
+    let mtime_before = std::fs::metadata(&out)
+        .and_then(|m| m.modified())
+        .expect("output file must exist after initial compile");
+    let content_before = std::fs::read_to_string(&out).expect("output file readable");
+
     // Idle for 2.5s (≥2 ticks at 100ms poll-interval — well above the minimum).
     std::thread::sleep(Duration::from_millis(2500));
 
@@ -2103,6 +2111,21 @@ fn watch_file_mode_idle_no_recompile_across_ticks() {
         recompiled_count, 0,
         "idle single-file watcher must emit 0 Recompiled across ticks; \
          got {recompiled_count}; stderr:\n{stderr_str}"
+    );
+
+    // Deterministic positive observable: output file must not have been touched
+    // during the idle window (no spurious recompile changed its mtime or content).
+    let mtime_after = std::fs::metadata(&out)
+        .and_then(|m| m.modified())
+        .expect("output file must still exist after idle");
+    assert_eq!(
+        mtime_before, mtime_after,
+        "output file mtime must not advance during idle (spurious recompile would advance it)"
+    );
+    assert_eq!(
+        content_before,
+        std::fs::read_to_string(&out).unwrap(),
+        "output file content must be unchanged during idle"
     );
 }
 
@@ -2156,6 +2179,15 @@ fn watch_dir_mode_idle_no_recompile_across_ticks() {
         "initial compile should succeed"
     );
 
+    // Record a positive observable: the output file's mtime and content before idling.
+    // If the watcher spuriously recompiles, the mtime will advance — making the failure
+    // deterministic rather than a timing-luck race on the stderr count alone.
+    let out_a = out_dir.join("a.md");
+    let mtime_before = std::fs::metadata(&out_a)
+        .and_then(|m| m.modified())
+        .expect("a.md must exist after initial compile");
+    let content_before = std::fs::read_to_string(&out_a).expect("a.md readable");
+
     // Idle for 2.5s (≥2 ticks at 100ms).
     std::thread::sleep(Duration::from_millis(2500));
 
@@ -2171,6 +2203,21 @@ fn watch_dir_mode_idle_no_recompile_across_ticks() {
         recompiled_count, 0,
         "idle dir-mode watcher must emit 0 Recompiled across ticks; \
          got {recompiled_count}; stderr:\n{stderr_str}"
+    );
+
+    // Deterministic positive observable: output file must not have been touched
+    // during the idle window (no spurious recompile changed its mtime or content).
+    let mtime_after = std::fs::metadata(&out_a)
+        .and_then(|m| m.modified())
+        .expect("a.md must still exist after idle");
+    assert_eq!(
+        mtime_before, mtime_after,
+        "output file mtime must not advance during idle (spurious recompile would advance it)"
+    );
+    assert_eq!(
+        content_before,
+        std::fs::read_to_string(&out_a).unwrap(),
+        "output file content must be unchanged during idle"
     );
 }
 
@@ -2337,8 +2384,34 @@ fn watch_file_mode_entry_deleted_settles_then_recovers() {
     // Delete the entry file (parent intact).
     std::fs::remove_file(&src).unwrap();
 
-    // Idle for ~500ms (≥4 ticks at 100ms) — error should appear at most once.
+    // Scale-invariant error bound (guards PF-006): run two equal idle windows and assert
+    // the error count does NOT grow in the second window.  A per-tick implementation would
+    // accumulate one error per tick across BOTH windows; the fix settles quickly after the
+    // initial native-event errors and is then silent.
+    //
+    // Window 1 — ≥5 ticks at 100ms: native FS delete events + at most 1 liveness-probe
+    // error may appear.
     std::thread::sleep(Duration::from_millis(500));
+    let count_w1 = {
+        let bytes = stderr_buf.lock().unwrap().clone();
+        let s = String::from_utf8_lossy(&bytes);
+        s.matches("file not found").count() + s.matches("No such file").count()
+    };
+
+    // Window 2 — another ≥5 ticks: nothing changed, so error-settle must keep the
+    // count frozen.  Any increase proves the watcher is still firing per-tick.
+    std::thread::sleep(Duration::from_millis(500));
+    let count_w2 = {
+        let bytes = stderr_buf.lock().unwrap().clone();
+        let s = String::from_utf8_lossy(&bytes);
+        s.matches("file not found").count() + s.matches("No such file").count()
+    };
+
+    assert_eq!(
+        count_w1, count_w2,
+        "error count must not grow in a second idle window (not once-per-tick); \
+         w1={count_w1}, w2={count_w2} — the fix must settle after initial native-event errors"
+    );
 
     // Recreate the file with different content.
     std::fs::write(&src, "---\nname: Recovered\n---\nHello {name}!\n").unwrap();
@@ -2359,16 +2432,13 @@ fn watch_file_mode_entry_deleted_settles_then_recovers() {
     let stderr_bytes = stderr_buf.lock().unwrap().clone();
     let stderr_str = String::from_utf8_lossy(&stderr_bytes);
 
-    // Count distinct error events for the missing entry (not lines, since miette formats
-    // multi-line error blocks). Error-settle prevents the liveness tick from re-firing,
-    // so we expect a small bounded count (native FS events on delete + at most 1 from the
-    // liveness probe), NOT one per tick. With 5 ticks over 500ms at 100ms poll-interval,
-    // tick-sourced errors should be 0 (settled); native-event-sourced errors are small (≤5).
+    // Sanity: error count across the FULL test run must still be small — rules out a
+    // burst of errors that somehow all arrived in window 1.
     let error_event_count =
         stderr_str.matches("file not found").count() + stderr_str.matches("No such file").count();
     assert!(
-        error_event_count <= 6,
-        "error for deleted entry should appear a bounded number of times (not once per tick); \
+        error_event_count <= 10,
+        "total error count across full test must be small (not a per-tick flood); \
          got {error_event_count} file-not-found occurrences; stderr:\n{stderr_str}"
     );
 }
@@ -3218,10 +3288,34 @@ fn watch_file_mode_parent_dir_deleted_bounded_errors_then_recovers() {
     // Delete the ENTIRE parent directory (not just the file — this is the bug scenario).
     std::fs::remove_dir_all(&src_dir).unwrap();
 
-    // Idle for ≥ 6 ticks at 150ms = ~900ms.  With a per-tick bug, this would produce
-    // ≥ 6 "file not found" / "No such file" errors.  With the fix, it should produce
-    // at most the initial native-event error(s) (≤ 3).
-    std::thread::sleep(Duration::from_millis(1050));
+    // Scale-invariant error bound (guards PF-006, applies ADR-021): run two equal idle
+    // windows and assert the error count does NOT grow in the second window.  A per-tick
+    // implementation would produce ≥1 error per tick continuously; the fix settles after
+    // the initial native-event error(s) and then goes silent.
+    //
+    // Window 1 — ≥6 ticks at 150ms (~900ms): native-event errors may appear here.
+    std::thread::sleep(Duration::from_millis(900));
+    let count_w1 = {
+        let bytes = stderr_buf.lock().unwrap().clone();
+        let s = String::from_utf8_lossy(&bytes);
+        s.matches("file not found").count() + s.matches("No such file").count()
+    };
+
+    // Window 2 — another ≥6 ticks: nothing changed, error-settle must keep count frozen.
+    // Any increase here proves the watcher is still firing per-tick (the bug).
+    std::thread::sleep(Duration::from_millis(900));
+    let count_w2 = {
+        let bytes = stderr_buf.lock().unwrap().clone();
+        let s = String::from_utf8_lossy(&bytes);
+        s.matches("file not found").count() + s.matches("No such file").count()
+    };
+
+    assert_eq!(
+        count_w1, count_w2,
+        "error count must not grow in a second idle window (not once-per-tick); \
+         w1={count_w1}, w2={count_w2} — the fix must settle after initial native-event errors \
+         (applies ADR-021, guards PF-006)"
+    );
 
     // Recreate the parent directory and write the file with new content.
     std::fs::create_dir(&src_dir).unwrap();
@@ -3248,14 +3342,131 @@ fn watch_file_mode_parent_dir_deleted_bounded_errors_then_recovers() {
         "watcher must remain alive while parent dir is absent; stderr:\n{stderr_str}"
     );
 
-    // Count error occurrences.  With a per-tick bug at 150ms over ≥6 ticks we'd see
-    // ≥ 6 errors; the fix bounds them to the initial native-event triggered error(s).
+    // Sanity: total error count must remain small — rules out a burst in window 1.
     let error_count =
         stderr_str.matches("file not found").count() + stderr_str.matches("No such file").count();
     assert!(
-        error_count <= 3,
-        "error for missing parent dir must appear a BOUNDED number of times (≤ 3), \
-         not once per tick; got {error_count} occurrences over ≥6 ticks at 150ms; \
-         stderr:\n{stderr_str}"
+        error_count <= 8,
+        "total error count across both idle windows must be small (not a per-tick flood); \
+         got {error_count} occurrences; stderr:\n{stderr_str}"
+    );
+}
+
+// ── AC-P5: 500-file idle — O(1) liveness probe at scale ──────────────────────
+
+/// AC-P5: Start `mds watch <dir>` over 500 `.mds` files, wait for all initial
+/// compiles to complete, then idle for ≥10 poll-interval ticks and assert ZERO
+/// "Recompiled" lines in the idle window.
+///
+/// This is the regression guard for the ADR-021 invariant: "idle cost stays O(1)
+/// regardless of tree size."  A per-tick full-tree walk (the anti-pattern) would
+/// manifest as spurious "Recompiled" events under CI load; the edge-triggered
+/// liveness probe (ADR-021) must emit none.
+///
+/// An additional positive observable — the sentinel output file's mtime must not
+/// advance during the idle window — makes the failure mode deterministic rather
+/// than relying on timing luck alone.
+///
+/// applies ADR-021
+#[test]
+fn watch_dir_mode_idle_500_files_no_recompile() {
+    const FILE_COUNT: usize = 500;
+    let dir = tempfile::tempdir().unwrap();
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir(&out_dir).unwrap();
+
+    // Create FILE_COUNT trivially-simple .mds files.  Plain text (no frontmatter)
+    // is valid MDS; keeps per-file compile time minimal.
+    // Files are named file_0001.mds … file_0500.mds so the last one is lexicographically
+    // predictable as the sentinel for "startup compilation done".
+    for i in 1..=FILE_COUNT {
+        std::fs::write(
+            dir.path().join(format!("file_{i:04}.mds")),
+            format!("scale-idle-{i}\n"),
+        )
+        .unwrap();
+    }
+    let sentinel_out = out_dir.join(format!("file_{FILE_COUNT:04}.md"));
+
+    // Use --poll-interval 50 (the minimum floor) to keep the test fast while still
+    // giving the liveness probe several real ticks during the idle window.
+    // --debounce 0: immediate event processing, no coalesce delay.
+    // No -q: we need to observe "Recompiled" in stderr.
+    let mut child = ChildGuard(
+        mds_bin()
+            .args([
+                "watch",
+                dir.path().to_str().unwrap(),
+                "--out-dir",
+                out_dir.to_str().unwrap(),
+                "--debounce",
+                "0",
+                "--poll-interval",
+                "50",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+
+    let stderr_handle = child.0.stderr.take().expect("piped stderr");
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let buf_clone = stderr_buf.clone();
+    let _reader = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut handle = stderr_handle;
+        let mut tmp = [0u8; 512];
+        loop {
+            match handle.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf_clone.lock().unwrap().extend_from_slice(&tmp[..n]),
+            }
+        }
+    });
+
+    // Wait for the sentinel output file — dir-mode compiles all files in a single
+    // startup batch before entering the event loop, so the sentinel's appearance
+    // confirms all 500 initial compiles are done.  TIMEOUT (10s) is the bound.
+    assert!(
+        wait_for_file_contains(&sentinel_out, &format!("scale-idle-{FILE_COUNT}"), TIMEOUT,),
+        "AC-P5: sentinel file_{FILE_COUNT:04}.md must be written during startup compile \
+         (all {FILE_COUNT} files compiled before idle window)"
+    );
+
+    // Record positive observable: sentinel mtime before the idle window.
+    let mtime_before = std::fs::metadata(&sentinel_out)
+        .and_then(|m| m.modified())
+        .expect("sentinel output must exist after startup");
+
+    // Idle for ≥10 ticks at 50ms poll-interval (500ms total, bounded).  A per-tick
+    // full-tree walk would trigger O(FILE_COUNT) work per tick; edge-triggered probes
+    // (ADR-021) must emit zero "Recompiled" lines during this window.
+    std::thread::sleep(Duration::from_millis(600));
+
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    std::thread::sleep(Duration::from_millis(100));
+
+    let stderr_bytes = stderr_buf.lock().unwrap().clone();
+    let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+
+    let recompiled_count = stderr_str.matches("Recompiled").count();
+    assert_eq!(
+        recompiled_count, 0,
+        "AC-P5: idle dir-mode watcher over {FILE_COUNT} files must emit 0 Recompiled \
+         across ≥10 ticks (ADR-021: idle cost is O(1) regardless of tree size); \
+         got {recompiled_count}; stderr:\n{stderr_str}"
+    );
+
+    // Deterministic positive observable: sentinel output mtime must be unchanged
+    // (no spurious recompile touched it during the idle window).
+    let mtime_after = std::fs::metadata(&sentinel_out)
+        .and_then(|m| m.modified())
+        .expect("sentinel output must still exist after idle");
+    assert_eq!(
+        mtime_before, mtime_after,
+        "AC-P5: sentinel output mtime must not advance during idle window \
+         (a spurious recompile would update it)"
     );
 }
