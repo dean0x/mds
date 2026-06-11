@@ -66,6 +66,13 @@ pub(crate) const MAX_FRONTMATTER_IMPORTS: usize = 256;
 /// 10 000 messages is generous for any real LLM conversation template.
 pub(crate) const MAX_MESSAGE_COUNT: usize = 10_000;
 
+/// Maximum number of `@block` declarations per module.
+///
+/// Defense-in-depth limit preventing adversarial inputs from triggering
+/// unbounded name-collision checks in `collect_block`. 256 blocks is generous
+/// for any real template.
+pub(crate) const MAX_BLOCKS_PER_MODULE: usize = 256;
+
 /// Maximum cumulative byte size of all message content produced by `compile_messages`.
 ///
 /// Caps the aggregate content across the entire message array at the same ceiling as

@@ -988,7 +988,12 @@ pub fn scan_imports(source: &str) -> Result<Vec<String>, MdsError> {
 
     let mut paths: IndexSet<String> = IndexSet::new();
 
-    // Insert frontmatter import paths FIRST (they resolve before body imports).
+    // Insert @extends base path FIRST — the base is the first dependency (spec §4.11).
+    if let Some(ext) = module.extends.as_ref() {
+        paths.insert(ext.path.clone());
+    }
+
+    // Insert frontmatter import paths (they resolve before body imports).
     // Best-effort: ignore parse errors here (parse errors will surface at compile time).
     if let Some(fm) = module.frontmatter.as_ref() {
         if let Ok(fm_imports) = resolver::parse_frontmatter_imports(&fm.raw) {

@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use indexmap::{IndexMap, IndexSet};
 
-use crate::ast::{DefineBlock, ExportDirective, ImportDirective, Node};
+use crate::ast::{BlockNode, DefineBlock, ExportDirective, ImportDirective, Node};
 use crate::error::MdsError;
 use crate::evaluator::{evaluate, evaluate_messages, EvalMessage};
 use crate::fs::{FileSystem, NativeFs, VirtualFs};
 use crate::lexer::tokenize;
-use crate::limits::MAX_FRONTMATTER_IMPORTS;
+use crate::limits::{MAX_BLOCKS_PER_MODULE, MAX_FRONTMATTER_IMPORTS};
 use crate::parser::is_valid_identifier;
 use crate::parser::parse_with_ctx;
 use crate::scope::{FunctionDef, NamespaceScope, Scope};
@@ -434,6 +434,7 @@ impl ModuleCache {
             functions,
             has_explicit_exports,
             explicit_exports,
+            block_names: _, // block_names used for collision detection only; not needed for resolution
         } = self.collect_definitions_and_imports(&module.body, &mut scope, ctx, warnings)?;
 
         // Validate that all named exports refer to defined functions or "prompt"
@@ -470,13 +471,19 @@ impl ModuleCache {
             functions: HashMap::new(),
             has_explicit_exports: false,
             explicit_exports: HashSet::new(),
+            block_names: HashSet::new(),
         };
 
+        let mut block_count: usize = 0;
         for node in body {
             match node {
                 Node::Define(def) => collect_define(def, &mut defs, scope, ctx)?,
                 Node::Import(import) => self.resolve_import(import, scope, ctx, warnings)?,
                 Node::Export(export) => self.collect_export(export, &mut defs, ctx, warnings)?,
+                Node::Block(block) => {
+                    block_count += 1;
+                    collect_block(block, &mut defs, block_count, ctx)?;
+                }
                 _ => {}
             }
         }
@@ -799,6 +806,11 @@ struct CollectedDefs {
     functions: HashMap<String, Arc<FunctionDef>>,
     has_explicit_exports: bool,
     explicit_exports: HashSet<String>,
+    /// Tracks declared `@block` names for duplicate-block and block-vs-function collision detection.
+    ///
+    /// Shared with `collect_define` so that a `@block foo:` and a `@define foo()` in the same
+    /// module surface as `mds::name_collision` (same namespace — decision #10).
+    block_names: HashSet<String>,
 }
 
 /// Bundle of borrowed per-module context threaded through the AST walk helpers.
@@ -832,6 +844,8 @@ fn has_message_block(nodes: &[Node]) -> bool {
                     .unwrap_or(false)
         }
         Node::For(block) => has_message_block(&block.body),
+        // A @block's default body may contain @message blocks.
+        Node::Block(block) => has_message_block(&block.body),
         _ => false,
     })
 }
@@ -847,7 +861,7 @@ fn collect_define(
     scope: &mut Scope,
     ctx: &ModuleCtx<'_>,
 ) -> Result<(), MdsError> {
-    if defs.functions.contains_key(&def.name) {
+    if defs.functions.contains_key(&def.name) || defs.block_names.contains(&def.name) {
         return Err(MdsError::name_collision_at(
             &def.name,
             ctx.file_str,
@@ -871,6 +885,41 @@ fn collect_define(
     let arc = Arc::new(func);
     defs.functions.insert(def.name.clone(), Arc::clone(&arc));
     scope.set_function(&def.name, arc);
+    Ok(())
+}
+
+/// Process a single `@block` directive, updating the `block_names` set in `defs`.
+///
+/// Detects:
+/// - Duplicate `@block` names within the same module (mds::name_collision).
+/// - `@block` name colliding with a `@define` function name (mds::name_collision).
+///   This is intentional: blocks and functions share the same namespace (decision #10).
+/// - `MAX_BLOCKS_PER_MODULE` cap (mds::resource_limit).
+///
+/// Note: `count` is the running total of @block nodes seen so far (1-indexed after increment
+/// at the call site), used to enforce the per-module cap.
+fn collect_block(
+    block: &BlockNode,
+    defs: &mut CollectedDefs,
+    count: usize,
+    ctx: &ModuleCtx<'_>,
+) -> Result<(), MdsError> {
+    if count > MAX_BLOCKS_PER_MODULE {
+        return Err(MdsError::resource_limit(format!(
+            "module has more than {MAX_BLOCKS_PER_MODULE} @block declarations"
+        )));
+    }
+    // Check for duplicate @block name or collision with an existing @define.
+    if defs.block_names.contains(&block.name) || defs.functions.contains_key(&block.name) {
+        return Err(MdsError::name_collision_at(
+            &block.name,
+            ctx.file_str,
+            ctx.source,
+            block.offset,
+            block.name.len(),
+        ));
+    }
+    defs.block_names.insert(block.name.clone());
     Ok(())
 }
 
@@ -1527,6 +1576,81 @@ mod tests {
         assert!(
             has_type_mds_frontmatter("---\ntype: mds\nconfig:\n  type: other\n---\nbody\n"),
             "top-level type:mds should trigger detection in full-source variant"
+        );
+    }
+
+    // ── Phase 1: @block collision and resource-limit tests ────────────────────
+
+    #[test]
+    fn block_duplicate_name_collision() {
+        // Two @block declarations with the same name → mds::name_collision.
+        let src = "@block foo:\nbody1\n@end\n@block foo:\nbody2\n@end\n";
+        let result = crate::compile_str(src);
+        assert!(result.is_err(), "duplicate @block name must fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("'foo'") || msg.contains("foo"),
+            "error should mention the colliding name: {msg}"
+        );
+    }
+
+    #[test]
+    fn block_vs_define_name_collision() {
+        // @block and @define sharing the same name → mds::name_collision.
+        let src = "@define foo():\ncontent\n@end\n@block foo:\nbody\n@end\n";
+        let result = crate::compile_str(src);
+        assert!(result.is_err(), "@block vs @define collision must fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("'foo'") || msg.contains("foo"),
+            "error should mention the colliding name: {msg}"
+        );
+    }
+
+    #[test]
+    fn define_vs_block_name_collision() {
+        // @define declared after a @block with the same name → mds::name_collision.
+        let src = "@block foo:\nbody\n@end\n@define foo():\ncontent\n@end\n";
+        let result = crate::compile_str(src);
+        assert!(result.is_err(), "@define vs @block collision must fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("'foo'") || msg.contains("foo"),
+            "error should mention the colliding name: {msg}"
+        );
+    }
+
+    #[test]
+    fn block_max_per_module_cap() {
+        // Declaring more than MAX_BLOCKS_PER_MODULE @blocks in one module → resource_limit.
+        // Build a source with 257 @block declarations (one over the 256 cap).
+        let mut src = String::new();
+        for i in 0..=256usize {
+            src.push_str(&format!("@block blk{i}:\nbody\n@end\n"));
+        }
+        let result = crate::compile_str(&src);
+        assert!(
+            result.is_err(),
+            "exceeding MAX_BLOCKS_PER_MODULE should fail with resource_limit"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("resource limit") || msg.contains("256") || msg.contains("block"),
+            "error should mention resource limit or block count: {msg}"
+        );
+    }
+
+    #[test]
+    fn block_exactly_at_max_allowed() {
+        // Exactly MAX_BLOCKS_PER_MODULE (256) @block declarations should compile.
+        let mut src = String::new();
+        for i in 0..256usize {
+            src.push_str(&format!("@block blk{i}:\nbody\n@end\n"));
+        }
+        let result = crate::compile_str(&src);
+        assert!(
+            result.is_ok(),
+            "exactly 256 @blocks should succeed, got: {result:?}"
         );
     }
 }
