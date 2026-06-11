@@ -252,6 +252,21 @@ pub enum MdsError {
         #[source_code]
         src: Option<Arc<miette::NamedSource<String>>>,
     },
+
+    /// Errors in template inheritance (`@extends` / `@block`).
+    ///
+    /// Used by Phase 2 for child-only-blocks violations (3b) and unknown-override (3c).
+    /// Phase 5 will retarget the two Phase-1 `TODO(phase5)` `mds::syntax` markers to
+    /// this variant — do NOT re-add it then.
+    #[error("extends error: {message}")]
+    #[diagnostic(code(mds::extends))]
+    Extends {
+        message: String,
+        #[label("template inheritance error")]
+        span: Option<SourceSpan>,
+        #[source_code]
+        src: Option<Arc<miette::NamedSource<String>>>,
+    },
 }
 
 impl MdsError {
@@ -573,6 +588,30 @@ impl MdsError {
         }
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn extends_error(message: impl Into<String>) -> Self {
+        MdsError::Extends {
+            message: message.into(),
+            span: None,
+            src: None,
+        }
+    }
+
+    pub(crate) fn extends_error_at(
+        message: impl Into<String>,
+        file: &str,
+        source: &str,
+        offset: usize,
+        len: usize,
+    ) -> Self {
+        let (span, src) = at(file, source, offset, len);
+        MdsError::Extends {
+            message: message.into(),
+            span,
+            src,
+        }
+    }
+
     pub(crate) fn not_mds_file(path: impl Into<String>) -> Self {
         MdsError::NotMdsFile { path: path.into() }
     }
@@ -607,7 +646,8 @@ impl MdsError {
             | MdsError::NameCollision { span, src, .. }
             | MdsError::Recursion { span, src, .. }
             | MdsError::ExportError { span, src, .. }
-            | MdsError::BuiltinError { span, src, .. } => {
+            | MdsError::BuiltinError { span, src, .. }
+            | MdsError::Extends { span, src, .. } => {
                 span.as_ref().map(|ss| {
                     let offset = ss.offset();
                     let length = ss.len();
