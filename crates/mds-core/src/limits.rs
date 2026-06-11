@@ -73,6 +73,15 @@ pub(crate) const MAX_MESSAGE_COUNT: usize = 10_000;
 /// for any real template.
 pub(crate) const MAX_BLOCKS_PER_MODULE: usize = 256;
 
+/// Maximum recursion depth for `deep_merge_yaml` when merging frontmatter
+/// Mappings across template inheritance chains.
+///
+/// Prevents stack overflow from adversarially-crafted deeply-nested YAML
+/// objects in frontmatter. 64 levels is generous for any real template while
+/// keeping recursive frames well within the default thread stack.
+/// Exceeding this limit surfaces as `mds::resource_limit` (P4).
+pub(crate) const MAX_FRONTMATTER_MERGE_DEPTH: usize = 64;
+
 /// Maximum cumulative byte size of all message content produced by `compile_messages`.
 ///
 /// Caps the aggregate content across the entire message array at the same ceiling as

@@ -8,7 +8,7 @@ use crate::error::MdsError;
 use crate::evaluator::{evaluate, evaluate_messages, EvalMessage};
 use crate::fs::{FileSystem, NativeFs, VirtualFs};
 use crate::lexer::tokenize;
-use crate::limits::{MAX_BLOCKS_PER_MODULE, MAX_FRONTMATTER_IMPORTS};
+use crate::limits::{MAX_BLOCKS_PER_MODULE, MAX_FRONTMATTER_IMPORTS, MAX_FRONTMATTER_MERGE_DEPTH};
 use crate::parser::is_valid_identifier;
 use crate::parser::parse_with_ctx;
 use crate::scope::{FunctionDef, NamespaceScope, Scope};
@@ -557,7 +557,7 @@ impl ModuleCache {
         module: crate::ast::Module,
         ext: crate::ast::ExtendsDirective,
         ctx: &ModuleCtx<'_>,
-        is_md: bool,
+        _is_md: bool,
         raw_frontmatter: Option<String>,
         frontmatter_values: Option<serde_yaml_ng::Mapping>,
         warnings: &mut Vec<String>,
@@ -624,37 +624,60 @@ impl ModuleCache {
         // effective_skeleton is the root ancestor's body (Arc::clone — O(1), no deep-copy, P1).
         let effective_skeleton = Arc::clone(&base.effective_skeleton);
 
-        // ── Step 3d: build merged scope ───────────────────────────────────────
-        // Child frontmatter takes precedence over base frontmatter (minimal merge).
-        // TODO(phase3): replace minimal merge with deep_merge_yaml / reserved-key exclusion
-        // / full runtime-last precedence refactor per decision #3 and decision #7.
-        let (mut scope, fm_imports) =
-            build_scope_from_frontmatter(module.frontmatter.as_ref(), is_md, ctx.runtime_vars)?;
+        // ── Step 3d: build merged scope (Phase 3: deep merge + per-file FM imports) ──
+        // Applies decision #3 (base < child < runtime) and decision #7 (reserved-key
+        // exclusion, array wholesale replace, both sets of FM imports resolved per-file).
 
-        // Resolve child's frontmatter imports (ADR-014: frontmatter imports before body).
-        self.resolve_frontmatter_imports(&fm_imports, &mut scope, ctx, warnings)?;
+        // 3d-i: Extract frontmatter imports from BOTH base and child BEFORE the deep merge.
+        //
+        // Base imports resolve relative to the BASE file (using base_key as ctx.base_key).
+        // Child imports resolve relative to the CHILD file (using ctx.base_key as usual).
+        // Both sets are resolved; a duplicate alias across base+child → mds::name_collision
+        // (ADR-014; consistent with the existing namespace-collision handling).
+        let base_fm_imports: Vec<FrontmatterImport> = base
+            .frontmatter_values
+            .as_ref()
+            .and_then(|m| m.get("imports"))
+            .map(|imports_val| parse_frontmatter_imports_from_yaml(imports_val))
+            .transpose()?
+            .unwrap_or_default();
 
-        // Merge in base's frontmatter variables (child wins on collision — child already in scope).
-        // This is the minimal merge: child vars were inserted above, so we skip keys already set.
-        // TODO(phase3): replace with deep_merge_yaml.
-        if let Some(base_fm) = &base.frontmatter_values {
-            for (key, val) in base_fm {
-                let serde_yaml_ng::Value::String(key_str) = key else {
-                    continue;
-                };
-                // Skip reserved keys and keys the child already has.
-                if key_str == "imports" || key_str == "type" {
-                    continue;
-                }
-                if scope.get_var(key_str).is_none() {
-                    if let Ok(value) = crate::value::Value::from_yaml(val.clone()) {
-                        scope.set_var(key_str, value);
-                    }
-                }
-            }
-        }
+        let child_fm_imports: Vec<FrontmatterImport> = frontmatter_values
+            .as_ref()
+            .and_then(|m| m.get("imports"))
+            .map(|imports_val| parse_frontmatter_imports_from_yaml(imports_val))
+            .transpose()?
+            .unwrap_or_default();
 
-        // Merge base functions into scope (F12: base default block calling a base @define).
+        // 3d-ii: Deep-merge base and child frontmatter value Mappings.
+        // Empty mapping used when either side has no frontmatter.
+        // Reserved keys (imports, type, extends) are excluded by deep_merge_yaml.
+        // Precedence: base < child (child overrides base on collision).
+        let empty_mapping = serde_yaml_ng::Mapping::new();
+        let base_mapping = base.frontmatter_values.as_ref().unwrap_or(&empty_mapping);
+        let child_mapping = frontmatter_values.as_ref().unwrap_or(&empty_mapping);
+        let merged_mapping = deep_merge_yaml(base_mapping, child_mapping, 0)?;
+
+        // 3d-iii: Build scope from the merged mapping. Runtime vars applied LAST
+        // (base < child < runtime, F7, decision #3).
+        let mut scope = build_scope_from_merged_mapping(&merged_mapping, ctx.runtime_vars)?;
+
+        // 3d-iv: Resolve base frontmatter imports against base_key (ADR-014 ordering,
+        // PF-004 safe via resolve_frontmatter_imports → resolve_import_from).
+        // Use a minimal ctx pointing to the base file.
+        let base_ctx = ModuleCtx {
+            file_str: &base_key,
+            source: "",
+            base_key: &base_key,
+            runtime_vars: ctx.runtime_vars,
+        };
+        self.resolve_frontmatter_imports(&base_fm_imports, &mut scope, &base_ctx, warnings)?;
+
+        // 3d-v: Resolve child frontmatter imports against child key (ctx.base_key).
+        // Duplicate alias across base+child → mds::name_collision (same error as today).
+        self.resolve_frontmatter_imports(&child_fm_imports, &mut scope, ctx, warnings)?;
+
+        // 3d-vi: Merge base functions into scope (F12: base default block calling a base @define).
         // Collision with child frontmatter-imported functions → name_collision.
         for (name, func) in &base.functions {
             if scope.get_function(name).is_some() {
@@ -773,7 +796,8 @@ impl ModuleCache {
         let module = parse_with_ctx(&tokens, ctx.file_str, ctx.source)?;
 
         let raw_frontmatter = module.frontmatter.as_ref().map(|fm| fm.raw.clone());
-        let frontmatter_values = parse_frontmatter_mapping(module.frontmatter.as_ref())?;
+        // own_fm_values: this module's raw frontmatter (not yet merged with ancestors).
+        let own_fm_values = parse_frontmatter_mapping(module.frontmatter.as_ref())?;
 
         // Build scope for @define closure capture (base functions must be available).
         let (mut scope, fm_imports) =
@@ -790,75 +814,97 @@ impl ModuleCache {
         // Multi-level chain (A←B←C): B may itself extend A.
         // B's effective_skeleton = A's effective_skeleton (Arc::clone, O(1) fold).
         // B's effective_blocks = clone(A.effective_blocks) + B's overrides (most-derived wins, F3).
-        let (effective_skeleton, effective_blocks) = if let Some(ext) = module.extends.as_ref() {
-            validate_import_path(&ext.path).map_err(|e| {
-                attach_import_span(e, &ext.path, ctx.file_str, ctx.source, ext.offset)
-            })?;
-            let grandparent_key = self.fs.normalize(ctx.base_key, &ext.path).map_err(|e| {
-                attach_import_span(e, &ext.path, ctx.file_str, ctx.source, ext.offset)
-            })?;
-            let grandparent = self
-                .resolve_by_key_skeleton(&grandparent_key, ctx.runtime_vars, warnings)
-                .map_err(|e| {
+        //
+        // Phase 3: B's frontmatter_values must be the transitive deep-merge of A's accumulated FM
+        // with B's own FM (A < B), so that when C later merges against B, it gets A+B+C.
+        let (effective_skeleton, effective_blocks, frontmatter_values) =
+            if let Some(ext) = module.extends.as_ref() {
+                validate_import_path(&ext.path).map_err(|e| {
                     attach_import_span(e, &ext.path, ctx.file_str, ctx.source, ext.offset)
                 })?;
+                let grandparent_key = self.fs.normalize(ctx.base_key, &ext.path).map_err(|e| {
+                    attach_import_span(e, &ext.path, ctx.file_str, ctx.source, ext.offset)
+                })?;
+                let grandparent = self
+                    .resolve_by_key_skeleton(&grandparent_key, ctx.runtime_vars, warnings)
+                    .map_err(|e| {
+                        attach_import_span(e, &ext.path, ctx.file_str, ctx.source, ext.offset)
+                    })?;
 
-            // Child-only-blocks check for this intermediate base (3b).
-            for node in &module.body {
-                match node {
-                    Node::Block(_) => {}
-                    Node::Text(t) if t.text.trim().is_empty() => {}
-                    other => {
-                        let offset = node_offset(other);
-                        let line_len = ctx.source[offset..]
-                            .find('\n')
-                            .unwrap_or(ctx.source[offset..].len());
-                        return Err(MdsError::extends_error_at(
-                            "an extending template may contain only @block overrides",
-                            ctx.file_str,
-                            ctx.source,
-                            offset,
-                            line_len,
-                        ));
-                    }
-                }
-            }
-
-            let mut eff_blocks = grandparent.effective_blocks.clone();
-            for node in &module.body {
-                if let Node::Block(b) = node {
-                    if !eff_blocks.contains_key(&b.name) {
-                        return Err(MdsError::extends_error_at(
-                            "only the root template may declare @block placeholders",
-                            ctx.file_str,
-                            ctx.source,
-                            b.offset,
-                            b.name.len(),
-                        ));
-                    }
-                    eff_blocks.insert(b.name.clone(), Arc::new(b.clone()));
-                }
-            }
-
-            (Arc::clone(&grandparent.effective_skeleton), eff_blocks)
-        } else {
-            // Root base: own body is the skeleton; blocks seeded from own @block declarations.
-            let eff_skeleton: Arc<[Node]> = Arc::from(module.body.as_slice());
-            let eff_blocks = block_names
-                .iter()
-                .filter_map(|name| {
-                    module.body.iter().find_map(|n| {
-                        if let Node::Block(b) = n {
-                            if b.name == *name {
-                                return Some((name.clone(), Arc::new(b.clone())));
-                            }
+                // Child-only-blocks check for this intermediate base (3b).
+                for node in &module.body {
+                    match node {
+                        Node::Block(_) => {}
+                        Node::Text(t) if t.text.trim().is_empty() => {}
+                        other => {
+                            let offset = node_offset(other);
+                            let line_len = ctx.source[offset..]
+                                .find('\n')
+                                .unwrap_or(ctx.source[offset..].len());
+                            return Err(MdsError::extends_error_at(
+                                "an extending template may contain only @block overrides",
+                                ctx.file_str,
+                                ctx.source,
+                                offset,
+                                line_len,
+                            ));
                         }
-                        None
+                    }
+                }
+
+                let mut eff_blocks = grandparent.effective_blocks.clone();
+                for node in &module.body {
+                    if let Node::Block(b) = node {
+                        if !eff_blocks.contains_key(&b.name) {
+                            return Err(MdsError::extends_error_at(
+                                "only the root template may declare @block placeholders",
+                                ctx.file_str,
+                                ctx.source,
+                                b.offset,
+                                b.name.len(),
+                            ));
+                        }
+                        eff_blocks.insert(b.name.clone(), Arc::new(b.clone()));
+                    }
+                }
+
+                // Phase 3: transitive FM merge: grandparent.frontmatter_values < own_fm_values.
+                // This produces the accumulated FM for this intermediate base, so a leaf
+                // descending from it gets the full transitive chain without re-traversing.
+                let empty = serde_yaml_ng::Mapping::new();
+                let gp_fm = grandparent.frontmatter_values.as_ref().unwrap_or(&empty);
+                let own_fm = own_fm_values.as_ref().unwrap_or(&empty);
+                let merged_fm = deep_merge_yaml(gp_fm, own_fm, 0)?;
+                let accumulated_fm = if merged_fm.is_empty() {
+                    None
+                } else {
+                    Some(merged_fm)
+                };
+
+                (
+                    Arc::clone(&grandparent.effective_skeleton),
+                    eff_blocks,
+                    accumulated_fm,
+                )
+            } else {
+                // Root base: own body is the skeleton; blocks seeded from own @block declarations.
+                let eff_skeleton: Arc<[Node]> = Arc::from(module.body.as_slice());
+                let eff_blocks = block_names
+                    .iter()
+                    .filter_map(|name| {
+                        module.body.iter().find_map(|n| {
+                            if let Node::Block(b) = n {
+                                if b.name == *name {
+                                    return Some((name.clone(), Arc::new(b.clone())));
+                                }
+                            }
+                            None
+                        })
                     })
-                })
-                .collect::<IndexMap<_, _>>();
-            (eff_skeleton, eff_blocks)
-        };
+                    .collect::<IndexMap<_, _>>();
+                // Root base: frontmatter_values is its own raw FM (no ancestors).
+                (eff_skeleton, eff_blocks, own_fm_values)
+            };
 
         Ok(ResolvedModule {
             functions,
@@ -1409,6 +1455,113 @@ fn build_scope_from_frontmatter(
     }
 
     Ok((scope, fm_imports))
+}
+
+/// Deep-merge two YAML `Mapping`s for template inheritance frontmatter.
+///
+/// Semantics (decision #7):
+/// - When BOTH values at a key are `Mapping`, recursively merge key-by-key.
+/// - Otherwise child wins (scalar over scalar, scalar over map, map over scalar).
+/// - Arrays/sequences REPLACE WHOLESALE — no element-level merge.
+/// - Key ORDER: base-then-child (determinism A6). Keys present in base keep their
+///   original position; their value may be replaced by the merged/child value.
+///   Child-only keys are appended in child order after all base keys.
+/// - Reserved keys (`imports`, `type`, `extends`) are excluded from the output —
+///   they are not value data (decision #7). Callers handle them separately.
+/// - Recursion is bounded by `MAX_FRONTMATTER_MERGE_DEPTH`; exceeding it returns
+///   `mds::resource_limit` (P4 — no stack overflow).
+///
+/// The `depth` argument starts at 0 and is incremented on each recursive call.
+fn deep_merge_yaml(
+    base: &serde_yaml_ng::Mapping,
+    child: &serde_yaml_ng::Mapping,
+    depth: usize,
+) -> Result<serde_yaml_ng::Mapping, MdsError> {
+    if depth > MAX_FRONTMATTER_MERGE_DEPTH {
+        return Err(MdsError::resource_limit(format!(
+            "frontmatter merge depth exceeds maximum of {MAX_FRONTMATTER_MERGE_DEPTH}"
+        )));
+    }
+
+    // Reserved keys excluded from the merged output.
+    const RESERVED: &[&str] = &["imports", "type", "extends"];
+
+    let mut result = serde_yaml_ng::Mapping::new();
+
+    // Phase 1: walk base keys in order.
+    // Each base key keeps its position; value is replaced if child also has that key.
+    for (base_key, base_val) in base {
+        // Skip reserved keys and non-string keys.
+        let serde_yaml_ng::Value::String(key_str) = base_key else {
+            continue;
+        };
+        if RESERVED.contains(&key_str.as_str()) {
+            continue;
+        }
+
+        let merged_val = if let Some(child_val) = child.get(base_key) {
+            // Both have this key: recurse if both are Mapping, else child wins.
+            match (base_val, child_val) {
+                (serde_yaml_ng::Value::Mapping(bm), serde_yaml_ng::Value::Mapping(cm)) => {
+                    let merged_map = deep_merge_yaml(bm, cm, depth + 1)?;
+                    serde_yaml_ng::Value::Mapping(merged_map)
+                }
+                // Child wins for all other combinations (including arrays — replace wholesale).
+                (_, other) => other.clone(),
+            }
+        } else {
+            // Base-only key: include as-is.
+            base_val.clone()
+        };
+
+        result.insert(base_key.clone(), merged_val);
+    }
+
+    // Phase 2: append child-only keys in child order.
+    for (child_key, child_val) in child {
+        let serde_yaml_ng::Value::String(key_str) = child_key else {
+            continue;
+        };
+        if RESERVED.contains(&key_str.as_str()) {
+            continue;
+        }
+        // Skip keys already added from base.
+        if result.contains_key(child_key) {
+            continue;
+        }
+        result.insert(child_key.clone(), child_val.clone());
+    }
+
+    Ok(result)
+}
+
+/// Build a scope from a pre-merged `Mapping` and runtime variable overrides.
+///
+/// Used by the template inheritance path after `deep_merge_yaml` has already
+/// excluded reserved keys (`imports`, `type`, `extends`). The mapping is pure
+/// value data — no reserved-key handling needed here.
+///
+/// Runtime vars are applied LAST so precedence is: base < child < runtime (F7).
+fn build_scope_from_merged_mapping(
+    mapping: &serde_yaml_ng::Mapping,
+    runtime_vars: &HashMap<String, Value>,
+) -> Result<Scope, MdsError> {
+    let mut scope = Scope::new();
+
+    for (key, val) in mapping {
+        let serde_yaml_ng::Value::String(key_str) = key else {
+            continue;
+        };
+        let value = Value::from_yaml(val.clone())?;
+        scope.set_var(key_str, value);
+    }
+
+    // Runtime vars override everything (base < child < runtime, F7, decision #3).
+    for (key, value) in runtime_vars {
+        scope.set_var(key, value.clone());
+    }
+
+    Ok(scope)
 }
 
 /// Validate that all named exports refer to defined functions or the special `"prompt"` export.
@@ -2794,6 +2947,679 @@ mod tests {
         assert!(
             serialized.span.is_some(),
             "extends error should have a span"
+        );
+    }
+
+    // ── Phase 3: deep_merge_yaml unit tests ───────────────────────────────────
+
+    fn mapping(pairs: &[(&str, serde_yaml_ng::Value)]) -> serde_yaml_ng::Mapping {
+        let mut m = serde_yaml_ng::Mapping::new();
+        for (k, v) in pairs {
+            m.insert(serde_yaml_ng::Value::String(k.to_string()), v.clone());
+        }
+        m
+    }
+
+    fn str_val(s: &str) -> serde_yaml_ng::Value {
+        serde_yaml_ng::Value::String(s.to_string())
+    }
+
+    fn seq_val(items: &[serde_yaml_ng::Value]) -> serde_yaml_ng::Value {
+        serde_yaml_ng::Value::Sequence(items.to_vec())
+    }
+
+    fn map_val(pairs: &[(&str, serde_yaml_ng::Value)]) -> serde_yaml_ng::Value {
+        serde_yaml_ng::Value::Mapping(mapping(pairs))
+    }
+
+    #[test]
+    fn deep_merge_yaml_nested_key_by_key() {
+        // Both base and child have a nested Mapping at the same key → recursively merged.
+        let base = mapping(&[(
+            "outer",
+            map_val(&[("base_only", str_val("keep")), ("shared", str_val("base"))]),
+        )]);
+        let child = mapping(&[(
+            "outer",
+            map_val(&[("shared", str_val("child")), ("child_only", str_val("new"))]),
+        )]);
+        let result = deep_merge_yaml(&base, &child, 0).expect("deep merge should succeed");
+        let outer = match result.get("outer").expect("outer key present") {
+            serde_yaml_ng::Value::Mapping(m) => m.clone(),
+            other => panic!("expected Mapping, got {other:?}"),
+        };
+        assert_eq!(
+            outer.get("base_only"),
+            Some(&str_val("keep")),
+            "base-only key survives"
+        );
+        assert_eq!(
+            outer.get("shared"),
+            Some(&str_val("child")),
+            "child overrides shared key"
+        );
+        assert_eq!(
+            outer.get("child_only"),
+            Some(&str_val("new")),
+            "child-only key added"
+        );
+    }
+
+    #[test]
+    fn deep_merge_yaml_child_leaf_override() {
+        // Scalar in child replaces scalar in base.
+        let base = mapping(&[("a", str_val("base")), ("b", str_val("base_b"))]);
+        let child = mapping(&[("a", str_val("child"))]);
+        let result = deep_merge_yaml(&base, &child, 0).expect("merge ok");
+        assert_eq!(
+            result.get("a"),
+            Some(&str_val("child")),
+            "child overrides base scalar"
+        );
+        assert_eq!(
+            result.get("b"),
+            Some(&str_val("base_b")),
+            "base-only key preserved"
+        );
+    }
+
+    #[test]
+    fn deep_merge_yaml_base_only_key_survives() {
+        // Key present only in base must appear in the merged output.
+        let base = mapping(&[("only_base", str_val("value")), ("shared", str_val("x"))]);
+        let child = mapping(&[("shared", str_val("y"))]);
+        let result = deep_merge_yaml(&base, &child, 0).expect("merge ok");
+        assert_eq!(
+            result.get("only_base"),
+            Some(&str_val("value")),
+            "base-only key survives"
+        );
+        assert_eq!(
+            result.get("shared"),
+            Some(&str_val("y")),
+            "shared key = child wins"
+        );
+    }
+
+    #[test]
+    fn deep_merge_yaml_array_wholesale_replace() {
+        // Arrays are replaced wholesale — no element-level merge.
+        let base = mapping(&[("tags", seq_val(&[str_val("a"), str_val("b")]))]);
+        let child = mapping(&[("tags", seq_val(&[str_val("c")]))]);
+        let result = deep_merge_yaml(&base, &child, 0).expect("merge ok");
+        assert_eq!(
+            result.get("tags"),
+            Some(&seq_val(&[str_val("c")])),
+            "child array replaces base array wholesale"
+        );
+    }
+
+    #[test]
+    fn deep_merge_yaml_reserved_keys_excluded() {
+        // imports, type, extends must be excluded from the merged output.
+        let base = mapping(&[
+            ("imports", seq_val(&[])),
+            ("type", str_val("mds")),
+            ("extends", str_val("./parent.mds")),
+            ("real_key", str_val("keep")),
+        ]);
+        let child = mapping(&[
+            ("imports", seq_val(&[])),
+            ("type", str_val("mds")),
+            ("extends", str_val("./other.mds")),
+            ("child_key", str_val("added")),
+        ]);
+        let result = deep_merge_yaml(&base, &child, 0).expect("merge ok");
+        assert!(result.get("imports").is_none(), "imports must be excluded");
+        assert!(result.get("type").is_none(), "type must be excluded");
+        assert!(result.get("extends").is_none(), "extends must be excluded");
+        assert_eq!(result.get("real_key"), Some(&str_val("keep")));
+        assert_eq!(result.get("child_key"), Some(&str_val("added")));
+    }
+
+    #[test]
+    fn deep_merge_yaml_key_order_base_then_child() {
+        // Base keys come first, then child-only keys, preserving base key order (A6).
+        let base = mapping(&[("a", str_val("1")), ("b", str_val("2"))]);
+        let child = mapping(&[("c", str_val("3")), ("a", str_val("a_child"))]);
+        let result = deep_merge_yaml(&base, &child, 0).expect("merge ok");
+        let keys: Vec<&str> = result
+            .iter()
+            .filter_map(|(k, _)| {
+                if let serde_yaml_ng::Value::String(s) = k {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // Expected order: a (from base), b (from base), c (child-only appended)
+        assert_eq!(keys, ["a", "b", "c"], "key order: base-then-child (A6)");
+        assert_eq!(
+            result.get("a"),
+            Some(&str_val("a_child")),
+            "shared key = child wins"
+        );
+    }
+
+    #[test]
+    fn deep_merge_yaml_depth_cap_succeeds_at_cap() {
+        // Build a nested mapping exactly MAX_FRONTMATTER_MERGE_DEPTH deep.
+        // The call at depth=0 with nesting of cap levels should succeed (cap is the limit check,
+        // we need cap+1 to exceed it).
+        let cap = MAX_FRONTMATTER_MERGE_DEPTH;
+        // Build a base mapping nested cap levels deep, then call with depth=0.
+        // The deepest merge call will be at depth=cap (cap nested recursive calls), which
+        // should still succeed because the check is `depth > cap`.
+        fn nested_map(depth: usize, cap: usize) -> serde_yaml_ng::Mapping {
+            let mut m = serde_yaml_ng::Mapping::new();
+            if depth < cap {
+                m.insert(
+                    serde_yaml_ng::Value::String("n".to_string()),
+                    serde_yaml_ng::Value::Mapping(nested_map(depth + 1, cap)),
+                );
+            } else {
+                m.insert(
+                    serde_yaml_ng::Value::String("leaf".to_string()),
+                    serde_yaml_ng::Value::String("base".to_string()),
+                );
+            }
+            m
+        }
+        let deep_base = nested_map(0, cap);
+        // Child has same structure with a different leaf
+        let mut deep_child_inner = serde_yaml_ng::Mapping::new();
+        deep_child_inner.insert(
+            serde_yaml_ng::Value::String("leaf".to_string()),
+            serde_yaml_ng::Value::String("child".to_string()),
+        );
+        // We don't need child to be as deep — the deepest base map merged with
+        // an empty child at depth=cap still succeeds.
+        let result = deep_merge_yaml(&deep_base, &serde_yaml_ng::Mapping::new(), 0);
+        assert!(result.is_ok(), "depth=cap should succeed: {result:?}");
+    }
+
+    #[test]
+    fn deep_merge_yaml_depth_cap_plus_one_errors() {
+        // Calling deep_merge_yaml with depth = MAX_FRONTMATTER_MERGE_DEPTH + 1 must
+        // return mds::resource_limit (P4, no stack overflow).
+        let base = serde_yaml_ng::Mapping::new();
+        let child = serde_yaml_ng::Mapping::new();
+        let result = deep_merge_yaml(&base, &child, MAX_FRONTMATTER_MERGE_DEPTH + 1);
+        assert!(result.is_err(), "depth cap+1 must error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("resource limit") || msg.contains("depth"),
+            "error should mention resource limit or depth: {msg}"
+        );
+    }
+
+    // ── Phase 3: integration tests via compile_virtual ────────────────────────
+
+    #[test]
+    fn f6_deep_frontmatter_merge_nested_object() {
+        // F6: nested key merged key-by-key; child leaf overrides; base-only key visible.
+        let base = concat!(
+            "---\n",
+            "config:\n",
+            "  model: gpt-4\n",
+            "  temperature: 0.7\n",
+            "base_only: \"from base\"\n",
+            "---\n",
+            "@block content:\n",
+            "model={config.model} temp={config.temperature} base={base_only}\n",
+            "@end\n",
+        );
+        let child = concat!(
+            "---\n",
+            "config:\n",
+            "  temperature: 0.3\n",
+            "  extra: added\n",
+            "---\n",
+            "@extends \"./base.mds\"\n",
+            "@block content:\n",
+            "model={config.model} temp={config.temperature} extra={config.extra} base={base_only}\n",
+            "@end\n",
+        );
+        let files = [("base.mds", base), ("child.mds", child)];
+        let result = compile_virtual(&files, "child.mds").expect("F6: deep merge should compile");
+        assert!(
+            result.contains("model=gpt-4"),
+            "base-only nested key visible: {result}"
+        );
+        assert!(
+            result.contains("temp=0.3"),
+            "child override applied: {result}"
+        );
+        assert!(
+            result.contains("extra=added"),
+            "child-only nested key visible: {result}"
+        );
+        assert!(
+            result.contains("base=from base"),
+            "base top-level key visible: {result}"
+        );
+    }
+
+    #[test]
+    fn f6_deep_frontmatter_merge_array_wholesale_replace() {
+        // F6/decision #7: arrays in frontmatter are replaced wholesale, not merged.
+        let base = concat!(
+            "---\n",
+            "tools:\n",
+            "  - python\n",
+            "  - rust\n",
+            "---\n",
+            "@block content:\n",
+            "@for tool in tools:\n",
+            "{tool}\n",
+            "@end\n",
+            "@end\n",
+        );
+        let child = concat!(
+            "---\n",
+            "tools:\n",
+            "  - typescript\n",
+            "---\n",
+            "@extends \"./base.mds\"\n",
+        );
+        let files = [("base.mds", base), ("child.mds", child)];
+        let result =
+            compile_virtual(&files, "child.mds").expect("F6: array replace should compile");
+        assert!(
+            result.contains("typescript"),
+            "child array replaces base: {result}"
+        );
+        assert!(
+            !result.contains("python"),
+            "base array not in child result: {result}"
+        );
+        assert!(
+            !result.contains("rust"),
+            "base array not in child result: {result}"
+        );
+    }
+
+    #[test]
+    fn f6_base_only_key_visible_in_child() {
+        // F6: key present only in base FM is visible to child scope.
+        let base = concat!(
+            "---\n",
+            "only_in_base: \"secret_from_base\"\n",
+            "---\n",
+            "@block content:\n",
+            "{only_in_base}\n",
+            "@end\n",
+        );
+        let child = concat!(
+            "---\n",
+            "child_var: hello\n",
+            "---\n",
+            "@extends \"./base.mds\"\n",
+        );
+        let files = [("base.mds", base), ("child.mds", child)];
+        let result = compile_virtual(&files, "child.mds").expect("F6: base-only key visible");
+        assert!(
+            result.contains("secret_from_base"),
+            "base-only key visible in child: {result}"
+        );
+    }
+
+    #[test]
+    fn f7_runtime_override_precedence() {
+        // F7: runtime --set overrides merged frontmatter (base < child < runtime).
+        // We test at the ResolvedModule level to check the rendered body directly,
+        // without the raw_frontmatter fence (which always shows the child's raw FM).
+        let base = concat!(
+            "---\n",
+            "role: base_role\n",
+            "---\n",
+            "@block content:\n",
+            "{role}\n",
+            "@end\n",
+        );
+        let child = concat!(
+            "---\n",
+            "role: child_role\n",
+            "---\n",
+            "@extends \"./base.mds\"\n",
+        );
+        let files = [("base.mds", base), ("child.mds", child)];
+
+        // Without runtime override: child wins over base.
+        {
+            let mut cache = virtual_cache(&files);
+            let resolved = cache
+                .resolve_key("child.mds", &Default::default(), &mut vec![])
+                .expect("F7: should compile without runtime override");
+            let body = resolved.prompt_body.as_deref().unwrap_or("");
+            assert!(
+                body.contains("child_role"),
+                "child overrides base without runtime: body={body}"
+            );
+            assert!(
+                !body.contains("base_role"),
+                "base value not present when child overrides: body={body}"
+            );
+        }
+
+        // With runtime override: runtime wins over child.
+        {
+            let mut runtime_vars = HashMap::new();
+            runtime_vars.insert(
+                "role".to_string(),
+                Value::String("runtime_role".to_string()),
+            );
+            let mut cache = virtual_cache(&files);
+            let resolved = cache
+                .resolve_key("child.mds", &runtime_vars, &mut vec![])
+                .expect("F7: should compile with runtime override");
+            let body = resolved.prompt_body.as_deref().unwrap_or("");
+            assert!(
+                body.contains("runtime_role"),
+                "runtime overrides child: body={body}"
+            );
+            assert!(
+                !body.contains("child_role"),
+                "child value not present when runtime overrides: body={body}"
+            );
+            assert!(
+                !body.contains("base_role"),
+                "base value not present when runtime overrides: body={body}"
+            );
+        }
+    }
+
+    #[test]
+    fn f8_base_default_block_use_base_fm_alias() {
+        // F8: a base default block can use a function from a base frontmatter import alias.
+        // Base has `imports: [{path: ./shared.mds, as: shared}]` in its FM.
+        // Base default block uses {shared.greeting("World")} interpolation.
+        let shared = "@define greeting(name):\nHello {name}!\n@end\n";
+        let base = concat!(
+            "---\n",
+            "imports:\n",
+            "  - path: ./shared.mds\n",
+            "    as: shared\n",
+            "---\n",
+            "@block content:\n",
+            "{shared.greeting(\"World\")}\n",
+            "@end\n",
+        );
+        let child = "@extends \"./base.mds\"\n";
+        let files = [
+            ("shared.mds", shared),
+            ("base.mds", base),
+            ("child.mds", child),
+        ];
+        let result = compile_virtual(&files, "child.mds")
+            .expect("F8: base FM import alias in base default block");
+        assert!(
+            result.contains("Hello World!"),
+            "base FM alias usable in base default block: {result}"
+        );
+    }
+
+    #[test]
+    fn f8_child_can_use_own_fm_import_alias() {
+        // F8: child's own frontmatter import alias is available in its block overrides.
+        let lib = "@define greet(x):\nHi {x}\n@end\n";
+        let base = "@block msg:\nDefault message\n@end\n";
+        let child = concat!(
+            "---\n",
+            "imports:\n",
+            "  - path: ./lib.mds\n",
+            "    as: lib\n",
+            "---\n",
+            "@extends \"./base.mds\"\n",
+            "@block msg:\n",
+            "{lib.greet(\"child\")}\n",
+            "@end\n",
+        );
+        let files = [("lib.mds", lib), ("base.mds", base), ("child.mds", child)];
+        let result =
+            compile_virtual(&files, "child.mds").expect("F8: child FM import alias in child block");
+        assert!(
+            result.contains("Hi child"),
+            "child FM alias usable in child block override: {result}"
+        );
+    }
+
+    #[test]
+    fn f8_duplicate_alias_base_and_child_error() {
+        // F8/ADR-014: same alias in both base and child frontmatter imports → mds::name_collision.
+        let lib = "@define foo():\nfoo\n@end\n";
+        let base = concat!(
+            "---\n",
+            "imports:\n",
+            "  - path: ./lib.mds\n",
+            "    as: mylib\n",
+            "---\n",
+            "@block content:\n",
+            "base content\n",
+            "@end\n",
+        );
+        let child = concat!(
+            "---\n",
+            "imports:\n",
+            "  - path: ./lib.mds\n",
+            "    as: mylib\n",
+            "---\n",
+            "@extends \"./base.mds\"\n",
+        );
+        let files = [("lib.mds", lib), ("base.mds", base), ("child.mds", child)];
+        let result = compile_virtual(&files, "child.mds");
+        assert!(result.is_err(), "duplicate alias base+child must error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("mylib") || msg.contains("name") || msg.contains("collision"),
+            "error should mention the colliding alias: {msg}"
+        );
+    }
+
+    #[test]
+    fn a6_determinism_double_compile_byte_identical() {
+        // A6: compiling the same multi-level chain twice produces byte-identical output.
+        let a = concat!(
+            "---\n",
+            "x: 1\n",
+            "y: 2\n",
+            "---\n",
+            "@block content:\n",
+            "{x},{y}\n",
+            "@end\n",
+        );
+        let b = concat!(
+            "---\n",
+            "y: 99\n",
+            "z: 3\n",
+            "---\n",
+            "@extends \"./a.mds\"\n",
+        );
+        let c = concat!("---\n", "z: 100\n", "---\n", "@extends \"./b.mds\"\n",);
+        let files = [("a.mds", a), ("b.mds", b), ("c.mds", c)];
+        let result1 = compile_virtual(&files, "c.mds").expect("A6 first compile");
+        let result2 = compile_virtual(&files, "c.mds").expect("A6 second compile");
+        assert_eq!(
+            result1, result2,
+            "A6: double compile must be byte-identical"
+        );
+    }
+
+    #[test]
+    fn a6_for_loop_over_deep_merged_fm_stable_order() {
+        // A6: @for over a deep-merged object iterates in stable base-then-child key order.
+        // The base has keys a, b in its labels object; child adds key c.
+        // deep_merge produces labels with keys a, b, c in that order (base-then-child).
+        // MDS uses @for k, v in obj: for objects.
+        let base = concat!(
+            "---\n",
+            "labels:\n",
+            "  a: \"first\"\n",
+            "  b: \"second\"\n",
+            "---\n",
+            "@block content:\n",
+            "@for k, v in labels:\n",
+            "{k}={v};\n",
+            "@end\n",
+            "@end\n",
+        );
+        // child extends base and specifies all three keys in labels (a+b from base merged
+        // with c from child → a, b first from base position, c appended by child order).
+        let child = concat!(
+            "---\n",
+            "labels:\n",
+            "  a: \"first\"\n",
+            "  b: \"second\"\n",
+            "  c: \"third\"\n",
+            "---\n",
+            "@extends \"./base.mds\"\n",
+        );
+        let files = [("base.mds", base), ("child.mds", child)];
+        let result = compile_virtual(&files, "child.mds").expect("A6 stable key order");
+        // Verify all three keys present
+        assert!(result.contains("a=first"), "key a present: {result}");
+        assert!(result.contains("b=second"), "key b present: {result}");
+        assert!(result.contains("c=third"), "key c present: {result}");
+        // Verify order: a before b before c
+        let pos_a = result.find("a=first").expect("a in result");
+        let pos_b = result.find("b=second").expect("b in result");
+        let pos_c = result.find("c=third").expect("c in result");
+        assert!(
+            pos_a < pos_b,
+            "a before b (stable base-then-child order): {result}"
+        );
+        assert!(
+            pos_b < pos_c,
+            "b before c (stable base-then-child order): {result}"
+        );
+    }
+
+    #[test]
+    fn p4_fm_merge_depth_bound_resource_limit() {
+        // P4: deep_merge_yaml at depth > MAX_FRONTMATTER_MERGE_DEPTH returns mds::resource_limit.
+        let result = deep_merge_yaml(
+            &serde_yaml_ng::Mapping::new(),
+            &serde_yaml_ng::Mapping::new(),
+            MAX_FRONTMATTER_MERGE_DEPTH + 1,
+        );
+        assert!(result.is_err(), "P4: depth cap+1 must error");
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("resource limit") || msg.contains("depth"),
+            "P4: error should be resource_limit: {msg}"
+        );
+    }
+
+    #[test]
+    fn regression_non_extending_file_fm_unchanged() {
+        // Regression: a non-extending file with frontmatter imports still works identically.
+        // This confirms the standalone build_scope_from_frontmatter path is unchanged.
+        let lib = "@define greet(name):\nHello {name}!\n@end\n";
+        let standalone = concat!(
+            "---\n",
+            "imports:\n",
+            "  - path: ./lib.mds\n",
+            "    as: lib\n",
+            "greeting: World\n",
+            "---\n",
+            "{lib.greet(greeting)}\n",
+        );
+        let files = [("lib.mds", lib), ("standalone.mds", standalone)];
+        let result = compile_virtual(&files, "standalone.mds")
+            .expect("regression: standalone FM imports should still work");
+        assert!(
+            result.contains("Hello World!"),
+            "standalone FM import regression: {result}"
+        );
+    }
+
+    #[test]
+    fn f4_child_emits_only_own_raw_frontmatter() {
+        // decision #7 / output emission: extending child emits only its own raw_frontmatter.
+        // Base frontmatter is an input to scope, not output.
+        let base = concat!(
+            "---\n",
+            "base_secret: only_in_base\n",
+            "---\n",
+            "@block content:\n",
+            "{base_secret}\n",
+            "@end\n",
+        );
+        let child = concat!(
+            "---\n",
+            "child_var: in_child\n",
+            "---\n",
+            "@extends \"./base.mds\"\n",
+        );
+        let files = [("base.mds", base), ("child.mds", child)];
+        let mut cache = virtual_cache(&files);
+        let mut warnings = vec![];
+
+        let child_resolved = cache
+            .resolve_key("child.mds", &Default::default(), &mut warnings)
+            .expect("output emission test should compile");
+
+        // raw_frontmatter in the resolved module is the child's raw FM (not base's).
+        if let Some(ref raw_fm) = child_resolved.raw_frontmatter {
+            assert!(
+                !raw_fm.contains("base_secret"),
+                "child output must NOT contain base frontmatter: {raw_fm}"
+            );
+            assert!(
+                raw_fm.contains("child_var"),
+                "child output must contain child's own frontmatter: {raw_fm}"
+            );
+        }
+        // The compiled output uses the merged scope (base_secret visible to blocks)
+        let output = child_resolved.prompt_body.as_deref().unwrap_or("");
+        assert!(
+            output.contains("only_in_base"),
+            "merged scope used: base var rendered in block: {output}"
+        );
+    }
+
+    #[test]
+    fn f3_multilevel_deep_merge_transitive() {
+        // A←B←C: deep merge is transitive: A's FM < B's FM < C's FM.
+        // A has a=1, b=2. B overrides b=99, adds c=3. C overrides c=100.
+        // Result: a=1 (from A), b=99 (from B), c=100 (from C).
+        let a = concat!(
+            "---\n",
+            "a: \"from_a\"\n",
+            "b: \"from_a_b\"\n",
+            "---\n",
+            "@block content:\n",
+            "a={a} b={b} c={c}\n",
+            "@end\n",
+        );
+        let b = concat!(
+            "---\n",
+            "b: \"from_b\"\n",
+            "c: \"from_b_c\"\n",
+            "---\n",
+            "@extends \"./a.mds\"\n",
+        );
+        let c = concat!(
+            "---\n",
+            "c: \"from_c\"\n",
+            "---\n",
+            "@extends \"./b.mds\"\n",
+        );
+        let files = [("a.mds", a), ("b.mds", b), ("c.mds", c)];
+        let result = compile_virtual(&files, "c.mds").expect("F3 multilevel deep merge");
+        assert!(
+            result.contains("a=from_a"),
+            "a=from_a (root only): {result}"
+        );
+        assert!(
+            result.contains("b=from_b"),
+            "b=from_b (B overrides A): {result}"
+        );
+        assert!(
+            result.contains("c=from_c"),
+            "c=from_c (C overrides B): {result}"
         );
     }
 }
