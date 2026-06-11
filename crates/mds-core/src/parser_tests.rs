@@ -2010,25 +2010,37 @@ fn parse_extends_sets_module_extends_none_for_standalone() {
 
 #[test]
 fn parse_extends_stray_not_first_directive_rejected() {
-    // @extends appearing after a non-whitespace node → syntax error.
+    // E1: @extends appearing after a non-whitespace node → mds::extends (not mds::syntax).
     let src = "Some text.\n@extends \"./base.mds\"\n";
     let tokens = tokenize(src, "test.mds").unwrap();
     let result = parse_with_ctx(&tokens, "", "");
-    assert!(result.is_err(), "stray @extends must be rejected");
-    let msg = result.unwrap_err().to_string();
+    let err = result.expect_err("stray @extends must be rejected");
+    let serialized = err.serialize();
+    assert_eq!(
+        serialized.code, "mds::extends",
+        "E1: stray @extends must map to mds::extends, got: {}",
+        serialized.code
+    );
     assert!(
-        msg.contains("@extends") || msg.contains("first"),
-        "error should explain placement rule: {msg}"
+        err.to_string().contains("first") || err.to_string().contains("@extends"),
+        "error should explain placement rule: {}",
+        err
     );
 }
 
 #[test]
 fn parse_extends_duplicate_rejected() {
-    // Two @extends directives → syntax error.
+    // E2: Two @extends directives → mds::extends (not mds::syntax).
     let src = "@extends \"./a.mds\"\n@extends \"./b.mds\"\n";
     let tokens = tokenize(src, "test.mds").unwrap();
     let result = parse_with_ctx(&tokens, "", "");
-    assert!(result.is_err(), "duplicate @extends must be rejected");
+    let err = result.expect_err("duplicate @extends must be rejected");
+    let serialized = err.serialize();
+    assert_eq!(
+        serialized.code, "mds::extends",
+        "E2: duplicate @extends must map to mds::extends, got: {}",
+        serialized.code
+    );
 }
 
 #[test]
@@ -2047,4 +2059,52 @@ fn parse_extends_unquoted_path_rejected() {
     let tokens = tokenize(src, "test.mds").unwrap();
     let result = parse_with_ctx(&tokens, "", "");
     assert!(result.is_err(), "unquoted path must be rejected");
+}
+
+// ── A3: Error-code mapping consolidation ─────────────────────────────────────
+
+/// A3 — parser-layer error codes (E1 / E2 / E9):
+///
+/// | Error | Trigger | Expected code |
+/// |-------|---------|---------------|
+/// | E1 | @extends not first directive | mds::extends |
+/// | E2 | two @extends declarations | mds::extends |
+/// | E9 | @block nested inside @block | mds::syntax |
+#[test]
+fn a3_parser_error_code_table() {
+    // E1: stray @extends → mds::extends
+    {
+        let src = "Some text.\n@extends \"./base.mds\"\n";
+        let tokens = tokenize(src, "test.mds").unwrap();
+        let err = parse_with_ctx(&tokens, "", "").unwrap_err();
+        assert_eq!(
+            err.serialize().code,
+            "mds::extends",
+            "A3 E1: stray @extends must be mds::extends"
+        );
+    }
+
+    // E2: double @extends → mds::extends (second one is stray)
+    {
+        let src = "@extends \"./a.mds\"\n@extends \"./b.mds\"\n";
+        let tokens = tokenize(src, "test.mds").unwrap();
+        let err = parse_with_ctx(&tokens, "", "").unwrap_err();
+        assert_eq!(
+            err.serialize().code,
+            "mds::extends",
+            "A3 E2: double @extends must be mds::extends"
+        );
+    }
+
+    // E9: @block nested inside @block → mds::syntax (correct per spec; NOT mds::extends)
+    {
+        let src = "@block outer:\n@block inner:\nbody\n@end\n@end\n";
+        let tokens = tokenize(src, "test.mds").unwrap();
+        let err = parse_with_ctx(&tokens, "", "").unwrap_err();
+        assert_eq!(
+            err.serialize().code,
+            "mds::syntax",
+            "A3 E9: @block nesting must be mds::syntax"
+        );
+    }
 }

@@ -4027,4 +4027,91 @@ mod tests {
             messages[0].content
         );
     }
+
+    // ── A3: Error-code mapping consolidation (resolver layer) ─────────────────
+    //
+    // Authoritative table for resolver-level errors:
+    //
+    // | ID | Trigger                               | Expected code          |
+    // |----|---------------------------------------|------------------------|
+    // | E3 | stray child content                   | mds::extends           |
+    // | E4 | unknown override block                | mds::extends           |
+    // | E5 | circular inheritance (A→B→A, self)    | mds::circular_import   |
+    // | E7 | @block name collides with @define     | mds::name_collision    |
+    // | E8 | duplicate @block in same module       | mds::name_collision    |
+    //
+    // E1/E2/E9 are covered in parser_tests.rs (a3_parser_error_code_table).
+
+    #[test]
+    fn a3_resolver_error_code_table() {
+        // E3: stray child content → mds::extends
+        {
+            let base = "@block body:\nHello\n@end\n";
+            let child = "@extends \"./base.mds\"\nStray text here.\n";
+            let files = [("base.mds", base), ("child.mds", child)];
+            let err = compile_virtual(&files, "child.mds")
+                .expect_err("A3 E3: stray child content should error");
+            assert_eq!(
+                err.serialize().code,
+                "mds::extends",
+                "A3 E3: stray child content must be mds::extends, got: {:?}",
+                err.serialize()
+            );
+        }
+
+        // E4: unknown block override → mds::extends
+        {
+            let base = "@block body:\nHello\n@end\n";
+            let child = "@extends \"./base.mds\"\n@block nonexistent:\nOverride\n@end\n";
+            let files = [("base.mds", base), ("child.mds", child)];
+            let err = compile_virtual(&files, "child.mds")
+                .expect_err("A3 E4: unknown override should error");
+            assert_eq!(
+                err.serialize().code,
+                "mds::extends",
+                "A3 E4: unknown block override must be mds::extends, got: {:?}",
+                err.serialize()
+            );
+        }
+
+        // E5: circular inheritance (A→B→A) → mds::circular_import
+        {
+            let a = "@extends \"./b.mds\"\n@block body:\nFrom A\n@end\n";
+            let b = "@extends \"./a.mds\"\n@block body:\nFrom B\n@end\n";
+            let files = [("a.mds", a), ("b.mds", b)];
+            let err = compile_virtual(&files, "a.mds")
+                .expect_err("A3 E5: circular inheritance should error");
+            assert_eq!(
+                err.serialize().code,
+                "mds::circular_import",
+                "A3 E5: circular inheritance must be mds::circular_import, got: {:?}",
+                err.serialize()
+            );
+        }
+
+        // E7: @block name collides with @define name → mds::name_collision
+        {
+            let src = "@define body():\ncontent\n@end\n@block body:\nbody text\n@end\n";
+            let err =
+                crate::compile_str(src).expect_err("A3 E7: @block/@define collision should error");
+            assert_eq!(
+                err.serialize().code,
+                "mds::name_collision",
+                "A3 E7: @block vs @define must be mds::name_collision, got: {:?}",
+                err.serialize()
+            );
+        }
+
+        // E8: duplicate @block in same module → mds::name_collision
+        {
+            let src = "@block body:\nfirst\n@end\n@block body:\nsecond\n@end\n";
+            let err = crate::compile_str(src).expect_err("A3 E8: duplicate @block should error");
+            assert_eq!(
+                err.serialize().code,
+                "mds::name_collision",
+                "A3 E8: duplicate @block must be mds::name_collision, got: {:?}",
+                err.serialize()
+            );
+        }
+    }
 }

@@ -341,13 +341,12 @@ impl Parser<'_> {
             ));
         }
 
-        // Reject a stray @extends that is not at the leading position.
+        // Reject a stray @extends that is not at the leading position (E1/E2).
         // parse_extends_if_present already consumed the leading @extends (if any);
         // any @extends that reaches parse_directive is by definition misplaced.
-        // TODO(phase5): map to mds::extends error code
         if trimmed == "@extends" || trimmed.starts_with("@extends ") {
-            return Err(MdsError::syntax(
-                "@extends must be the first directive after frontmatter (found it after other content)",
+            return Err(MdsError::extends_error(
+                "@extends must be the first directive after frontmatter — only one @extends is allowed and it must appear before any other content",
             ));
         }
 
@@ -548,7 +547,7 @@ impl Parser<'_> {
     /// `@message` and `@define` (decision #9).
     fn parse_block(&mut self, rest: &str, offset: usize) -> Result<Node, MdsError> {
         // Reject @block inside other blocks (top-level only — decision #5).
-        // TODO(phase5): map to mds::extends error code for nesting violations
+        // E9: @block-nesting → mds::syntax (correct; not mds::extends — per error-code mapping).
         if self.inside_block {
             return Err(MdsError::syntax(
                 "@block cannot be nested inside another @block",
