@@ -1305,6 +1305,34 @@ mod tests {
     }
 
     #[test]
+    fn scan_imports_extends_before_fm_and_body() {
+        // A2: the @extends base path must appear FIRST — before frontmatter imports
+        // AND before body imports — so a dependency scanner sees the base as the
+        // leading dependency. Exercises the ordering branch with all three present.
+        // scan_imports is a static parse-only scan (no child-only-blocks enforcement),
+        // so a top-level @import alongside @extends exercises the ordering directly.
+        let source = concat!(
+            "---\n",
+            "imports:\n",
+            "  - path: ./fm_lib.mds\n",
+            "---\n",
+            "@extends \"./base.mds\"\n",
+            "@import \"./body_lib.mds\"\n",
+            "Hello!\n",
+        );
+        let paths = scan_imports(source).expect("should succeed");
+        assert_eq!(
+            paths,
+            vec![
+                "./base.mds".to_string(),
+                "./fm_lib.mds".to_string(),
+                "./body_lib.mds".to_string(),
+            ],
+            "A2: extends path must precede frontmatter and body imports"
+        );
+    }
+
+    #[test]
     fn scan_imports_fm_dedup() {
         // Same path in frontmatter and body → deduplicated, fm path wins (first insertion).
         let source = concat!(

@@ -42,20 +42,24 @@ use crate::value::Value;
 /// # Cache-poisoning invariant (A1)
 ///
 /// A file may be resolved as a skeleton base before it is also compiled as a standalone
-/// entry point (or vice-versa). The cache key is the normalized file key in both cases,
-/// so the SAME `ResolvedModule` entry serves both roles.  A skeleton-only entry has
-/// `prompt_body = None`; a standalone compile also sets `prompt_body`. To avoid poisoning
-/// a future standalone compile with a skeleton entry that has no `prompt_body`, we store
-/// ALL fields on every entry. When called as a skeleton base, `process_module_skeleton`
-/// returns a full `ResolvedModule` (with `prompt_body = None`). A later standalone call
-/// for the same key will find a cache hit and return that entry as-is.  Because
-/// `process_module` (non-skeleton path) also produces `prompt_body = None` when the body
-/// evaluates to empty/whitespace-only, a `None` prompt_body is not *solely* a skeleton
-/// signal — callers must not rely on `prompt_body.is_none()` to mean "skeleton cache hit".
-/// The caching rule is: first resolution wins; subsequent hits return the cached entry.
-/// This is correct for skeleton bases whose `effective_skeleton` / `effective_blocks` are
-/// also used by extending children via Arc-sharing, and for standalone modules whose full
-/// compilation is cached.
+/// entry point (or vice-versa). The cache key is the normalized file key in both cases.
+/// A skeleton entry (`is_skeleton = true`) is collect-only: `process_module_skeleton`
+/// does NOT run standalone validate/evaluate, so `prompt_body = None`. A standalone entry
+/// (`is_skeleton = false`) carries the rendered `prompt_body`.
+///
+/// `prompt_body.is_none()` is NOT a reliable skeleton signal — `process_module`
+/// (non-skeleton) also yields `None` for an empty/whitespace-only body. The explicit
+/// `is_skeleton` flag is the discriminator.
+///
+/// Caching rules:
+/// - Standalone-first then base: the standalone entry already has everything a base needs
+///   (`effective_skeleton` / `effective_blocks` are populated on every entry), so extending
+///   children reuse it via Arc-sharing. The cache hit returns it as-is.
+/// - Skeleton-first then standalone: returning the skeleton entry would yield EMPTY output
+///   for the base (it was never evaluated). `resolve_by_key` detects `is_skeleton` on the
+///   cache hit, performs the full compile, and upgrades the entry in place — reusing the
+///   skeleton's `effective_skeleton` / `effective_blocks` Arcs so descendants that already
+///   `Arc::clone`'d them keep pointer-identity.
 #[derive(Debug, Clone)]
 pub struct ResolvedModule {
     pub(crate) functions: HashMap<String, Arc<FunctionDef>>,
@@ -75,6 +79,16 @@ pub struct ResolvedModule {
     // Used by Phase 3 (reserved-key exclusion for the `extends` key) and Phase 5 (diagnostics).
     #[allow(dead_code)]
     pub(crate) extends_path: Option<String>,
+    /// `true` when this entry was produced by `process_module_skeleton` (resolved as an
+    /// `@extends` base: collect-only, NO standalone validate/evaluate, `prompt_body = None`).
+    ///
+    /// Cache-poisoning guard (A1): a skeleton entry must NOT be returned to a caller that
+    /// needs a fully-rendered standalone module. `resolve_by_key` detects this flag on a
+    /// cache hit and upgrades the entry to a full compile, so the SAME file resolved first
+    /// as a base and later as a standalone target yields correct output. (Messages mode
+    /// never caches its entry module — `resolve_key_messages` always re-computes — so the
+    /// poisoning window only exists on the text/`resolve_by_key` path.)
+    pub(crate) is_skeleton: bool,
 }
 
 /// Maximum import depth to prevent stack overflow from deeply chained imports.
@@ -189,9 +203,16 @@ impl ModuleCache {
         runtime_vars: &HashMap<String, Value>,
         warnings: &mut Vec<String>,
     ) -> Result<Arc<ResolvedModule>, MdsError> {
-        // Step 1: cache hit — return immediately without reading.
+        // Step 1: cache hit — return immediately without reading, UNLESS the cached
+        // entry is a skeleton (resolved as an @extends base: collect-only, never
+        // validated/evaluated standalone, prompt_body = None). A skeleton entry must
+        // not be served to a standalone-compile caller — that would yield empty output
+        // for the base. Fall through to a full compile and upgrade the entry in place,
+        // reusing the skeleton's Arcs so existing descendants keep Arc-sharing (A1).
         if let Some(cached) = self.modules.get(key) {
-            return Ok(Arc::clone(cached));
+            if !cached.is_skeleton {
+                return Ok(Arc::clone(cached));
+            }
         }
 
         // Step 2: cycle detection — must happen before we push to `resolving`.
@@ -230,7 +251,18 @@ impl ModuleCache {
         // Safety-critical LIFO invariant: a mismatched pop would silently corrupt
         // cycle-detection state and allow unbounded recursion.
         let popped = self.resolving.pop();
-        let resolved = Self::check_lifo_pop(resolved, popped, key)?;
+        let mut resolved = Self::check_lifo_pop(resolved, popped, key)?;
+
+        // A1 upgrade: if a skeleton entry was previously cached for this key, reuse its
+        // Arc-shared skeleton/blocks so descendants that already Arc::clone'd them keep
+        // pointer-identity. The freshly compiled `resolved` carries the correct
+        // prompt_body (the skeleton-vs-standalone difference is solely validate/evaluate).
+        if let Some(prev) = self.modules.get(key) {
+            if prev.is_skeleton {
+                resolved.effective_skeleton = Arc::clone(&prev.effective_skeleton);
+                resolved.effective_blocks = prev.effective_blocks.clone();
+            }
+        }
 
         // Wrap in Arc, store in cache, and return a clone of the Arc (O(1)).
         let key_owned = key.to_string();
@@ -575,6 +607,7 @@ impl ModuleCache {
             effective_blocks,
             frontmatter_values,
             extends_path: None,
+            is_skeleton: false,
         })
     }
 
@@ -618,46 +651,11 @@ impl ModuleCache {
         // ── Step 3b: child-only-blocks check ─────────────────────────────────
         // Every top-level node in module.body must be Node::Block or whitespace-only Text.
         // (Frontmatter and @extends are already split out of module.body by the parser.)
-        for node in &module.body {
-            match node {
-                Node::Block(_) => {}
-                Node::Text(t) if t.text.trim().is_empty() => {}
-                other => {
-                    let offset = node_offset(other);
-                    let line_len = ctx.source[offset..]
-                        .find('\n')
-                        .unwrap_or(ctx.source[offset..].len());
-                    return Err(MdsError::extends_error_at(
-                        "an extending template may contain only @block overrides",
-                        ctx.file_str,
-                        ctx.source,
-                        offset,
-                        line_len,
-                    ));
-                }
-            }
-        }
+        check_child_only_blocks(&module.body, ctx)?;
 
         // ── Step 3c: build effective_blocks from base, applying child overrides ──
         // Clone base's map first (diamond-inheritance safe — never mutate cached base).
-        let mut effective_blocks = base.effective_blocks.clone();
-
-        for node in &module.body {
-            if let Node::Block(child_block) = node {
-                // Decision #6 / F4/E4: child may only override blocks declared by the root base.
-                if !effective_blocks.contains_key(&child_block.name) {
-                    return Err(MdsError::extends_error_at(
-                        "only the root template may declare @block placeholders",
-                        ctx.file_str,
-                        ctx.source,
-                        child_block.offset,
-                        child_block.name.len(),
-                    ));
-                }
-                // Most-derived wins.
-                effective_blocks.insert(child_block.name.clone(), Arc::new(child_block.clone()));
-            }
-        }
+        let effective_blocks = apply_block_overrides(&base.effective_blocks, &module.body, ctx)?;
 
         // effective_skeleton is the root ancestor's body (Arc::clone — O(1), no deep-copy, P1).
         let effective_skeleton = Arc::clone(&base.effective_skeleton);
@@ -805,6 +803,7 @@ impl ModuleCache {
             effective_blocks,
             frontmatter_values,
             extends_path: Some(ext.path),
+            is_skeleton: false,
         })
     }
 
@@ -909,41 +908,10 @@ impl ModuleCache {
                     })?;
 
                 // Child-only-blocks check for this intermediate base (3b).
-                for node in &module.body {
-                    match node {
-                        Node::Block(_) => {}
-                        Node::Text(t) if t.text.trim().is_empty() => {}
-                        other => {
-                            let offset = node_offset(other);
-                            let line_len = ctx.source[offset..]
-                                .find('\n')
-                                .unwrap_or(ctx.source[offset..].len());
-                            return Err(MdsError::extends_error_at(
-                                "an extending template may contain only @block overrides",
-                                ctx.file_str,
-                                ctx.source,
-                                offset,
-                                line_len,
-                            ));
-                        }
-                    }
-                }
+                check_child_only_blocks(&module.body, ctx)?;
 
-                let mut eff_blocks = grandparent.effective_blocks.clone();
-                for node in &module.body {
-                    if let Node::Block(b) = node {
-                        if !eff_blocks.contains_key(&b.name) {
-                            return Err(MdsError::extends_error_at(
-                                "only the root template may declare @block placeholders",
-                                ctx.file_str,
-                                ctx.source,
-                                b.offset,
-                                b.name.len(),
-                            ));
-                        }
-                        eff_blocks.insert(b.name.clone(), Arc::new(b.clone()));
-                    }
-                }
+                let eff_blocks =
+                    apply_block_overrides(&grandparent.effective_blocks, &module.body, ctx)?;
 
                 // Phase 3: transitive FM merge: grandparent.frontmatter_values < own_fm_values.
                 // This produces the accumulated FM for this intermediate base, so a leaf
@@ -966,17 +934,17 @@ impl ModuleCache {
             } else {
                 // Root base: own body is the skeleton; blocks seeded from own @block declarations.
                 let eff_skeleton: Arc<[Node]> = Arc::from(module.body.as_slice());
-                let eff_blocks = block_names
+                let eff_blocks = module
+                    .body
                     .iter()
-                    .filter_map(|name| {
-                        module.body.iter().find_map(|n| {
-                            if let Node::Block(b) = n {
-                                if b.name == *name {
-                                    return Some((name.clone(), Arc::new(b.clone())));
-                                }
-                            }
+                    .filter_map(|n| {
+                        if let Node::Block(b) = n {
+                            block_names
+                                .contains(&b.name)
+                                .then(|| (b.name.clone(), Arc::new(b.clone())))
+                        } else {
                             None
-                        })
+                        }
                     })
                     .collect::<IndexMap<_, _>>();
                 // Root base: frontmatter_values is its own raw FM (no ancestors).
@@ -993,6 +961,7 @@ impl ModuleCache {
             effective_blocks,
             frontmatter_values,
             extends_path: module.extends.map(|e| e.path),
+            is_skeleton: true,
         })
     }
 
@@ -1881,6 +1850,63 @@ fn node_offset(node: &Node) -> usize {
 ///
 /// Linear O(S+B) pass: S = skeleton nodes, B = total block body nodes.
 /// Between-block spacing (Text nodes) is preserved verbatim (decision #9, F11).
+/// Validate that every body node is a `@block` or whitespace-only `@text`.
+///
+/// Called for both leaf children and intermediate bases in `@extends` chains.
+/// Returns `Err(mds::extends)` on the first stray node.
+fn check_child_only_blocks(body: &[Node], ctx: &ModuleCtx<'_>) -> Result<(), MdsError> {
+    for node in body {
+        match node {
+            Node::Block(_) => {}
+            Node::Text(t) if t.text.trim().is_empty() => {}
+            other => {
+                let offset = node_offset(other);
+                let line_len = ctx.source[offset..]
+                    .find('\n')
+                    .unwrap_or(ctx.source[offset..].len());
+                return Err(MdsError::extends_error_at(
+                    "an extending template may contain only @block overrides",
+                    ctx.file_str,
+                    ctx.source,
+                    offset,
+                    line_len,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Clone `parent_blocks` and apply the `@block` overrides from `body`.
+///
+/// Clones the parent map first so the cached parent entry is never mutated
+/// (diamond-inheritance correctness, F5).  Returns `Err(mds::extends)` if a
+/// child block name is not present in the parent map (E4: unknown override).
+fn apply_block_overrides(
+    parent_blocks: &IndexMap<String, Arc<BlockNode>>,
+    body: &[Node],
+    ctx: &ModuleCtx<'_>,
+) -> Result<IndexMap<String, Arc<BlockNode>>, MdsError> {
+    let mut blocks = parent_blocks.clone();
+    for node in body {
+        if let Node::Block(b) = node {
+            // Decision #6 / F4/E4: child may only override blocks declared by the root base.
+            if !blocks.contains_key(&b.name) {
+                return Err(MdsError::extends_error_at(
+                    "only the root template may declare @block placeholders",
+                    ctx.file_str,
+                    ctx.source,
+                    b.offset,
+                    b.name.len(),
+                ));
+            }
+            // Most-derived wins.
+            blocks.insert(b.name.clone(), Arc::new(b.clone()));
+        }
+    }
+    Ok(blocks)
+}
+
 fn splice_skeleton(
     skeleton: &[Node],
     effective_blocks: &IndexMap<String, Arc<BlockNode>>,
@@ -2605,6 +2631,54 @@ mod tests {
                 .unwrap_or("")
                 .contains("Override."),
             "cache2: child should use override block"
+        );
+    }
+
+    #[test]
+    fn f2_cache_nonpoisoning_skeleton_then_standalone_reverse_order() {
+        // A1 (reverse of f2_cache_nonpoisoning_base_then_child): resolve the CHILD first,
+        // which caches the base as a SKELETON (prompt_body=None, never validated/evaluated
+        // standalone). A subsequent standalone resolve of that SAME base from the SAME cache
+        // must NOT return the empty skeleton entry — it must render the base's own defaults.
+        let base = "---\nrole: default\n---\nYou are a {role}.\n@block b:\nBody.\n@end\n";
+        let child = concat!(
+            "---\nrole: override\n---\n",
+            "@extends \"./base.mds\"\n",
+            "@block b:\nOverride.\n@end\n",
+        );
+        let files = [("base.mds", base), ("child.mds", child)];
+        let mut cache = virtual_cache(&files);
+        let mut w = vec![];
+
+        // Resolve child FIRST — this caches base as a SKELETON (prompt_body=None).
+        let child_out = cache.resolve_key("child.mds", &Default::default(), &mut w);
+        assert!(
+            child_out.is_ok(),
+            "child should compile: {:?}",
+            child_out.err()
+        );
+
+        // Now resolve base standalone from the SAME cache — must render its own defaults.
+        let base_out = cache
+            .resolve_key("base.mds", &Default::default(), &mut w)
+            .expect("base standalone should compile");
+        let body = base_out.prompt_body.as_deref().unwrap_or("<NONE>");
+        assert!(
+            body.contains("You are a default.") && body.contains("Body."),
+            "A1: base standalone after skeleton-cache must render its defaults, got: {body:?}"
+        );
+
+        // Arc-sharing must survive the upgrade: the child (resolved earlier from the skeleton)
+        // and the upgraded standalone base must still share the same effective_skeleton Arc.
+        let child_again = cache
+            .resolve_key("child.mds", &Default::default(), &mut w)
+            .expect("child re-resolve");
+        assert!(
+            Arc::ptr_eq(
+                &child_again.effective_skeleton,
+                &base_out.effective_skeleton
+            ),
+            "A1: skeleton upgrade must preserve Arc-sharing with descendants"
         );
     }
 
