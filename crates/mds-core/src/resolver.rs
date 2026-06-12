@@ -4134,6 +4134,73 @@ mod tests {
         );
     }
 
+    // ── P5b: deep chain WITH frontmatter — perf guard for FM accumulation ────
+    //
+    // P5 (above) builds a 32-level chain with EMPTY frontmatter on every level,
+    // giving zero coverage of the O(N²) per-level FM accumulation
+    // (process_module_skeleton:~916-927).  This test adds frontmatter keys at
+    // every level so the deep_merge_yaml path is exercised on each resolution.
+    // Wall-clock bound mirrors P5 — both must complete in < 2 s.
+    //
+    // This converts an untested assumption into a guarded one.  The merge algorithm
+    // is NOT changed here (that is deferred tech debt); this test pins correctness
+    // and performance of the current implementation.
+
+    #[test]
+    fn p5b_deep_chain_32_levels_with_frontmatter_under_2s() {
+        let depth = 32usize;
+        let mut files: Vec<(String, String)> = Vec::new();
+
+        // Root base: a few FM keys + @block with content.
+        let root_src = concat!(
+            "---\n",
+            "base_key: root_value\n",
+            "shared_key: from_root\n",
+            "---\n",
+            "@block content:\n",
+            "Root content.\n",
+            "@end\n",
+        )
+        .to_string();
+        files.push((format!("file{depth}.mds"), root_src));
+
+        // Each intermediate level adds/overrides one FM key and extends the next.
+        for i in (0..depth).rev() {
+            let src = format!(
+                "---\nlevel_{i}_key: value_{i}\nshared_key: from_{i}\n---\n\
+                 @extends \"./file{}.mds\"\n",
+                i + 1
+            );
+            files.push((format!("file{i}.mds"), src));
+        }
+
+        let file_refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        let start = std::time::Instant::now();
+        // file0.mds is a child with no @block override — uses root content default.
+        let result = compile_virtual(&file_refs, "file0.mds");
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_ok(),
+            "P5b: 32-level chain with FM failed: {:?}",
+            result.err()
+        );
+        let output = result.unwrap();
+        assert!(
+            output.contains("Root content."),
+            "P5b: default block content must appear in output: {output:?}"
+        );
+        assert!(
+            elapsed.as_secs() < 2,
+            "P5b: 32-level FM chain took {:?}, must be < 2 s",
+            elapsed
+        );
+    }
+
     // ── P6: PF-004 oversized base rejected in BOTH modes ─────────────────────
 
     #[test]
