@@ -441,9 +441,7 @@ impl ModuleCache {
             // ── Step 3f (messages): validate final_body before evaluate ──────
             // Mirrors text-mode process_module_extends and the standalone messages path —
             // both call validator::validate before evaluate (avoids PF-004: alternate-path
-            // bypass of a check present on the primary path).  Safe to add here because
-            // Task 1 made compute_line_column boundary-safe, so cross-source span offsets
-            // can no longer panic.  (Anti-pattern: "Calling evaluate before validate".)
+            // bypass of a check present on the primary path).
             validator::validate(&final_body, &mut scope, ctx.file_str, ctx.source)?;
 
             // Check @message presence against final_body (NOT module.body): a base whose
@@ -2682,59 +2680,62 @@ mod tests {
         );
     }
 
-    // ── Task-1 regression: compute_line_column UTF-8 boundary-safe ──────────
+    // ── UTF-8 boundary safety: cross-source span offsets yield None, not panic ─
     //
-    // Root cause: `compute_line_column` previously panicked with
-    // "byte index N is not a char boundary" when a base-template span offset
-    // (computed against the base source) was reused against the child source
-    // containing multibyte UTF-8 characters.  After the fix the error is
-    // returned gracefully (e.g. mds::undefined_var) without a panic.
+    // `compute_line_column` previously panicked with "byte index N is not a char
+    // boundary" when a base-template span offset (computed against the base source)
+    // was reused against the child source containing multibyte UTF-8 characters.
+    // After the fix the error is returned gracefully (e.g. mds::undefined_var).
 
-    #[test]
-    fn task1_compile_virtual_no_panic_multibyte_child_source() {
-        // Base has an undefined variable — validation will fire a span.
-        // The base offset lands at byte 16 in the base source ("@block content:\n"
-        // = 16 bytes, then "{undefined_var}").  The child source contains a
-        // multibyte character (Japanese ああ = 6 bytes each = 6 bytes for "あ").
-        // If the base offset (16) is used against the child source, byte 16 may
-        // land mid-codepoint → previously panicked, now returns graceful error.
+    /// Returns (base_src, child_src, base_key) for the multibyte UTF-8 fixture.
+    ///
+    /// Base has an undefined variable so validation fires a span at byte 16
+    /// ("@block content:\n" = 16 bytes, then "{undefined_var}").  The child's
+    /// filesystem key contains a multibyte character (Japanese "あ" = 3 bytes
+    /// each), so byte 16 may land mid-codepoint in the child source — this was
+    /// the panic trigger.
+    fn utf8_boundary_extends_fixture() -> (&'static str, &'static str, &'static str) {
         let base = "@block content:\n{undefined_var}\n@end\n";
         let child = "@extends \"./ああb.mds\"\n";
-        // Note: the filesystem key must match the path literal in the child.
-        let files = [("ああb.mds", base), ("child.mds", child)];
-        let result = compile_virtual(&files, "child.mds");
-        // Must NOT panic — any Err is acceptable (undefined_var or similar).
-        assert!(
-            result.is_err(),
-            "task1: should error (undefined variable), not succeed: {:?}",
-            result.ok()
-        );
-        let err = result.unwrap_err();
-        let code = err.serialize().code;
-        // The error must be a graceful mds:: error, not a panic.
+        // The key must match the path literal in the child source.
+        let base_key = "ああb.mds";
+        (base, child, base_key)
+    }
+
+    fn assert_graceful_mds_error(code: &str, context: &str) {
         assert!(
             code.starts_with("mds::"),
-            "task1: expected an mds:: error code, got: {code}"
+            "{context}: expected an mds:: error code, got: {code}"
         );
     }
 
     #[test]
-    fn task1_check_virtual_no_panic_multibyte_child_source() {
+    fn utf8_boundary_compile_virtual_no_panic() {
+        let (base, child, base_key) = utf8_boundary_extends_fixture();
+        let files = [(base_key, base), ("child.mds", child)];
+        let result = compile_virtual(&files, "child.mds");
+        assert!(
+            result.is_err(),
+            "utf8_boundary compile: should error (undefined variable), not succeed: {:?}",
+            result.ok()
+        );
+        assert_graceful_mds_error(
+            &result.unwrap_err().serialize().code,
+            "utf8_boundary compile",
+        );
+    }
+
+    #[test]
+    fn utf8_boundary_check_virtual_no_panic() {
         // Same scenario via check_virtual — validates only, no evaluate.
-        let base = "@block content:\n{undefined_var}\n@end\n";
-        let child = "@extends \"./ああb.mds\"\n";
-        let files = [("ああb.mds", base), ("child.mds", child)];
+        let (base, child, base_key) = utf8_boundary_extends_fixture();
+        let files = [(base_key, base), ("child.mds", child)];
         let result = check_virtual(&files, "child.mds");
         assert!(
             result.is_err(),
-            "task1 check_virtual: should error (undefined variable), not succeed"
+            "utf8_boundary check: should error (undefined variable), not succeed"
         );
-        let err = result.unwrap_err();
-        let code = err.serialize().code;
-        assert!(
-            code.starts_with("mds::"),
-            "task1 check_virtual: expected an mds:: error code, got: {code}"
-        );
+        assert_graceful_mds_error(&result.unwrap_err().serialize().code, "utf8_boundary check");
     }
 
     // ── F3: multi-level chain A←B←C, most-derived wins ──────────────────────
@@ -4292,16 +4293,16 @@ mod tests {
         );
     }
 
-    // ── Task-2 parity: messages-mode @extends path validates final_body ─────
+    // ── PF-004 parity: messages-mode @extends path validates final_body ────────
     //
-    // PF-004: a check on the primary path (text-mode process_module_extends calls
+    // A check on the primary path (text-mode process_module_extends calls
     // validator::validate before evaluate) must not be absent on the parallel path
     // (messages-mode @extends branch).  This test verifies that an @extends child
     // compiled in messages mode whose base-default block references an undefined var
     // produces the SAME error (mds::undefined_var) as text mode does.
 
     #[test]
-    fn task2_messages_mode_extends_validates_final_body_parity() {
+    fn pf004_messages_mode_extends_validates_final_body_parity() {
         // Base: @block with @message inside, and an undefined variable.
         // Child: @extends the base, provides no override (uses default).
         let base = concat!(
@@ -4316,20 +4317,20 @@ mod tests {
 
         // Text mode: must error with mds::undefined_var
         let text_err =
-            compile_virtual(&files, "child.mds").expect_err("task2 text: undefined var must error");
+            compile_virtual(&files, "child.mds").expect_err("text: undefined var must error");
         let text_code = text_err.serialize().code;
         assert_eq!(
             text_code, "mds::undefined_var",
-            "task2 text: expected mds::undefined_var, got: {text_code}"
+            "text: expected mds::undefined_var, got: {text_code}"
         );
 
         // Messages mode: must produce the SAME error (avoids PF-004 parallel-path divergence).
         let messages_err = compile_messages_virtual_helper(&files, "child.mds")
-            .expect_err("task2 messages: undefined var must error");
+            .expect_err("messages: undefined var must error");
         let messages_code = messages_err.serialize().code;
         assert_eq!(
             messages_code, "mds::undefined_var",
-            "task2 messages: expected mds::undefined_var (same as text mode), got: {messages_code}"
+            "messages: expected mds::undefined_var (same as text mode), got: {messages_code}"
         );
     }
 
