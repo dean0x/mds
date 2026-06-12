@@ -10,6 +10,8 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import os from 'node:os';
+import fs from 'node:fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -589,5 +591,70 @@ describe('compileMessages', () => {
     assert.equal(result.messages[0].role, 'system');
     assert.equal(result.messages[1].role, 'user');
     assert.equal(result.messages[2].role, 'assistant');
+  });
+});
+
+// ── Template inheritance tests (@extends / @block) ────────────────────────────
+
+describe('template inheritance', () => {
+  // Helper: create a temp directory with base.mds + child.mds; compile child via compileFile.
+  function withInheritanceFixtures(baseContent, childContent, fn) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mds-inh-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'base.mds'), baseContent);
+      const childPath = path.join(dir, 'child.mds');
+      fs.writeFileSync(childPath, childContent);
+      return fn(childPath, dir);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // INH-1: compileFile round-trip — skeleton + override, base in dependencies
+  test('INH-1: compileFile inherits base skeleton and applies child overrides', () => {
+    const baseContent =
+      '---\nrole: general\n---\nYou are a {role} assistant.\n@block body:\nDefault body.\n@end\n';
+    const childContent =
+      '---\nrole: specialist\n---\n@extends "./base.mds"\n@block body:\nOverridden body.\n@end\n';
+
+    withInheritanceFixtures(baseContent, childContent, (childPath, dir) => {
+      const result = compileFile(childPath);
+
+      // Output must contain the overridden block and the base skeleton text.
+      assert.ok(
+        result.output.includes('You are a specialist assistant.'),
+        `INH-1: base skeleton text with child role should render; got: ${result.output}`,
+      );
+      assert.ok(
+        result.output.includes('Overridden body.'),
+        `INH-1: overridden block body should render; got: ${result.output}`,
+      );
+      assert.ok(
+        !result.output.includes('Default body.'),
+        `INH-1: base default body must not appear when overridden; got: ${result.output}`,
+      );
+
+      // Base must appear in the dependencies list (A4: shape stable).
+      assert.ok(Array.isArray(result.dependencies), 'INH-1: dependencies must be an array');
+      assert.ok(result.dependencies.length > 0, 'INH-1: dependencies must be non-empty');
+      const hasBase = result.dependencies.some((d) => d.includes('base.mds'));
+      assert.ok(hasBase, `INH-1: base.mds must be in dependencies; got: ${JSON.stringify(result.dependencies)}`);
+
+      // A4: output shape must be {output, warnings, dependencies} — no extra fields.
+      assert.ok(typeof result.output === 'string', 'INH-1 A4: output must be a string');
+      assert.ok(Array.isArray(result.warnings), 'INH-1 A4: warnings must be an array');
+    });
+  });
+
+  // INH-2: error code for extends error is mds::extends
+  test('INH-2: stray @extends produces mds::extends error code', () => {
+    assert.throws(
+      () => compile('Some text.\n@extends "./base.mds"\n'),
+      (err) => {
+        assert.ok(err instanceof Error, 'should be an Error');
+        assert.equal(err.code, 'mds::extends', `expected mds::extends, got: ${err.code}`);
+        return true;
+      },
+    );
   });
 });

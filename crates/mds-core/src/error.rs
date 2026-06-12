@@ -31,14 +31,19 @@ pub struct SerializedError {
 
 /// Compute the 1-indexed line and column (byte-based) for a byte offset in source.
 ///
-/// Returns `None` if `offset` exceeds `source.len()`. Both line and column are
-/// 1-indexed: the very first byte is (1, 1).
+/// Returns `None` if `offset` exceeds `source.len()` OR if `offset` does not fall
+/// on a UTF-8 character boundary. A foreign or stale offset (e.g. one computed
+/// against a different source string — as can occur when a base-template span is
+/// reported against a child source in `@extends` validation) will yield `None`
+/// rather than panicking with "byte index N is not a char boundary".
+///
+/// Both line and column are 1-indexed: the very first byte is (1, 1).
 ///
 /// Column counts bytes from the start of the current line (NOT UTF-16 code units
 /// and NOT Unicode scalar values). This matches the convention used by most
 /// command-line tools and language servers when operating in byte mode.
 fn compute_line_column(source: &str, offset: usize) -> Option<(usize, usize)> {
-    if offset > source.len() {
+    if offset > source.len() || !source.is_char_boundary(offset) {
         return None;
     }
     let mut line = 1usize;
@@ -248,6 +253,20 @@ pub enum MdsError {
     ExportError {
         message: String,
         #[label("export error")]
+        span: Option<SourceSpan>,
+        #[source_code]
+        src: Option<Arc<miette::NamedSource<String>>>,
+    },
+
+    /// Errors in template inheritance (`@extends` / `@block`).
+    ///
+    /// Used for child-only-blocks violations (3b), unknown-override (3c), and
+    /// stray `@extends` directives detected at parse time.
+    #[error("extends error: {message}")]
+    #[diagnostic(code(mds::extends))]
+    Extends {
+        message: String,
+        #[label("template inheritance error")]
         span: Option<SourceSpan>,
         #[source_code]
         src: Option<Arc<miette::NamedSource<String>>>,
@@ -573,6 +592,21 @@ impl MdsError {
         }
     }
 
+    pub(crate) fn extends_error_at(
+        message: impl Into<String>,
+        file: &str,
+        source: &str,
+        offset: usize,
+        len: usize,
+    ) -> Self {
+        let (span, src) = at(file, source, offset, len);
+        MdsError::Extends {
+            message: message.into(),
+            span,
+            src,
+        }
+    }
+
     pub(crate) fn not_mds_file(path: impl Into<String>) -> Self {
         MdsError::NotMdsFile { path: path.into() }
     }
@@ -607,7 +641,8 @@ impl MdsError {
             | MdsError::NameCollision { span, src, .. }
             | MdsError::Recursion { span, src, .. }
             | MdsError::ExportError { span, src, .. }
-            | MdsError::BuiltinError { span, src, .. } => {
+            | MdsError::BuiltinError { span, src, .. }
+            | MdsError::Extends { span, src, .. } => {
                 span.as_ref().map(|ss| {
                     let offset = ss.offset();
                     let length = ss.len();
