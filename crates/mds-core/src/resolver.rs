@@ -545,7 +545,6 @@ impl ModuleCache {
                 module,
                 ext,
                 ctx,
-                is_md,
                 raw_frontmatter,
                 frontmatter_values,
                 warnings,
@@ -579,11 +578,11 @@ impl ModuleCache {
         let prompt_body = evaluate(&module.body, &mut scope, warnings)?;
         let prompt_body = (!prompt_body.trim().is_empty()).then_some(prompt_body);
 
-        // Build effective_skeleton from this module's own body (Arc-shared, no deep-clone, P1).
-        let effective_skeleton: Arc<[Node]> = Arc::from(module.body.as_slice());
-
-        // Build effective_blocks from this module's own @block declarations.
+        // Build effective_blocks first so module.body can be moved into the Arc below.
         let effective_blocks = seed_effective_blocks(&module.body, &block_names);
+
+        // Move module.body into Arc<[Node]> (reuses the Vec allocation, no element clones, P1).
+        let effective_skeleton: Arc<[Node]> = Arc::from(module.body);
 
         Ok(ResolvedModule {
             functions,
@@ -750,13 +749,11 @@ impl ModuleCache {
     ///
     /// Decision #2: base is NEVER validated/evaluated standalone — deferred to leaf.
     /// PF-004: base is read via resolve_by_key_skeleton (FileSystem trait, never std::fs).
-    #[allow(clippy::too_many_arguments)]
     fn process_module_extends(
         &mut self,
         module: crate::ast::Module,
         ext: crate::ast::ExtendsDirective,
         ctx: &ModuleCtx<'_>,
-        _is_md: bool,
         raw_frontmatter: Option<String>,
         frontmatter_values: Option<serde_yaml_ng::Mapping>,
         warnings: &mut Vec<String>,
@@ -919,15 +916,25 @@ impl ModuleCache {
                 )
             } else {
                 // Root base: own body is the skeleton; blocks seeded from own @block declarations.
-                let eff_skeleton: Arc<[Node]> = Arc::from(module.body.as_slice());
+                // Seed blocks first so module.body can be moved into the Arc (no element clones, P1).
                 let eff_blocks = seed_effective_blocks(&module.body, &block_names);
+                let eff_skeleton: Arc<[Node]> = Arc::from(module.body);
                 // Root base: frontmatter_values is its own raw FM (no ancestors).
                 (eff_skeleton, eff_blocks, own_fm_values)
             };
 
+        // A1 invariant: is_skeleton=true implies prompt_body=None (evaluate was never called).
+        // Pinned with debug_assert so a future refactor that accidentally adds evaluate on this path
+        // is caught immediately in debug builds. (Full enum split is tech debt.)
+        let prompt_body: Option<String> = None;
+        debug_assert!(
+            prompt_body.is_none(),
+            "A1 invariant: skeleton entry (is_skeleton=true) must have prompt_body=None"
+        );
+
         Ok(ResolvedModule {
             functions,
-            prompt_body: None,
+            prompt_body,
             raw_frontmatter,
             has_explicit_exports,
             explicit_exports,
@@ -1551,7 +1558,12 @@ fn deep_merge_yaml(
         )));
     }
 
-    // Reserved keys excluded from the merged output.
+    // Reserved keys excluded from the merged output (must not propagate as FM variables).
+    // SYNC POINT: if you add a key here, audit `strip_reserved_keys` in lib.rs —
+    // that function strips `type` and `imports` from raw frontmatter output but intentionally
+    // omits `extends` (it is a directive token, not an output FM key).
+    // The two lists serve different purposes and are NOT identical by design; keep this comment
+    // and the strip_reserved_keys comment in sync when either list changes.
     const RESERVED: &[&str] = &["imports", "type", "extends"];
 
     let mut result = serde_yaml_ng::Mapping::new();
@@ -1758,6 +1770,11 @@ fn attach_import_span(
     // Compute the span length as the number of bytes from `offset` to the
     // end of the `@import` line (not including the newline character itself),
     // so the whole directive is underlined.
+    debug_assert!(
+        source.is_char_boundary(offset),
+        "attach_import_span: offset {offset} is not a UTF-8 char boundary in source (len={})",
+        source.len()
+    );
     let line_len = source[offset..]
         .find('\n')
         .unwrap_or(source[offset..].len());
@@ -1859,6 +1876,12 @@ fn check_child_only_blocks(body: &[Node], ctx: &ModuleCtx<'_>) -> Result<(), Mds
             Node::Text(t) if t.text.trim().is_empty() => {}
             other => {
                 let offset = node_offset(other);
+                debug_assert!(
+                    ctx.source.is_char_boundary(offset),
+                    "check_child_only_blocks: offset {offset} is not a UTF-8 char boundary \
+                     in source (len={})",
+                    ctx.source.len()
+                );
                 let line_len = ctx.source[offset..]
                     .find('\n')
                     .unwrap_or(ctx.source[offset..].len());
@@ -1917,7 +1940,18 @@ fn splice_skeleton(
                 // Inline the effective body (edges already stripped at parse time).
                 result.extend(eff_block.body.clone());
             } else {
-                // Unknown block name (shouldn't happen after validation, but safe fallback).
+                // Every block name in the skeleton must be present in effective_blocks:
+                // apply_block_overrides starts from base.effective_blocks which is seeded
+                // from the root base's own @block declarations — the same skeleton we're
+                // iterating here.  A missing name is a compiler bug, not user error.
+                debug_assert!(
+                    false,
+                    "splice_skeleton: block '{}' in skeleton has no effective_blocks entry — \
+                     this is a compiler bug (apply_block_overrides was not called for this skeleton)",
+                    skeleton_block.name
+                );
+                // Release build: fall back to the skeleton's own default body so output is
+                // never silently empty (silent fallback is better than a panic in production).
                 result.extend(skeleton_block.body.clone());
             }
         } else {
@@ -3016,12 +3050,7 @@ mod tests {
 
     #[test]
     fn e5_circular_inheritance_a_to_b_to_a() {
-        // A extends B, B extends A → circular
-        let a = "@extends \"./b.mds\"\n@block b:\nA override.\n@end\n";
-        let b_content = "@block b:\nB default.\n@end\n";
-        // Note: we can only test the cycle detected case; the above won't compile
-        // because a.mds extends b.mds and b.mds is a root base (not extending).
-        // For a true A→B→A cycle:
+        // Two-file mutual cycle: a2.mds extends b2.mds, b2.mds extends a2.mds.
         let a2 = "@extends \"./b2.mds\"\n";
         let b2 = "@extends \"./a2.mds\"\n";
         let files2 = [("a2.mds", a2), ("b2.mds", b2)];
@@ -3044,9 +3073,6 @@ mod tests {
             serialized_self.code, "mds::circular_import",
             "E5: self-extension should surface as mds::circular_import: {serialized_self:?}"
         );
-
-        // Unused variables — just to avoid dead_code warnings in test
-        let _ = (a, b_content, files2);
     }
 
     // ── E5: uses valid circular detection with files that have blocks ─────────
@@ -3096,12 +3122,13 @@ mod tests {
         let err = compile_virtual(&file_refs, "file0.mds")
             .expect_err("E6: depth > 64 should produce an error");
         let code = err.serialize().code;
-        // Should be import error or resource_limit (depth exceeded)
-        assert!(
-            code == "mds::import"
-                || code == "mds::resource_limit"
-                || code == "mds::circular_import",
-            "E6: depth-exceeded error should be import/resource_limit/circular_import: {code}"
+        // check_import_depth fires when resolving.len() >= MAX_IMPORT_DEPTH (64) and
+        // returns MdsError::import_error(...), code = "mds::import".  The linear chain
+        // has no cycles and no frontmatter, so circular_import and resource_limit cannot
+        // be triggered here.
+        assert_eq!(
+            code, "mds::import",
+            "E6: depth-exceeded error should be mds::import (check_import_depth): {code}"
         );
     }
 

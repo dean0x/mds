@@ -429,6 +429,14 @@ pub fn check_str_collecting_warnings(
 /// Strips:
 /// - Top-level `type: mds` lines (all three YAML quoting styles).
 /// - Top-level `imports:` key and its continuation lines (indented child lines).
+///
+/// SYNC POINT: `deep_merge_yaml` in resolver.rs has a RESERVED list `["imports", "type", "extends"]`
+/// that excludes keys from inherited FM variables.  The two lists serve different purposes and are
+/// intentionally not identical: `deep_merge_yaml::RESERVED` prevents keys from propagating as FM
+/// variables; `strip_reserved_keys` removes keys from raw YAML before re-emitting output.  `extends`
+/// appears only in the merge list (it is a directive token, not an output FM key) and is intentionally
+/// absent here.  Keep this note and the SYNC POINT comment in `deep_merge_yaml` in sync when either
+/// list changes.
 fn strip_reserved_keys(raw: &str) -> Option<String> {
     let mut filtered = String::with_capacity(raw.len());
     let mut in_imports_block = false;
